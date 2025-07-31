@@ -1,17 +1,22 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // const target = b.standardTargetOptions(.{});
+    // const optimize = b.standardOptimizeOption(.{});
 
-    // Creating libbpf zig module
+    const bpf_gen = buildBpfGen(b);
+
+    b.installArtifact(bpf_gen);
+}
+
+fn buildBpfGen(b: *std.Build) *std.Build.Step.Compile {
     const libz_dep = b.dependency("libz", .{
-        .target = target,
-        .optimize = optimize,
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
     });
     const libelf_dep = b.dependency("libelf", .{
-        .target = target,
-        .optimize = optimize,
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
     });
     const libbpf = b.dependency("libbpf", .{});
     const bpf = b.addLibrary(.{
@@ -60,15 +65,16 @@ pub fn build(b: *std.Build) void {
     bpf.linkLibrary(libz_dep.artifact("z"));
     bpf.linkLibrary(libelf_dep.artifact("elf"));
 
-    const exe = b.addExecutable(.{
-        .name = "pside",
+    const BpfGen = b.addExecutable(.{
+        .name = "BpfGen",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
+            .root_source_file = b.path("src/BpfGen/BpfGen.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
         }),
     });
-    exe.linkLibrary(bpf);
+    BpfGen.linkLibrary(bpf);
+    BpfGen.root_module.addIncludePath(libbpf.path("src"));
 
-    b.installArtifact(exe);
+    return BpfGen;
 }
