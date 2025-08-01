@@ -22,7 +22,15 @@ pub fn main() !void {
     const elf = c.elf_begin(elf_file.handle, c.ELF_C_READ, null) orelse return error.ElfCantOpen;
     defer _ = c.elf_end(elf);
 
+    try GetMaps(bpf_obj.?);
     try PraseMapRelocations(elf);
+}
+
+fn GetMaps(bpf: *c.struct_bpf_object) !void {
+    var m: ?*c.struct_bpf_map = null;
+    while (c.bpf_object__next_map(bpf, m)) |map| : (m = map) {
+        std.debug.print("name={s}, type={s}\n", .{ c.bpf_map__name(map), @tagName(@as(std.os.linux.BPF.MapType, @enumFromInt(c.bpf_map__type(map)))) });
+    }
 }
 
 fn PraseMapRelocations(elf: *c.struct_Elf) !void {
@@ -38,15 +46,38 @@ fn PraseMapRelocations(elf: *c.struct_Elf) !void {
         if (!std.mem.startsWith(u8, name, ".rel")) continue;
 
         const target_scan = c.elf_getscn(elf, section_header.*.sh_info) orelse continue;
-        const target_scetion_header = c.elf64_getshdr(target_scan) orelse continue;
-        if ((target_scetion_header.*.sh_flags & c.SHF_EXECINSTR) == 0) continue;
+        const target_section_header = c.elf64_getshdr(target_scan) orelse continue;
+        if ((target_section_header.*.sh_flags & c.SHF_EXECINSTR) == 0) continue;
 
         const data = c.elf_getdata(scan, null) orelse continue;
-        const relocations = @as([*]c.Elf64_Rel, @alignCast(@ptrCast(data.*.d_buf)))[0 .. section_header.*.sh_size / section_header.*.sh_entsize];
+        const relocation_len = section_header.*.sh_size / section_header.*.sh_entsize;
+        const relocations = @as([*]c.Elf64_Rel, @alignCast(@ptrCast(data.*.d_buf)))[0..relocation_len];
+
+        const symbol_table = c.elf_getscn(elf, section_header.*.sh_link) orelse return error.MalformedElf;
+        const symbol_table_section_header = c.elf64_getshdr(symbol_table) orelse return error.MalformedElf;
+        std.debug.assert(symbol_table_section_header.*.sh_entsize == @sizeOf(c.Elf64_Sym));
+        const symbol_len = symbol_table_section_header.*.sh_size / symbol_table_section_header.*.sh_entsize;
+        const symbol_data = c.elf_getdata(symbol_table, null) orelse return error.MalformedElf;
+        const symbols = @as([*]c.Elf64_Sym, @alignCast(@ptrCast(symbol_data.*.d_buf)))[0..symbol_len];
+
+        const name_table = c.elf_getscn(elf, symbol_table_section_header.*.sh_link) orelse return error.MalformedElf;
+        const name_data = c.elf_getdata(name_table, null) orelse return error.MalformedElf;
+        const names = @as([*:0]const u8, @alignCast(@ptrCast(name_data.*.d_buf)))[0..name_data.*.d_size];
 
         for (relocations) |relocation| {
+            const sym_index: usize = @intCast(c.ELF64_R_SYM(relocation.r_info));
+            if (sym_index >= symbols.len) return error.MalformedElf;
+
+            const symbol = symbols[sym_index];
+            const symbol_name_offset: usize = @intCast(symbol.st_name);
+            const symbol_name = if (symbol_name_offset < names.len)
+                std.mem.span(@as([*:0]const u8, @ptrCast(names.ptr)) + symbol_name_offset)
+            else
+                "unknown";
+
             const idx = relocation.r_offset / @sizeOf(std.os.linux.BPF.Insn);
-            std.debug.print("Relocation {s} offset=0x{x} (insn {d})\n", .{ name, relocation.r_offset, idx });
+
+            std.debug.print("Relocation {s} offset=0x{x}, symbol={s}, insn {d}\n", .{ name[4..], relocation.r_offset, symbol_name, idx });
         }
     }
 }

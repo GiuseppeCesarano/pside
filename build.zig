@@ -70,7 +70,7 @@ fn buildBpfGen(b: *std.Build) *std.Build.Step.Compile {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/BpfGen/BpfGen.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .ReleaseSafe,
         }),
     });
     BpfGen.linkLibrary(bpf);
