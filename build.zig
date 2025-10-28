@@ -49,7 +49,6 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
     _ = write_files.addCopyFile(b.path("src/kernel_module/boot.c"), "boot.c");
     _ = write_files.addCopyFile(b.path("src/kernel_module/Makefile"), "Makefile");
-    _ = write_files.addCopyFile(b.path("src/kernel_module/pside.h"), "pside.h");
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 
