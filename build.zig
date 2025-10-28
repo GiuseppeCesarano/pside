@@ -43,7 +43,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Buil
             .code_model = .kernel,
             .stack_protector = false,
             .stack_check = false,
-            .pic = true,
+            .pic = false,
             .red_zone = false,
             .omit_frame_pointer = false,
             .error_tracing = false,
@@ -56,9 +56,9 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
 
     const write_files = b.addWriteFiles();
-    _ = write_files.add(cmd_name, "");
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
     _ = write_files.addCopyFile(b.path("src/kernel_module/boot.c"), "boot.c");
+    _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", "" ++
         "obj-m += pside.o\n" ++
