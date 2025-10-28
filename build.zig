@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .whitelist = &.{.{ .os_tag = .linux }} });
-    _ = b.standardOptimizeOption(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
     const kernel_module_files = createKernelModuleFiles(b, createZigKernelObj(b, target));
 
@@ -13,6 +13,16 @@ pub fn build(b: *std.Build) void {
     } else {
         installCompiledKernelModuleObject(b, kernel_module_files);
     }
+
+    const executable = b.addExecutable(.{
+        .name = "pside",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(executable);
 }
 
 fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
@@ -45,10 +55,22 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Buil
 fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
 
-    const write_files = b.addWriteFile(cmd_name, "");
+    const write_files = b.addWriteFiles();
+    _ = write_files.add(cmd_name, "");
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
     _ = write_files.addCopyFile(b.path("src/kernel_module/boot.c"), "boot.c");
-    _ = write_files.addCopyFile(b.path("src/kernel_module/Makefile"), "Makefile");
+    // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
+    _ = write_files.add("Makefile", "" ++
+        "obj-m += pside.o\n" ++
+        "pside-objs := boot.o pside_zig.o\n" ++
+        "\n" ++
+        "PWD := $(CURDIR)\n" ++
+        "\n" ++
+        "all:\n" ++
+        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules\n" ++
+        "\n" ++
+        "clean:\n" ++
+        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n");
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 
