@@ -6,7 +6,8 @@ pub fn build(b: *std.Build) void {
 
     const kernel_module_files = createKernelModuleFiles(b, createZigKernelObj(b, target));
 
-    const is_build_standalone = b.option(bool, "standalone-build", "Make a build which can be distributed without depending on the zig compiler") orelse false;
+    const is_build_standalone = b.option(bool, "standalone-build", "Create a self-contained build folder that can be used" ++
+        "to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
     if (is_build_standalone) {
         installKernelModuleFiles(b, kernel_module_files);
     } else {
