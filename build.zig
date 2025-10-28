@@ -57,12 +57,11 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = write_files.addCopyFile(b.path("src/kernel_module/boot.c"), "boot.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
-    _ = write_files.add("Makefile", "" ++
+    _ = write_files.add("Makefile", b.fmt("" ++
         "obj-m += pside.o\n" ++
-        "pside-objs := boot.o pside_zig.o\n" ++
+        "pside-objs := {s}\n" ++
         "\n" ++
         "PWD := $(CURDIR)\n" ++
         "\n" ++
@@ -70,7 +69,7 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
         "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules\n" ++
         "\n" ++
         "clean:\n" ++
-        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n");
+        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n", .{zig_kernel_obj.out_filename}));
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 
