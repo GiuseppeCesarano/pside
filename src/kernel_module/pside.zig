@@ -1,6 +1,6 @@
 const std = @import("std");
 
-export const __UNIQUE_ID_license linksection(".modinfo") = [_]u8{ 'l', 'i', 'c', 'e', 'n', 's', 'e', '=', 'M', 'I', 'T', 0 };
+export const license linksection(".modinfo") = "license=MIT".*;
 
 extern fn vprintk(fmt: [*:0]const u8) callconv(.c) void;
 
