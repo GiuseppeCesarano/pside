@@ -1,9 +1,8 @@
 const std = @import("std");
 
 const KAllocator = struct {
-    extern fn __kmalloc_noprof(c_ulong, c_int) ?*anyopaque;
-    extern fn kfree(*anyopaque) void;
-
+    extern fn c_kmalloc(c_ulong) callconv(.c) ?*anyopaque;
+    extern fn c_kfree(*anyopaque) callconv(.c) void;
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
         .resize = resize,
@@ -19,7 +18,7 @@ const KAllocator = struct {
         // + 1 byte of metadata to save how many bytes we skipped
         //
         // The metadata will be the byte preceding the returned ptr
-        const unaligned_address = @intFromPtr(__kmalloc_noprof(@intCast(len + alignment_bytes), 0xC1) orelse return null);
+        const unaligned_address = @intFromPtr(c_kmalloc(@intCast(len + alignment_bytes)) orelse return null);
         // If the address is already aligned alignForward
         // will not advance and we will not have space for
         // our metadata byte so we need to advance by one
@@ -49,7 +48,7 @@ const KAllocator = struct {
         const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
         const skipped_bytes = (buf_ptr - 1)[0];
 
-        kfree(@ptrCast(buf_ptr - skipped_bytes));
+        c_kfree(@ptrCast(buf_ptr - skipped_bytes));
     }
 };
 
@@ -57,3 +56,14 @@ pub const allocator: std.mem.Allocator = .{
     .ptr = undefined,
     .vtable = &KAllocator.vtable,
 };
+
+extern fn c_printk(msg: [*:0]const u8) callconv(.c) void;
+pub fn print(comptime fmt: []const u8, args: anytype) void {
+    var buf: [64]u8 = undefined;
+    const string = if (@inComptime())
+        std.fmt.comptimePrint(fmt, args)
+    else
+        std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer";
+
+    c_printk(string);
+}

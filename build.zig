@@ -57,11 +57,12 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
+    _ = write_files.addCopyFile(b.path("src/kernel_module/bindings.c"), "bindings.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", b.fmt("" ++
         "obj-m += pside.o\n" ++
-        "pside-objs := {s}\n" ++
+        "pside-objs := bindings.o {s}\n" ++
         "\n" ++
         "PWD := $(CURDIR)\n" ++
         "\n" ++
