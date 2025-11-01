@@ -3,6 +3,7 @@ const std = @import("std");
 const KAllocator = struct {
     extern fn c_kmalloc(c_ulong) callconv(.c) ?*anyopaque;
     extern fn c_kfree(*anyopaque) callconv(.c) void;
+
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
         .resize = resize,
@@ -57,13 +58,27 @@ pub const allocator: std.mem.Allocator = .{
     .vtable = &KAllocator.vtable,
 };
 
-extern fn c_printk(msg: [*:0]const u8) callconv(.c) void;
-pub fn print(comptime fmt: []const u8, args: anytype) void {
-    var buf: [64]u8 = undefined;
-    const string = if (@inComptime())
-        std.fmt.comptimePrint(fmt, args)
-    else
-        std.fmt.bufPrintSentinel(&buf, fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer";
+pub fn LogWithName(comptime module_name: []const u8) type {
+    return struct {
+        extern fn c_pr_err([*:0]const u8) callconv(.c) void;
+        extern fn c_pr_warn([*:0]const u8) callconv(.c) void;
+        extern fn c_pr_info([*:0]const u8) callconv(.c) void;
+        extern fn c_pr_debug([*:0]const u8) callconv(.c) void;
 
-    c_printk(string);
+        pub fn logFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
+            var buf: [64]u8 = undefined;
+            const scoped_fmt = (if (scope == .default) module_name else @tagName(scope)) ++ ": " ++ fmt;
+            const string = if (@inComptime())
+                std.fmt.comptimePrint(scoped_fmt, args)
+            else
+                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer";
+
+            switch (level) {
+                .err => c_pr_err(string),
+                .warn => c_pr_warn(string),
+                .info => c_pr_info(string),
+                .debug => c_pr_debug(string),
+            }
+        }
+    };
 }
