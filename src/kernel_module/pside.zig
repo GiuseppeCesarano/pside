@@ -1,14 +1,16 @@
 const std = @import("std");
 const kernel = @import("kernel.zig");
 
-export const license linksection(".modinfo") = "license=MIT".*;
+export const license linksection(".modinfo") = "license=GPL".*;
 
 pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName("pside").logFn,
 };
 
 export fn init_module() linksection(".init.text") c_int {
-    std.log.warn("Hi kernel from {s}\n", .{"Zig"});
+    const start = kernel.getTimeUsec();
+    kernel.delayUsec(5);
+    std.log.warn("Hello from {s}, we waited: {}us\n", .{ "Zig", kernel.getTimeUsec() - start - 1 });
     return 0;
 }
 

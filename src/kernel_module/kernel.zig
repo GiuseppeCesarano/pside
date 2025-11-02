@@ -82,3 +82,13 @@ pub fn LogWithName(comptime module_name: []const u8) type {
         }
     };
 }
+
+extern fn c_udelay(c_ulong) callconv(.c) void;
+pub fn delayUsec(usec: usize) void {
+    c_udelay(usec);
+}
+
+extern fn c_ktime_get_ns() callconv(.c) u64;
+pub fn getTimeUsec() u64 {
+    return @divTrunc(c_ktime_get_ns(), 1000);
+}
