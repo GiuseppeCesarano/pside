@@ -12,14 +12,14 @@ export fn init_module() linksection(".init.text") c_int {
     defer kernel.allocator.free(zig);
     @memcpy(zig, "Zig");
 
-    const start = kernel.time.get.us();
+    const start = kernel.time.now.us();
     kernel.time.delay.us(5);
 
     std.log.warn("Hello from {s}, pid:{}, tid:{} waited: {}us\n", .{
         zig,
         kernel.current_task.pid(),
         kernel.current_task.tid(),
-        kernel.time.get.us() - start,
+        kernel.time.now.us() - start,
     });
 
     return 0;
