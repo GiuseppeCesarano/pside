@@ -8,9 +8,20 @@ pub const std_options: std.Options = .{
 };
 
 export fn init_module() linksection(".init.text") c_int {
+    const zig = kernel.allocator.alloc(u8, 3) catch return -1;
+    defer kernel.allocator.free(zig);
+    @memcpy(zig, "Zig");
+
     const start = kernel.time.get.us();
     kernel.time.delay.us(5);
-    std.log.warn("Hello from {s}, we waited: {}us\n", .{ "Zig", kernel.time.get.us() - start - 1 });
+
+    std.log.warn("Hello from {s}, pid:{}, tid:{} waited: {}us\n", .{
+        zig,
+        kernel.current_task.pid(),
+        kernel.current_task.tid(),
+        kernel.time.get.us() - start,
+    });
+
     return 0;
 }
 

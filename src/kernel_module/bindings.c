@@ -1,6 +1,8 @@
 #include <linux/delay.h>
 #include <linux/ktime.h>
+#include <linux/pid.h>
 #include <linux/printk.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 
@@ -13,8 +15,10 @@ void *c_kmalloc(size_t);
 void c_kfree(void *);
 void c_ndelay(unsigned long);
 void c_udelay(unsigned long);
-void c_sdelay(unsigned long);
+void c_mdelay(unsigned long);
 u64 c_ktime_get_ns(void);
+pid_t c_pid(void);
+pid_t c_tid(void);
 
 // Implementations
 void c_pr_err(const char *msg) { pr_err("%s", msg); }
@@ -27,3 +31,5 @@ void c_ndelay(unsigned long nsec) { ndelay(nsec); }
 void c_udelay(unsigned long usec) { udelay(usec); }
 void c_mdelay(unsigned long msec) { mdelay(msec); }
 u64 c_ktime_get_ns() { return ktime_get_ns(); }
+pid_t c_pid(void) { return task_tgid_nr(current); }
+pid_t c_tid(void) { return task_pid_nr(current); }

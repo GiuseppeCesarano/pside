@@ -120,3 +120,15 @@ pub const time = struct {
         }
     };
 };
+
+pub const current_task = struct {
+    extern fn c_tid() callconv(.c) std.os.linux.pid_t;
+    pub fn tid() std.os.linux.pid_t {
+        return c_tid();
+    }
+
+    extern fn c_pid() callconv(.c) std.os.linux.pid_t;
+    pub fn pid() std.os.linux.pid_t {
+        return c_pid();
+    }
+};
