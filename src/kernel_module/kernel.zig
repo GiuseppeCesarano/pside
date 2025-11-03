@@ -83,12 +83,40 @@ pub fn LogWithName(comptime module_name: []const u8) type {
     };
 }
 
-extern fn c_udelay(c_ulong) callconv(.c) void;
-pub fn delayUsec(usec: usize) void {
-    c_udelay(usec);
-}
+pub const time = struct {
+    pub const delay = struct {
+        extern fn c_ndelay(c_ulong) callconv(.c) void;
+        pub fn ns(nsec: usize) void {
+            c_udelay(nsec);
+        }
 
-extern fn c_ktime_get_ns() callconv(.c) u64;
-pub fn getTimeUsec() u64 {
-    return @divTrunc(c_ktime_get_ns(), 1000);
-}
+        extern fn c_udelay(c_ulong) callconv(.c) void;
+        pub fn us(usec: usize) void {
+            c_udelay(usec);
+        }
+
+        extern fn c_mdelay(c_ulong) callconv(.c) void;
+        pub fn ms(msec: usize) void {
+            c_udelay(msec);
+        }
+    };
+
+    pub const get = struct {
+        extern fn c_ktime_get_ns() callconv(.c) u64;
+        pub fn ns() u64 {
+            return c_ktime_get_ns();
+        }
+
+        pub fn us() u64 {
+            return @divTrunc(ns(), 1000);
+        }
+
+        pub fn ms() u64 {
+            return @divTrunc(us(), 1000);
+        }
+
+        pub fn s() u64 {
+            return @divTrunc(ms(), 1000);
+        }
+    };
+};

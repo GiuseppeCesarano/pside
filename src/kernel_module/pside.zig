@@ -8,9 +8,9 @@ pub const std_options: std.Options = .{
 };
 
 export fn init_module() linksection(".init.text") c_int {
-    const start = kernel.getTimeUsec();
-    kernel.delayUsec(5);
-    std.log.warn("Hello from {s}, we waited: {}us\n", .{ "Zig", kernel.getTimeUsec() - start - 1 });
+    const start = kernel.time.get.us();
+    kernel.time.delay.us(5);
+    std.log.warn("Hello from {s}, we waited: {}us\n", .{ "Zig", kernel.time.get.us() - start - 1 });
     return 0;
 }
 
