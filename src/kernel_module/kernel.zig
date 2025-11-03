@@ -101,7 +101,7 @@ pub const time = struct {
         }
     };
 
-    pub const get = struct {
+    pub const now = struct {
         extern fn c_ktime_get_ns() callconv(.c) u64;
         pub fn ns() u64 {
             return c_ktime_get_ns();
