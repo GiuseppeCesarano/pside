@@ -1,8 +1,10 @@
 const std = @import("std");
+//TODO: check some of those c functions actually return an error
+//as integer, we should implement error checking and error types.
 
 const KAllocator = struct {
-    extern fn c_kmalloc(c_ulong) callconv(.c) ?*anyopaque;
-    extern fn c_kfree(*anyopaque) callconv(.c) void;
+    extern fn c_kmalloc(c_ulong) ?*anyopaque;
+    extern fn c_kfree(*anyopaque) void;
 
     const vtable: std.mem.Allocator.VTable = .{
         .alloc = alloc,
@@ -60,10 +62,10 @@ pub const allocator: std.mem.Allocator = .{
 
 pub fn LogWithName(comptime module_name: []const u8) type {
     return struct {
-        extern fn c_pr_err([*:0]const u8) callconv(.c) void;
-        extern fn c_pr_warn([*:0]const u8) callconv(.c) void;
-        extern fn c_pr_info([*:0]const u8) callconv(.c) void;
-        extern fn c_pr_debug([*:0]const u8) callconv(.c) void;
+        extern fn c_pr_err([*:0]const u8) void;
+        extern fn c_pr_warn([*:0]const u8) void;
+        extern fn c_pr_info([*:0]const u8) void;
+        extern fn c_pr_debug([*:0]const u8) void;
 
         pub fn logFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
             var buf: [64]u8 = undefined;
@@ -85,24 +87,24 @@ pub fn LogWithName(comptime module_name: []const u8) type {
 
 pub const time = struct {
     pub const delay = struct {
-        extern fn c_ndelay(c_ulong) callconv(.c) void;
+        extern fn c_ndelay(c_ulong) void;
         pub fn ns(nsec: usize) void {
             c_udelay(nsec);
         }
 
-        extern fn c_udelay(c_ulong) callconv(.c) void;
+        extern fn c_udelay(c_ulong) void;
         pub fn us(usec: usize) void {
             c_udelay(usec);
         }
 
-        extern fn c_mdelay(c_ulong) callconv(.c) void;
+        extern fn c_mdelay(c_ulong) void;
         pub fn ms(msec: usize) void {
             c_udelay(msec);
         }
     };
 
     pub const now = struct {
-        extern fn c_ktime_get_ns() callconv(.c) u64;
+        extern fn c_ktime_get_ns() u64;
         pub fn ns() u64 {
             return c_ktime_get_ns();
         }
@@ -122,14 +124,34 @@ pub const time = struct {
 };
 
 pub const current_task = struct {
-    extern fn c_tid() callconv(.c) std.os.linux.pid_t;
+    extern fn c_tid() std.os.linux.pid_t;
     pub fn tid() std.os.linux.pid_t {
         return c_tid();
     }
 
-    extern fn c_pid() callconv(.c) std.os.linux.pid_t;
+    extern fn c_pid() std.os.linux.pid_t;
     pub fn pid() std.os.linux.pid_t {
         return c_pid();
+    }
+};
+
+pub const Path = extern struct {
+    mount: *anyopaque,
+    dentry: *anyopaque,
+
+    extern fn c_kern_path([*:0]const u8) @This();
+    pub fn init(path: [:0]const u8) @This() {
+        return c_kern_path(path);
+    }
+
+    extern fn c_path_put(*@This()) void;
+    pub fn deinit(this: *@This()) void {
+        return c_path_put(this);
+    }
+
+    extern fn c_d_inode(*anyopaque) *anyopaque;
+    pub fn inode(this: *@This()) *anyopaque {
+        return c_d_inode(this.dentry);
     }
 };
 
@@ -142,11 +164,46 @@ pub const current_task = struct {
 // moreover this is only valid for x86_64
 pub const probe = struct {
     pub const PtRegs = anyopaque;
-    pub const U = struct {};
+    pub const U = struct {
+        pub const Consumer = struct {
+            pub const Handler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
+            pub const RetHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
+            pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
+
+            handler: Handler = null,
+            ret_handler: RetHandler = null,
+            filter: Filter = null,
+            list_head: [2]usize = undefined,
+            id: u64 = undefined,
+        };
+
+        path: Path,
+        consumer: Consumer,
+        offset: u64,
+        handle: *anyopaque = undefined,
+
+        pub fn init(path: [:0]const u8, consumer: Consumer, offset: u64) @This() {
+            return .{ .path = .init(path), .consumer = consumer, .offset = offset };
+        }
+
+        extern fn c_uprobe_register(*anyopaque, u64, *Consumer) *anyopaque;
+        pub fn register(this: *@This()) void {
+            this.handle = c_uprobe_register(this.path.inode(), this.offset, &this.consumer);
+        }
+
+        extern fn c_uprobe_unregister(*anyopaque, *Consumer) void;
+        pub fn unregister(this: *@This()) void {
+            c_uprobe_unregister(this.handle, &this.consumer);
+        }
+
+        pub fn deinit(this: *@This()) void {
+            this.path.deinit();
+        }
+    };
 
     pub const K = extern struct {
-        pub const PreHandler = ?*const fn (*@This(), *PtRegs) c_int;
-        pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong) c_int;
+        pub const PreHandler = ?*const fn (*@This(), *PtRegs) callconv(.c) c_int;
+        pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong) callconv(.c) c_int;
 
         _hlist_list: [4]usize = undefined, // skip hlist and list fields
         nmissed: c_ulong = undefined,
@@ -159,6 +216,12 @@ pub const probe = struct {
         asin: [32]u8 = undefined,
         falgs: u32 = 0,
         _padding: [4]u8 = undefined,
+
+        pub fn init(symbol_name: [:0]const u8, pre_handler: PreHandler, post_handler: PostHandler) @This() {
+            return .{ .symbol_name = symbol_name, .pre_handler = pre_handler, .post_handler = post_handler };
+        }
+
+        pub fn deinit(_: @This()) @This() {} // Just for simmetry with probe.U
 
         extern fn c_register_kprobe(*@This()) c_int;
         pub fn register(this: *@This()) i32 {

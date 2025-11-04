@@ -7,7 +7,7 @@ pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName("pside").logFn,
 };
 
-fn count(_: ?*kernel.probe.K, _: ?*kernel.probe.K.PtRegs) c_int {
+fn count(_: ?*kernel.probe.K, _: ?*kernel.probe.PtRegs) callconv(.c) c_int {
     _ = c.fetchAdd(1, .monotonic);
     return 0;
 }
