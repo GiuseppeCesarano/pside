@@ -132,3 +132,42 @@ pub const current_task = struct {
         return c_pid();
     }
 };
+
+// TODO: This struct is very brittle since it directly
+// interfaces with the unstable kernel ABI.
+//
+// For now, Zig's translate-c cannot process kernel headers,
+// but as soon as it does, we should replace this with a
+// type translated directly from the Linux headers.
+// moreover this is only valid for x86_64
+pub const probe = struct {
+    pub const PtRegs = anyopaque;
+    pub const U = struct {};
+
+    pub const K = extern struct {
+        pub const PreHandler = ?*const fn (*@This(), *PtRegs) c_int;
+        pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong) c_int;
+
+        _hlist_list: [4]usize = undefined, // skip hlist and list fields
+        nmissed: c_ulong = undefined,
+        addr: *c_int = undefined,
+        symbol_name: [*:0]const u8,
+        offset: c_uint = undefined,
+        pre_handler: PreHandler = null,
+        post_handler: PostHandler = null,
+        opcode: u8 = undefined,
+        asin: [32]u8 = undefined,
+        falgs: u32 = 0,
+        _padding: [4]u8 = undefined,
+
+        extern fn c_register_kprobe(*@This()) c_int;
+        pub fn register(this: *@This()) i32 {
+            return c_register_kprobe(this);
+        }
+
+        extern fn c_unregister_kprobe(*@This()) void;
+        pub fn unregister(this: *@This()) void {
+            c_unregister_kprobe(this);
+        }
+    };
+};
