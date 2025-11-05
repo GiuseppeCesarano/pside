@@ -13,7 +13,7 @@ fn count(_: ?*kernel.probe.K, _: ?*kernel.probe.PtRegs) callconv(.c) c_int {
 }
 
 var c: std.atomic.Value(u32) = .init(0);
-var probe: kernel.probe.K = .{ .symbol_name = "__x64_sys_getpid", .pre_handler = &count };
+var probe: kernel.probe.K = .init("__x64_sys_getpid", .{ .pre_handler = &count });
 
 export fn init_module() linksection(".init.text") c_int {
     const zig = kernel.allocator.alloc(u8, 3) catch return -1;

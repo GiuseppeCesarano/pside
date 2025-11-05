@@ -165,13 +165,13 @@ pub const Path = extern struct {
 pub const probe = struct {
     pub const PtRegs = anyopaque;
     pub const U = struct {
-        pub const Consumer = struct {
-            pub const Handler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
-            pub const RetHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
+        pub const Consumer = extern struct {
+            pub const PreHandler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
             pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
 
-            handler: Handler = null,
-            ret_handler: RetHandler = null,
+            prehandler: PreHandler = null,
+            post_handler: PostHandler = null,
             filter: Filter = null,
             list_head: [2]usize = undefined,
             id: u64 = undefined,
@@ -202,23 +202,30 @@ pub const probe = struct {
     };
 
     pub const K = extern struct {
-        pub const PreHandler = ?*const fn (*@This(), *PtRegs) callconv(.c) c_int;
-        pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong) callconv(.c) c_int;
+        // kprobes don't really have a consumer struct
+        // but i've added one for simmery with uprobes
+        // Simply moving Handlers here.
+        pub const Consumer = extern struct {
+            pub const PreHandler = ?*const fn (*K, *PtRegs) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*K, *PtRegs, c_ulong) callconv(.c) c_int;
+
+            pre_handler: PreHandler = null,
+            post_handler: PostHandler = null,
+        };
 
         _hlist_list: [4]usize = undefined, // skip hlist and list fields
         nmissed: c_ulong = undefined,
         addr: *c_int = undefined,
         symbol_name: [*:0]const u8,
         offset: c_uint = undefined,
-        pre_handler: PreHandler = null,
-        post_handler: PostHandler = null,
+        consumer: Consumer,
         opcode: u8 = undefined,
         asin: [32]u8 = undefined,
         falgs: u32 = 0,
         _padding: [4]u8 = undefined,
 
-        pub fn init(symbol_name: [:0]const u8, pre_handler: PreHandler, post_handler: PostHandler) @This() {
-            return .{ .symbol_name = symbol_name, .pre_handler = pre_handler, .post_handler = post_handler };
+        pub fn init(symbol_name: [:0]const u8, consumer: Consumer) @This() {
+            return .{ .symbol_name = symbol_name, .consumer = consumer };
         }
 
         pub fn deinit(_: @This()) @This() {} // Just for simmetry with probe.U
