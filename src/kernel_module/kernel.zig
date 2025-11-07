@@ -170,7 +170,7 @@ pub const probe = struct {
             pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
             pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
 
-            prehandler: PreHandler = null,
+            pre_handler: PreHandler = null,
             post_handler: PostHandler = null,
             filter: Filter = null,
             list_head: [2]usize = undefined,
