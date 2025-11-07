@@ -7,53 +7,88 @@
 #include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
-#include <linux/stddef.h>
-#include <linux/types.h>
 #include <linux/uprobes.h>
 
-// List of exported wrappers functions
+/* Forward declarations */
+
+/* Logging */
 void c_pr_err(const char *);
 void c_pr_warn(const char *);
 void c_pr_info(const char *);
 void c_pr_debug(const char *);
+
+/* Memory management */
 void *c_kmalloc(size_t);
 void c_kfree(void *);
+
+/* Delay utilities */
 void c_ndelay(unsigned long);
 void c_udelay(unsigned long);
 void c_mdelay(unsigned long);
+
+/* Time */
 u64 c_ktime_get_ns(void);
+
+/* Task info */
 pid_t c_pid(void);
 pid_t c_tid(void);
+
+/* Kprobes */
 int c_register_kprobe(struct kprobe *);
 void c_unregister_kprobe(struct kprobe *);
+
+/* Paths */
 struct path c_kern_path(const char *);
 void c_path_put(struct path *);
+
+/* Dentry / inode */
 void *c_d_inode(void *);
+
+/* Uprobes */
 struct uprobe *c_uprobe_register(void *, u64, struct uprobe_consumer *);
 void c_uprobe_unregister(struct uprobe *, struct uprobe_consumer *);
 
-// Implementations
+/* Implementations */
+
+/* Logging */
 void c_pr_err(const char *msg) { pr_err("%s", msg); }
 void c_pr_warn(const char *msg) { pr_warn("%s", msg); }
 void c_pr_info(const char *msg) { pr_info("%s", msg); }
 void c_pr_debug(const char *msg) { pr_debug("%s", msg); }
+
+/* Memory management */
 void *c_kmalloc(size_t size) { return kmalloc(size, GFP_KERNEL); }
 void c_kfree(void *ptr) { kfree(ptr); }
+
+/* Delay utilities */
 void c_ndelay(unsigned long nsec) { ndelay(nsec); }
 void c_udelay(unsigned long usec) { udelay(usec); }
 void c_mdelay(unsigned long msec) { mdelay(msec); }
-u64 c_ktime_get_ns() { return ktime_get_ns(); }
+
+/* Time */
+u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
+
+/* Task info */
 pid_t c_pid(void) { return task_tgid_nr(current); }
 pid_t c_tid(void) { return task_pid_nr(current); }
+
+/* Kprobes */
 int c_register_kprobe(struct kprobe *probe) { return register_kprobe(probe); }
 void c_unregister_kprobe(struct kprobe *probe) { unregister_kprobe(probe); }
+
+/* Paths */
 struct path c_kern_path(const char *path) {
   struct path p;
   kern_path(path, LOOKUP_FOLLOW, &p);
   return p;
 }
+
 void c_path_put(struct path *path) { path_put(path); }
+
+/* Dentry / inode */
 void *c_d_inode(void *dentry) { return d_inode(dentry); }
+
+/* Uprobes */
 struct uprobe *c_uprobe_register(void *inode, u64 offset,
                                  struct uprobe_consumer *uc) {
   return uprobe_register(inode, offset, 0, uc);
