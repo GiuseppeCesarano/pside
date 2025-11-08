@@ -1,4 +1,6 @@
+#include <linux/cdev.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/kprobes.h>
 #include <linux/ktime.h>
@@ -47,6 +49,22 @@ void *c_d_inode(void *);
 /* Uprobes */
 struct uprobe *c_uprobe_register(void *, u64, struct uprobe_consumer *);
 void c_uprobe_unregister(struct uprobe *, struct uprobe_consumer *);
+
+/* Chardev */
+struct chardev {
+  struct cdev cdev;
+  struct file_operations fops;
+  dev_t dev;
+  struct class *class;
+  struct device *device;
+};
+
+typedef ssize_t (*read_fn)(struct file *file, char __user *buf, size_t count,
+                           loff_t *offset);
+typedef ssize_t (*write_fn)(struct file *file, const char __user *buf,
+                            size_t count, loff_t *offset);
+int c_chardev_init(struct chardev *, const char *, read_fn, write_fn);
+void c_chardev_deinit(struct simple_chardev *);
 
 /* Implementations */
 
@@ -97,4 +115,30 @@ struct uprobe *c_uprobe_register(void *inode, u64 offset,
 void c_uprobe_unregister(struct uprobe *u, struct uprobe_consumer *uc) {
   uprobe_unregister_nosync(u, uc);
   uprobe_unregister_sync();
+}
+
+/* Chardev */
+
+int c_chardev_init(struct chardev *d, const char *name, read_fn rd_fn,
+                   write_fn wr_fn) {
+  alloc_chrdev_region(&d->dev, 0, 1, name);
+
+  d->fops.owner = THIS_MODULE;
+  d->fops.read = read_fn;
+  d->fops.write = write_fn;
+
+  cdev_init(&d->cdev, &d->fops);
+  cdev_add(&d->cdev, d->dev, 1);
+
+  d->class = class_create(name);
+  d->device = device_create(d->class, NULL, d->dev, NULL, name);
+
+  return d;
+}
+
+void c_chardev_deinit(struct simple_chardev *d) {
+  device_destroy(d->class, d->dev);
+  class_destroy(d->class);
+  cdev_del(&d->cdev);
+  unregister_chrdev_region(d->dev, 1);
 }
