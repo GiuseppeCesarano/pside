@@ -2,62 +2,77 @@ const std = @import("std");
 //TODO: check some of those c functions actually return an error
 //as integer, we should implement error checking and error types.
 
-const KAllocator = struct {
-    extern fn c_kmalloc(c_ulong) ?*anyopaque;
-    extern fn c_kfree(*anyopaque) void;
-
-    const vtable: std.mem.Allocator.VTable = .{
-        .alloc = alloc,
-        .resize = resize,
-        .remap = remap,
-        .free = free,
-    };
-
-    fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
-        std.debug.assert(len > 0);
-        const alignment_bytes = alignment.toByteUnits();
-
-        // We will overallocate for the maximum alignment padding
-        // + 1 byte of metadata to save how many bytes we skipped
-        //
-        // The metadata will be the byte preceding the returned ptr
-        const unaligned_address = @intFromPtr(c_kmalloc(@intCast(len + alignment_bytes)) orelse return null);
-        // If the address is already aligned alignForward
-        // will not advance and we will not have space for
-        // our metadata byte so we need to advance by one
-        const aligned_address = std.mem.alignForward(usize, unaligned_address + 1, alignment_bytes);
-
-        const ptr: [*]u8 = @ptrFromInt(aligned_address);
-        (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
-
-        return ptr;
+pub const mem = struct {
+    // TODO: support struct copies
+    extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
+    pub fn copyToUser(to: *anyopaque, from: []const u8) usize {
+        return c_copy_to_user(to, from.ptr, from.len);
     }
 
-    fn resize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
-        // We don't have any facility that forces in place resizing
-        // so this operation can only succeed if the new len is less
-        // than the old one.
-        return new_len <= buf.len;
-    }
-
-    fn remap(context: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
-        // krealloc could potentially return an allocation that
-        // doesn't respect the alginment required so is not
-        // suitable to achive the remap implementation
-        return if (resize(context, buf, alignment, new_len, return_address)) buf.ptr else null;
-    }
-
-    fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
-        const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
-        const skipped_bytes = (buf_ptr - 1)[0];
-
-        c_kfree(@ptrCast(buf_ptr - skipped_bytes));
+    extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
+    pub fn copyFromUser(to: []u8, from: *anyopaque) usize {
+        return c_copy_from_user(to.ptr, from, to.len);
     }
 };
 
-pub const allocator: std.mem.Allocator = .{
-    .ptr = undefined,
-    .vtable = &KAllocator.vtable,
+pub const heap = struct {
+    const KAllocator = struct {
+        extern fn c_kmalloc(c_ulong) ?*anyopaque;
+        extern fn c_kfree(*anyopaque) void;
+
+        const vtable: std.mem.Allocator.VTable = .{
+            .alloc = alloc,
+            .resize = resize,
+            .remap = remap,
+            .free = free,
+        };
+
+        fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+            std.debug.assert(len > 0);
+            const alignment_bytes = alignment.toByteUnits();
+
+            // We will overallocate for the maximum alignment padding
+            // + 1 byte of metadata to save how many bytes we skipped
+            //
+            // The metadata will be the byte preceding the returned ptr
+            const unaligned_address = @intFromPtr(c_kmalloc(@intCast(len + alignment_bytes)) orelse return null);
+            // If the address is already aligned alignForward
+            // will not advance and we will not have space for
+            // our metadata byte so we need to advance by one
+            const aligned_address = std.mem.alignForward(usize, unaligned_address + 1, alignment_bytes);
+
+            const ptr: [*]u8 = @ptrFromInt(aligned_address);
+            (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
+
+            return ptr;
+        }
+
+        fn resize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+            // We don't have any facility that forces in place resizing
+            // so this operation can only succeed if the new len is less
+            // than the old one.
+            return new_len <= buf.len;
+        }
+
+        fn remap(context: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+            // krealloc could potentially return an allocation that
+            // doesn't respect the alginment required so is not
+            // suitable to achive the remap implementation
+            return if (resize(context, buf, alignment, new_len, return_address)) buf.ptr else null;
+        }
+
+        fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
+            const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
+            const skipped_bytes = (buf_ptr - 1)[0];
+
+            c_kfree(@ptrCast(buf_ptr - skipped_bytes));
+        }
+    };
+
+    pub const allocator: std.mem.Allocator = .{
+        .ptr = undefined,
+        .vtable = &KAllocator.vtable,
+    };
 };
 
 pub fn LogWithName(comptime module_name: []const u8) type {
@@ -73,7 +88,7 @@ pub fn LogWithName(comptime module_name: []const u8) type {
             const string = if (@inComptime())
                 std.fmt.comptimePrint(scoped_fmt, args)
             else
-                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer";
+                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer\n";
 
             switch (level) {
                 .err => c_pr_err(string),
@@ -240,4 +255,24 @@ pub const probe = struct {
             c_unregister_kprobe(this);
         }
     };
+};
+
+pub const Chardev = extern struct {
+    // TODO: actually match the struct and add init/deinit
+    // We're going to fake the struct since we will just giving
+    // the correct ammount of bytes since only the c bindings
+    // will access those fields.
+    _: [400]u8 = undefined,
+    pub const ReadHandler = ?*const fn (*anyopaque, [*]u8, usize, *i64) callconv(.c) isize;
+    pub const WriteHandler = ?*const fn (*anyopaque, [*]const u8, usize, *i64) callconv(.c) isize;
+
+    extern fn c_chardev_register(*@This(), [*:0]const u8, ReadHandler, WriteHandler) c_int;
+    pub fn register(this: *@This(), file_name: [:0]const u8, read_handler: ReadHandler, write_handler: WriteHandler) void {
+        _ = c_chardev_register(this, file_name.ptr, read_handler, write_handler);
+    }
+
+    extern fn c_chardev_unregister(*@This()) void;
+    pub fn unregister(this: *@This()) void {
+        c_chardev_unregister(this);
+    }
 };

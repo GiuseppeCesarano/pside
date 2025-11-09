@@ -19,6 +19,10 @@ void c_pr_warn(const char *);
 void c_pr_info(const char *);
 void c_pr_debug(const char *);
 
+/* Copy from/to userspace */
+unsigned long c_copy_to_user(void *, const void *, unsigned long);
+unsigned long c_copy_from_user(void *, const void *, unsigned long);
+
 /* Memory management */
 void *c_kmalloc(size_t);
 void c_kfree(void *);
@@ -63,8 +67,8 @@ typedef ssize_t (*read_fn)(struct file *file, char __user *buf, size_t count,
                            loff_t *offset);
 typedef ssize_t (*write_fn)(struct file *file, const char __user *buf,
                             size_t count, loff_t *offset);
-int c_chardev_init(struct chardev *, const char *, read_fn, write_fn);
-void c_chardev_deinit(struct simple_chardev *);
+int c_chardev_register(struct chardev *, const char *, read_fn, write_fn);
+void c_chardev_unregister(struct chardev *);
 
 /* Implementations */
 
@@ -73,6 +77,15 @@ void c_pr_err(const char *msg) { pr_err("%s", msg); }
 void c_pr_warn(const char *msg) { pr_warn("%s", msg); }
 void c_pr_info(const char *msg) { pr_info("%s", msg); }
 void c_pr_debug(const char *msg) { pr_debug("%s", msg); }
+
+/* Copy from/to userspace */
+unsigned long c_copy_to_user(void *to, const void *from, unsigned long n) {
+  return copy_to_user(to, from, n);
+}
+
+unsigned long c_copy_from_user(void *to, const void *from, unsigned long n) {
+  return copy_from_user(to, from, n);
+}
 
 /* Memory management */
 void *c_kmalloc(size_t size) { return kmalloc(size, GFP_KERNEL); }
@@ -119,13 +132,13 @@ void c_uprobe_unregister(struct uprobe *u, struct uprobe_consumer *uc) {
 
 /* Chardev */
 
-int c_chardev_init(struct chardev *d, const char *name, read_fn rd_fn,
-                   write_fn wr_fn) {
+int c_chardev_register(struct chardev *d, const char *name, read_fn rd_fn,
+                       write_fn wr_fn) {
   alloc_chrdev_region(&d->dev, 0, 1, name);
 
   d->fops.owner = THIS_MODULE;
-  d->fops.read = read_fn;
-  d->fops.write = write_fn;
+  d->fops.read = rd_fn;
+  d->fops.write = wr_fn;
 
   cdev_init(&d->cdev, &d->fops);
   cdev_add(&d->cdev, d->dev, 1);
@@ -133,10 +146,10 @@ int c_chardev_init(struct chardev *d, const char *name, read_fn rd_fn,
   d->class = class_create(name);
   d->device = device_create(d->class, NULL, d->dev, NULL, name);
 
-  return d;
+  return 0;
 }
 
-void c_chardev_deinit(struct simple_chardev *d) {
+void c_chardev_unregister(struct chardev *d) {
   device_destroy(d->class, d->dev);
   class_destroy(d->class);
   cdev_del(&d->cdev);
