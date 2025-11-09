@@ -18,7 +18,7 @@ fn read(_: *anyopaque, buff: [*]u8, _: usize, offset: *i64) callconv(.c) isize {
 
     const to_copy = s.len -| uoffset;
     const end = @min(uoffset + to_copy, s.len);
-    const not_copied = kernel.mem.copyToUser(buff, s[uoffset..end]);
+    const not_copied = kernel.mem.copyBytesToUser(buff, s[uoffset..end]);
 
     offset.* += @intCast(to_copy - not_copied);
     return @intCast(to_copy - not_copied);

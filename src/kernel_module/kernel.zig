@@ -3,14 +3,13 @@ const std = @import("std");
 //as integer, we should implement error checking and error types.
 
 pub const mem = struct {
-    // TODO: support struct copies
     extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyToUser(to: *anyopaque, from: []const u8) usize {
+    pub fn copyBytesToUser(to: *anyopaque, from: []const u8) usize {
         return c_copy_to_user(to, from.ptr, from.len);
     }
 
     extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyFromUser(to: []u8, from: *anyopaque) usize {
+    pub fn copyBytesFromUser(to: []u8, from: *anyopaque) usize {
         return c_copy_from_user(to.ptr, from, to.len);
     }
 };
