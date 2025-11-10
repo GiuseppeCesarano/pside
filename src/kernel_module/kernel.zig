@@ -1,6 +1,4 @@
 const std = @import("std");
-//TODO: check some of those c functions actually return an error
-//as integer, we should implement error checking and error types.
 
 pub const mem = struct {
     extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
@@ -83,11 +81,12 @@ pub fn LogWithName(comptime module_name: []const u8) type {
 
         pub fn logFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
             var buf: [64]u8 = undefined;
-            const scoped_fmt = (if (scope == .default) module_name else @tagName(scope)) ++ ": " ++ fmt;
+            const scope_name = if (scope == .default) module_name else @tagName(scope);
+            const scoped_fmt = scope_name ++ ": " ++ fmt;
             const string = if (@inComptime())
                 std.fmt.comptimePrint(scoped_fmt, args)
             else
-                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch "PRINT FAILED: No space left in formatting buffer\n";
+                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch scope_name ++ " PRINT FAILED: No space left in formatting buffer\n";
 
             switch (level) {
                 .err => c_pr_err(string),
@@ -154,8 +153,20 @@ pub const Path = extern struct {
     dentry: *anyopaque,
 
     extern fn c_kern_path([*:0]const u8) @This();
-    pub fn init(path: [:0]const u8) @This() {
-        return c_kern_path(path);
+    pub fn init(path: [:0]const u8) !@This() {
+        const ret = c_kern_path(path);
+        return switch (std.os.linux.E.init(ret)) {
+            .SUCCESS => ret,
+
+            .NOTDIR => error.NotDirectory,
+            .LOOP => error.Loop,
+            .NAMETOOLONG => error.NameTooLong,
+            .ACCES => error.Access,
+            .NOMEM => error.OutOfMemory,
+            .FAULT => error.Fault,
+            .INVAL => error.InvalidArgument,
+            else => error.Unexpected,
+        };
     }
 
     extern fn c_path_put(*@This()) void;
@@ -178,8 +189,35 @@ pub const Path = extern struct {
 // moreover this is only valid for x86_64
 pub const probe = struct {
     pub const PtRegs = anyopaque;
+    pub const RegistrationError = error{
+        NoEntity,
+        Again,
+        Exist,
+        Access,
+        OutOfMemory,
+        Fault,
+        InvalidArgument,
+        Unexpected,
+    };
+
+    pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
+        return switch (std.os.linux.E.init(@intCast(val))) {
+            .SUCCESS => val,
+
+            .NOENT => RegistrationError.NoEntity,
+            .AGAIN => RegistrationError.Again,
+            .EXIST => RegistrationError.Exist,
+            .ACCES => RegistrationError.Access,
+            .NOMEM => RegistrationError.OutOfMemory,
+            .FAULT => RegistrationError.Fault,
+            .INVAL => RegistrationError.InvalidArgument,
+            else => RegistrationError.Unexpected,
+        };
+    }
+
     pub const U = struct {
-        pub const Consumer = extern struct {
+        // This struct is the Consumer struct in c land
+        pub const Callbacks = extern struct {
             pub const PreHandler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
             pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
             pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
@@ -192,22 +230,22 @@ pub const probe = struct {
         };
 
         path: Path,
-        consumer: Consumer,
+        callbacks: Callbacks,
         offset: u64,
         handle: *anyopaque = undefined,
 
-        pub fn init(path: [:0]const u8, consumer: Consumer, offset: u64) @This() {
-            return .{ .path = .init(path), .consumer = consumer, .offset = offset };
+        pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) @This() {
+            return .{ .path = .init(path), .callbacks = callbacks, .offset = offset };
         }
 
-        extern fn c_uprobe_register(*anyopaque, u64, *Consumer) *anyopaque;
-        pub fn register(this: *@This()) void {
-            this.handle = c_uprobe_register(this.path.inode(), this.offset, &this.consumer);
+        extern fn c_uprobe_register(*anyopaque, u64, *Callbacks) *anyopaque;
+        pub fn register(this: *@This()) !void {
+            this.handle = try checkRegistration(c_uprobe_register(this.path.inode(), this.offset, &this.callbacks));
         }
 
-        extern fn c_uprobe_unregister(*anyopaque, *Consumer) void;
+        extern fn c_uprobe_unregister(*anyopaque, *Callbacks) void;
         pub fn unregister(this: *@This()) void {
-            c_uprobe_unregister(this.handle, &this.consumer);
+            c_uprobe_unregister(this.handle, &this.callbacks);
         }
 
         pub fn deinit(this: *@This()) void {
@@ -219,7 +257,7 @@ pub const probe = struct {
         // kprobes don't really have a consumer struct
         // but i've added one for simmery with uprobes
         // Simply moving Handlers here.
-        pub const Consumer = extern struct {
+        pub const Callbacks = extern struct {
             pub const PreHandler = ?*const fn (*K, *PtRegs) callconv(.c) c_int;
             pub const PostHandler = ?*const fn (*K, *PtRegs, c_ulong) callconv(.c) c_int;
 
@@ -232,21 +270,21 @@ pub const probe = struct {
         addr: *c_int = undefined,
         symbol_name: [*:0]const u8,
         offset: c_uint = undefined,
-        consumer: Consumer,
+        callbacks: Callbacks,
         opcode: u8 = undefined,
         asin: [32]u8 = undefined,
         falgs: u32 = 0,
         _padding: [4]u8 = undefined,
 
-        pub fn init(symbol_name: [:0]const u8, consumer: Consumer) @This() {
-            return .{ .symbol_name = symbol_name, .consumer = consumer };
+        pub fn init(symbol_name: [:0]const u8, callbacks: Callbacks) @This() {
+            return .{ .symbol_name = symbol_name, .callbacks = callbacks };
         }
 
         pub fn deinit(_: @This()) @This() {} // Just for simmetry with probe.U
 
         extern fn c_register_kprobe(*@This()) c_int;
-        pub fn register(this: *@This()) i32 {
-            return c_register_kprobe(this);
+        pub fn register(this: *@This()) !void {
+            _ = try checkRegistration(c_register_kprobe(this));
         }
 
         extern fn c_unregister_kprobe(*@This()) void;
@@ -256,7 +294,7 @@ pub const probe = struct {
     };
 };
 
-pub const Chardev = extern struct {
+pub const CharDevice = extern struct {
     // TODO: actually match the struct and add init/deinit
     // We're going to fake the struct since we will just giving
     // the correct ammount of bytes since only the c bindings

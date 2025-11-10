@@ -26,7 +26,7 @@ fn read(_: *anyopaque, buff: [*]u8, _: usize, offset: *i64) callconv(.c) isize {
 
 var c: std.atomic.Value(u32) = .init(0);
 var probe: kernel.probe.K = .init("__x64_sys_getpid", .{ .pre_handler = &count });
-var chardev: kernel.Chardev = undefined;
+var chardev: kernel.CharDevice = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     const allocator = kernel.heap.allocator;
@@ -46,7 +46,7 @@ export fn init_module() linksection(".init.text") c_int {
     });
 
     std.log.info("Starting probe...\n", .{});
-    _ = probe.register();
+    probe.register() catch return -1;
 
     std.log.info("Creating chardev...\n", .{});
     chardev.register("pside", &read, null);
