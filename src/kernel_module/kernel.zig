@@ -304,12 +304,12 @@ pub const CharDevice = extern struct {
     pub const WriteHandler = ?*const fn (*anyopaque, [*]const u8, usize, *i64) callconv(.c) isize;
 
     extern fn c_chardev_register(*@This(), [*:0]const u8, ReadHandler, WriteHandler) c_int;
-    pub fn register(this: *@This(), file_name: [:0]const u8, read_handler: ReadHandler, write_handler: WriteHandler) void {
+    pub fn create(this: *@This(), file_name: [:0]const u8, read_handler: ReadHandler, write_handler: WriteHandler) void {
         _ = c_chardev_register(this, file_name.ptr, read_handler, write_handler);
     }
 
     extern fn c_chardev_unregister(*@This()) void;
-    pub fn unregister(this: *@This()) void {
+    pub fn remove(this: *@This()) void {
         c_chardev_unregister(this);
     }
 };

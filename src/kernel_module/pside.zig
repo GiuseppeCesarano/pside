@@ -49,14 +49,14 @@ export fn init_module() linksection(".init.text") c_int {
     probe.register() catch return -1;
 
     std.log.info("Creating chardev...\n", .{});
-    chardev.register("pside", &read, null);
+    chardev.create("pside", &read, null);
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
     probe.unregister();
-    chardev.unregister();
+    chardev.remove();
     std.log.info("kprobe stopped, getpid called: {} times\n", .{c.load(.unordered)});
     std.log.info("chardev removed\n", .{});
 }
