@@ -14,15 +14,30 @@ pub fn build(b: *std.Build) void {
         installCompiledKernelModuleObject(b, kernel_module_files);
     }
 
+    const cli_mod = b.addModule("cli", .{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const executable = b.addExecutable(.{
         .name = "pside",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{.{ .name = "cli", .module = cli_mod }},
         }),
     });
     b.installArtifact(executable);
+
+    const cli_tests = b.addTest(.{
+        .root_module = cli_mod,
+    });
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_cli_tests.step);
 }
 
 fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
