@@ -38,17 +38,17 @@ export fn init_module() linksection(".init.text") c_int {
     const start = kernel.time.now.us();
     kernel.time.delay.us(5);
 
-    std.log.info("Hello from {s}, pid: {}, tid: {} waited: {}us\n", .{
+    std.log.info("Hello from {s}, pid: {}, tid: {} waited: {}us", .{
         zig,
         kernel.current_task.pid(),
         kernel.current_task.tid(),
         kernel.time.now.us() - start,
     });
 
-    std.log.info("Starting probe...\n", .{});
+    std.log.info("Starting probe...", .{});
     probe.register() catch return -1;
 
-    std.log.info("Creating chardev...\n", .{});
+    std.log.info("Creating chardev...", .{});
     chardev.create("pside", &read, null);
 
     return 0;
@@ -57,6 +57,6 @@ export fn init_module() linksection(".init.text") c_int {
 export fn cleanup_module() linksection(".exit.text") void {
     probe.unregister();
     chardev.remove();
-    std.log.info("kprobe stopped, getpid called: {} times\n", .{c.load(.unordered)});
-    std.log.info("chardev removed\n", .{});
+    std.log.info("kprobe stopped, getpid called: {} times", .{c.load(.unordered)});
+    std.log.info("chardev removed", .{});
 }

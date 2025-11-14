@@ -82,7 +82,7 @@ pub fn LogWithName(comptime module_name: []const u8) type {
         pub fn logFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
             var buf: [64]u8 = undefined;
             const scope_name = if (scope == .default) module_name else @tagName(scope);
-            const scoped_fmt = scope_name ++ ": " ++ fmt;
+            const scoped_fmt = scope_name ++ ": " ++ fmt ++ "\n";
             const string = if (@inComptime())
                 std.fmt.comptimePrint(scoped_fmt, args)
             else
