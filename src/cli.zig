@@ -41,27 +41,32 @@ fn OptionsImpl(ItType: type) type {
         };
 
         const FlagInfo = struct {
-            const FieldInfo = struct {
-                type_tag: AllowedTypes,
-                offset_in_parent: usize,
-            };
-
             name: []const u8,
-            field_info: FieldInfo,
+            type_tag: AllowedTypes,
+            offset_in_parent: usize,
 
             pub fn init(Parent: type, field: std.builtin.Type.StructField) @This() {
                 if (field.is_comptime) @compileLog(field.name ++ "\n");
 
                 return .{
                     .name = field.name,
-                    .field_info = .{ .type_tag = .fromType(field.type), .offset_in_parent = @offsetOf(Parent, field.name) },
+                    .type_tag = .fromType(field.type),
+                    .offset_in_parent = @offsetOf(Parent, field.name),
                 };
+            }
+
+            pub fn writeInParent(this: @This(), parent_ptr: *anyopaque, value: anytype) void {
+                const field_ptr: *@TypeOf(value) = @ptrCast(@alignCast(@as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent));
+
+                field_ptr.* = value;
             }
         };
 
         const UnmatchedIterator = struct {
+            pub const Mask = u128;
+
             it: ItType,
-            match_mask: u128,
+            match_mask: Mask,
 
             pub fn next(this: *@This()) ?[]const u8 {
                 while (this.match_mask & 1 == 0 and this.it.next() != null) : (this.match_mask >>= 1) {}
@@ -75,64 +80,61 @@ fn OptionsImpl(ItType: type) type {
             }
         };
 
-        args_it: ItType,
+        args: ItType,
 
-        // TODO: Clean up this function
         pub fn parse(this: @This(), FlagsSchema: type) !struct { flags: FlagsSchema, positional_arguments: UnmatchedIterator, unknown_flags: UnmatchedIterator } {
             var parsed_flags: FlagsSchema = .{};
             const flags_info = createFlagsInfo(FlagsSchema);
 
-            var positional_mask: u128 = 0;
-            var unknown_flags_mask: u128 = 0;
-            var args_it_copy = this.args_it;
+            var args = this.args;
+            var positional_mask: UnmatchedIterator.Mask = 0;
+            var unknown_flags_mask: UnmatchedIterator.Mask = 0;
+            const mask_bit_size = @bitSizeOf(UnmatchedIterator.Mask);
             var i: u8 = 0;
-            while (args_it_copy.next()) |arg| : ({
+
+            while (args.next()) |arg| : ({
                 positional_mask >>= 1;
                 unknown_flags_mask >>= 1;
                 i += 1;
-                if (i == @bitSizeOf(@TypeOf(positional_mask))) return error.TooManyArgs;
+                if (i == mask_bit_size) return error.TooManyArgs;
             }) {
-                if (!std.mem.startsWith(u8, arg, "-")) {
-                    positional_mask |= 1 << (@bitSizeOf(@TypeOf(positional_mask)) - 1);
-                    continue;
-                }
+                const not_starting_with_dash = !std.mem.startsWith(u8, arg, "-");
+                positional_mask |= @as(UnmatchedIterator.Mask, @intFromBool(not_starting_with_dash)) << mask_bit_size - 1;
+                if (not_starting_with_dash) continue;
 
                 for (flags_info) |flag_info| {
                     if (!std.mem.startsWith(u8, arg[1..], flag_info.name)) continue;
-                    const arg_postfix = arg[1 + flag_info.name.len ..];
-                    if (arg_postfix.len != 0 and arg_postfix[0] != '=') continue;
+                    const postfix = arg[1 + flag_info.name.len ..];
+                    if (postfix.len != 0 and postfix[0] != '=') continue;
 
-                    const value_string: []const u8 = if (arg_postfix.len != 0)
-                        arg_postfix[1..]
-                    else
-                        args_it_copy.next() orelse
-                            if (flag_info.field_info.type_tag == .bool) "true" else return error.ValueNotSpecified;
+                    const parse_target = if (postfix.len != 0)
+                        postfix[1..]
+                    else if (flag_info.type_tag == .bool) "true" else args.next() orelse return error.ValueNotSpecified;
 
-                    const field_ptr = @as([*]u8, @ptrCast(&parsed_flags)) + flag_info.field_info.offset_in_parent;
-                    switch (flag_info.field_info.type_tag) {
-                        .i32 => @as(*i32, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseInt(i32, value_string, 0),
-                        .i64 => @as(*i64, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseInt(i64, value_string, 0),
-                        .u32 => @as(*u32, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseInt(u32, value_string, 0),
-                        .u64 => @as(*u64, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseInt(u64, value_string, 0),
-                        .f32 => @as(*f32, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseFloat(f32, value_string),
-                        .f64 => @as(*f64, @ptrCast(@alignCast(field_ptr))).* = try std.fmt.parseFloat(f64, value_string),
-                        .bool => @as(*bool, @ptrCast(field_ptr)).* = if (std.mem.eql(u8, value_string, "true")) true else if (std.mem.eql(u8, value_string, "false")) false else return error.BoolDoNotMat,
-                        .str => @as(*[]const u8, @ptrCast(@alignCast(field_ptr))).* = value_string,
+                    switch (flag_info.type_tag) {
+                        .i32 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseInt(i32, parse_target, 0)),
+                        .i64 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseInt(i64, parse_target, 0)),
+                        .u32 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseInt(u32, parse_target, 0)),
+                        .u64 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseInt(u64, parse_target, 0)),
+                        .f32 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseFloat(f32, parse_target)),
+                        .f64 => flag_info.writeInParent(&parsed_flags, try std.fmt.parseFloat(f64, parse_target)),
+                        .bool => flag_info.writeInParent(&parsed_flags, if (std.mem.eql(u8, parse_target, "true")) true else if (std.mem.eql(u8, parse_target, "false")) false else return error.BoolDoNotMatch),
+                        .str => flag_info.writeInParent(&parsed_flags, parse_target),
                     }
 
                     break;
                 } else {
-                    unknown_flags_mask |= 1 << (@bitSizeOf(@TypeOf(unknown_flags_mask)) - 1);
+                    unknown_flags_mask |= 1 << (mask_bit_size - 1);
                 }
             }
 
-            positional_mask >>= @truncate(@bitSizeOf(@TypeOf(positional_mask)) - i - 1);
-            unknown_flags_mask >>= @truncate(@bitSizeOf(@TypeOf(unknown_flags_mask)) - i - 1);
+            positional_mask >>= @truncate(mask_bit_size - i - 1);
+            unknown_flags_mask >>= @truncate(mask_bit_size - i - 1);
 
             return .{
                 .flags = parsed_flags,
-                .positional_arguments = .{ .match_mask = positional_mask, .it = this.args_it },
-                .unknown_flags = .{ .match_mask = unknown_flags_mask, .it = this.args_it },
+                .positional_arguments = .{ .match_mask = positional_mask, .it = this.args },
+                .unknown_flags = .{ .match_mask = unknown_flags_mask, .it = this.args },
             };
         }
 
@@ -162,15 +164,15 @@ pub const SubCommand = struct {
 };
 
 pub fn execute(args_it: anytype, default_handler: Handler, subcommands: []SubCommand) void {
-    var args_it_copy = args_it;
-    if (args_it_copy.next()) |possible_subcommand| {
+    var args = args_it;
+    if (args.next()) |possible_subcommand| {
         if (findSubcommand(subcommands, possible_subcommand)) |subcommand| {
-            subcommand.handler(.{ .args_it = args_it_copy });
+            subcommand.handler(.{ .args = args });
             return;
         }
     }
 
-    default_handler(.{ .args_it = args_it });
+    default_handler(.{ .args = args_it });
 }
 
 fn findSubcommand(subcommands: []SubCommand, name: []const u8) ?*const SubCommand {
@@ -196,7 +198,7 @@ test "all types via =value" {
         b: bool = false,
     };
 
-    const parsed = (try (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-i32=10 -i64=20 -u32=30 -u64=40 -f32=1.5 -f64=2.25 -b=true", ' ') }).parse(Flags)).flags;
+    const parsed = (try (OptionsTest{ .args = std.mem.splitScalar(u8, "-i32=10 -i64=20 -u32=30 -u64=40 -f32=1.5 -f64=2.25 -b=true", ' ') }).parse(Flags)).flags;
 
     try std.testing.expect(parsed.i32 == 10);
     try std.testing.expect(parsed.i64 == 20);
@@ -214,7 +216,7 @@ test "space separated" {
         s: []const u8 = "default",
     };
 
-    const parsed = (try (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-x 999 -y 123.75 -s hello", ' ') }).parse(Flags)).flags;
+    const parsed = (try (OptionsTest{ .args = std.mem.splitScalar(u8, "-x 999 -y 123.75 -s hello", ' ') }).parse(Flags)).flags;
 
     try std.testing.expect(parsed.x == 999);
     try std.testing.expect(std.math.approxEqAbs(f64, parsed.y, 123.75, 0.0001));
@@ -223,14 +225,14 @@ test "space separated" {
 
 test "bool auto-true" {
     const Flags = struct { verbose: bool = false };
-    const parsed = (try (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-verbose", ' ') }).parse(Flags)).flags;
+    const parsed = (try (OptionsTest{ .args = std.mem.splitScalar(u8, "-verbose", ' ') }).parse(Flags)).flags;
 
     try std.testing.expect(parsed.verbose == true);
 }
 
 test "string with =" {
     const Flags = struct { name: []const u8 = "" };
-    const parsed = (try (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-name=alpha", ' ') }).parse(Flags)).flags;
+    const parsed = (try (OptionsTest{ .args = std.mem.splitScalar(u8, "-name=alpha", ' ') }).parse(Flags)).flags;
 
     try std.testing.expect(std.mem.eql(u8, parsed.name, "alpha"));
 }
@@ -238,18 +240,18 @@ test "string with =" {
 test "missing value for non-bool" {
     const Flags = struct { n: i32 = 0 };
 
-    try std.testing.expectError(error.ValueNotSpecified, (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-n", ' ') }).parse(Flags));
+    try std.testing.expectError(error.ValueNotSpecified, (OptionsTest{ .args = std.mem.splitScalar(u8, "-n", ' ') }).parse(Flags));
 }
 
 test "invalid bool value" {
     const Flags = struct { b: bool = false };
 
-    try std.testing.expectError(error.BoolDoNotMat, (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-b=maybe", ' ') }).parse(Flags));
+    try std.testing.expectError(error.BoolDoNotMatch, (OptionsTest{ .args = std.mem.splitScalar(u8, "-b=maybe", ' ') }).parse(Flags));
 }
 
 test "last wins" {
     const Flags = struct { x: i32 = 0 };
-    const parsed = (try (OptionsTest{ .args_it = std.mem.splitScalar(u8, "-x=1 -x=2 -x=3", ' ') }).parse(Flags)).flags;
+    const parsed = (try (OptionsTest{ .args = std.mem.splitScalar(u8, "-x=1 -x=2 -x=3", ' ') }).parse(Flags)).flags;
 
     try std.testing.expect(parsed.x == 3);
 }
@@ -265,7 +267,7 @@ test "Options.parse fuzz" {
     const Context = struct {
         fn testOne(context: @This(), input: []const u8) anyerror!void {
             _ = context;
-            _ = (OptionsTest{ .args_it = std.mem.splitScalar(u8, input, ' ') }).parse(Flags) catch {};
+            _ = (OptionsTest{ .args = std.mem.splitScalar(u8, input, ' ') }).parse(Flags) catch {};
         }
     };
 
@@ -276,7 +278,7 @@ test "non-flags and unmatched flags iteration" {
     const Flags = struct { x: i32 = 0 };
 
     const input = "-x=1 file1 -bad -x=2 file2 -unknown=val file3 -x=3";
-    const res = try (OptionsTest{ .args_it = std.mem.splitScalar(u8, input, ' ') }).parse(Flags);
+    const res = try (OptionsTest{ .args = std.mem.splitScalar(u8, input, ' ') }).parse(Flags);
 
     try std.testing.expect(res.flags.x == 3);
 
