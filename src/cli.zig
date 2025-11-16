@@ -82,6 +82,7 @@ fn OptionsImpl(ItType: type) type {
 
         args: ItType,
 
+        // TODO: should also return parsing errors as iterator instead of actually trowing an errorl
         pub fn parse(this: @This(), FlagsSchema: type) !struct { flags: FlagsSchema, positional_arguments: UnmatchedIterator, unknown_flags: UnmatchedIterator } {
             var parsed_flags: FlagsSchema = .{};
             const flags_info = createFlagsInfo(FlagsSchema);
