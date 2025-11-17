@@ -86,20 +86,19 @@ fn OptionsImpl(ItType: type) type {
         };
 
         const SkipMaskIterator = struct {
-            pub const Mask = u128;
-
-            it: ItType,
-            match_mask: Mask,
+            pub const Mask = std.bit_set.IntegerBitSet(128);
+            args: ItType,
+            mask: Mask.MaskInt,
 
             pub fn next(this: *@This()) ?[]const u8 {
-                while (this.match_mask & 1 == 0 and this.it.next() != null) : (this.match_mask >>= 1) {}
+                while (this.mask & 1 == 0 and this.args.next() != null) : (this.mask >>= 1) {}
 
-                this.match_mask >>= 1;
-                return this.it.next();
+                this.mask >>= 1;
+                return this.args.next();
             }
 
             pub fn count(this: @This()) usize {
-                return @popCount(this.match_mask);
+                return @popCount(this.mask);
             }
         };
 
@@ -110,21 +109,16 @@ fn OptionsImpl(ItType: type) type {
             const flags_info = createFlagsInfo(FlagsSchema);
 
             var args = this.args;
-            var positional_mask: SkipMaskIterator.Mask = 0;
-            var unknown_flags_mask: SkipMaskIterator.Mask = 0;
-            var parse_errors_mask: SkipMaskIterator.Mask = 0;
-            const mask_bit_size = @bitSizeOf(SkipMaskIterator.Mask);
-            var i: u8 = 0;
+            const Mask = SkipMaskIterator.Mask;
+            var positional_mask: Mask = .initEmpty();
+            var unknown_flags_mask: Mask = .initEmpty();
+            var parse_errors_mask: Mask = .initEmpty();
+            var i: Mask.ShiftInt = 0;
 
-            while (args.next()) |arg| : ({
-                i += 1;
-                positional_mask >>= 1;
-                unknown_flags_mask >>= 1;
-                parse_errors_mask >>= 1;
-            }) {
-                const not_starting_with_dash = !std.mem.startsWith(u8, arg, "-");
-                positional_mask |= @as(SkipMaskIterator.Mask, @intFromBool(not_starting_with_dash)) << mask_bit_size - 1;
-                if (not_starting_with_dash) continue;
+            while (args.next()) |arg| : (i +|= 1) {
+                const is_positional = !std.mem.startsWith(u8, arg, "-");
+                positional_mask.setValue(i, is_positional);
+                if (is_positional) continue;
 
                 for (flags_info) |flag_info| {
                     if (!std.mem.startsWith(u8, arg[1..], flag_info.name)) continue;
@@ -133,34 +127,33 @@ fn OptionsImpl(ItType: type) type {
 
                     const parse_target = if (postfix.len != 0)
                         postfix[1..]
-                    else if (flag_info.type_tag == .bool) "true" else args.next() orelse {
-                        parse_errors_mask |= 1 << (mask_bit_size - 1);
-                        break;
-                    };
+                    else if (flag_info.type_tag == .bool)
+                        "true"
+                    else
+                        args.next() orelse {
+                            parse_errors_mask.set(i);
+                            break;
+                        };
 
                     if (parseFromFlag(flag_info, parse_target)) |parsed_value| {
                         flag_info.writeInParent(&parsed_flags, parsed_value);
                     } else |_| {
-                        parse_errors_mask |= 1 << (mask_bit_size - 1);
+                        parse_errors_mask.set(i);
                     }
 
                     break;
                 } else {
-                    unknown_flags_mask |= 1 << (mask_bit_size - 1);
+                    unknown_flags_mask.set(i);
                 }
             }
 
-            positional_mask >>= @truncate(mask_bit_size - i - 1);
-            unknown_flags_mask >>= @truncate(mask_bit_size - i - 1);
-            parse_errors_mask >>= @truncate(mask_bit_size - i - 1);
-
-            if (i >= mask_bit_size) parse_errors_mask = mask_bit_size - 1;
+            if (i > std.math.maxInt(Mask.ShiftInt)) parse_errors_mask = .initFull();
 
             return .{
                 .flags = parsed_flags,
-                .positional_arguments = .{ .match_mask = positional_mask, .it = this.args },
-                .unknown_flags = .{ .match_mask = unknown_flags_mask, .it = this.args },
-                .parse_errors = .{ .match_mask = parse_errors_mask, .it = this.args },
+                .positional_arguments = .{ .mask = positional_mask.mask, .args = this.args },
+                .unknown_flags = .{ .mask = unknown_flags_mask.mask, .args = this.args },
+                .parse_errors = .{ .mask = parse_errors_mask.mask, .args = this.args },
             };
         }
 
