@@ -2,17 +2,8 @@ const std = @import("std");
 
 fn OptionsImpl(ItType: type) type {
     return struct {
-        const AllowedTypes = enum {
-            i32,
-            i64,
-            u32,
-            u64,
-            f32,
-            f64,
-            bool,
-            str,
-
-            pub const type_map = [_]struct { tag: AllowedTypes, Type: type }{
+        const allowed_types = struct {
+            pub const type_map = .{
                 .{ .tag = .i32, .Type = i32 },
                 .{ .tag = .i64, .Type = i64 },
                 .{ .tag = .u32, .Type = u32 },
@@ -23,19 +14,20 @@ fn OptionsImpl(ItType: type) type {
                 .{ .tag = .str, .Type = []const u8 },
             };
 
-            pub fn fromType(Type: type) @This() {
-                for (type_map) |pair| {
-                    if (pair.Type == Type) return pair.tag;
+            const Tag = tag_block: {
+                var enum_info: std.builtin.Type.Enum = .{
+                    .tag_type = u8,
+                    .fields = &.{},
+                    .decls = &.{},
+                    .is_exhaustive = true,
+                };
+
+                for (type_map, 0..) |pair, i| {
+                    enum_info.fields = enum_info.fields ++ [_]std.builtin.Type.EnumField{.{ .name = @tagName(pair.tag), .value = i }};
                 }
 
-                @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
-            }
-
-            pub fn toType(tag: @This()) type {
-                for (type_map) |pair| {
-                    if (pair.tag == tag) return pair.Type;
-                }
-            }
+                break :tag_block @Type(.{ .@"enum" = enum_info });
+            };
 
             const Union = union_block: {
                 var union_info: std.builtin.Type.Union = .{
@@ -45,22 +37,35 @@ fn OptionsImpl(ItType: type) type {
                     .fields = &.{},
                 };
 
-                for (@typeInfo(@This()).@"enum".fields) |enum_field| {
-                    const Type = toType(@enumFromInt(enum_field.value));
+                for (type_map) |pair| {
                     union_info.fields = union_info.fields ++ [_]std.builtin.Type.UnionField{.{
-                        .name = enum_field.name,
-                        .type = Type,
-                        .alignment = @alignOf(Type),
+                        .name = @tagName(pair.tag),
+                        .type = pair.Type,
+                        .alignment = @alignOf(pair.Type),
                     }};
                 }
 
                 break :union_block @Type(.{ .@"union" = union_info });
             };
+
+            pub fn tagFromType(Type: type) Tag {
+                for (type_map) |pair| {
+                    if (pair.Type == Type) return pair.tag;
+                }
+
+                @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
+            }
+
+            pub fn tagToType(tag: Tag) type {
+                for (type_map) |pair| {
+                    if (pair.tag == tag) return pair.Type;
+                }
+            }
         };
 
         const FlagInfo = struct {
             name: []const u8,
-            type_tag: AllowedTypes,
+            type_tag: allowed_types.Tag,
             offset_in_parent: usize,
 
             pub fn init(Parent: type, field: std.builtin.Type.StructField) @This() {
@@ -68,15 +73,15 @@ fn OptionsImpl(ItType: type) type {
 
                 return .{
                     .name = field.name,
-                    .type_tag = .fromType(field.type),
+                    .type_tag = allowed_types.tagFromType(field.type),
                     .offset_in_parent = @offsetOf(Parent, field.name),
                 };
             }
 
-            pub fn writeInParent(this: @This(), parent_ptr: *anyopaque, value: AllowedTypes.Union) void {
+            pub fn writeAtOffset(this: @This(), parent_ptr: *anyopaque, value: allowed_types.Union) void {
                 const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
 
-                inline for (AllowedTypes.type_map) |entry| {
+                inline for (allowed_types.type_map) |entry| {
                     if (entry.tag == this.type_tag) {
                         @as(*entry.Type, @ptrCast(@alignCast(field_ptr))).* = @field(value, @tagName(entry.tag));
                         return;
@@ -136,7 +141,7 @@ fn OptionsImpl(ItType: type) type {
                         };
 
                     if (parseFromFlag(flag_info, parse_target)) |parsed_value| {
-                        flag_info.writeInParent(&parsed_flags, parsed_value);
+                        flag_info.writeAtOffset(&parsed_flags, parsed_value);
                     } else |_| {
                         parse_errors_mask.set(i);
                     }
@@ -172,7 +177,7 @@ fn OptionsImpl(ItType: type) type {
             return runtime_flags;
         }
 
-        fn parseFromFlag(flag_info: FlagInfo, parse_target: []const u8) !AllowedTypes.Union {
+        fn parseFromFlag(flag_info: FlagInfo, parse_target: []const u8) !allowed_types.Union {
             switch (flag_info.type_tag) {
                 .i32 => return .{ .i32 = try std.fmt.parseInt(i32, parse_target, 0) },
                 .i64 => return .{ .i64 = try std.fmt.parseInt(i64, parse_target, 0) },
