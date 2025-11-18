@@ -78,7 +78,18 @@ fn OptionsImpl(ItType: type) type {
                 };
             }
 
-            pub fn writeAtOffset(this: @This(), parent_ptr: *anyopaque, value: allowed_types.Union) void {
+            fn parseIntoField(this: @This(), parent_ptr: *anyopaque, parse_target: []const u8) !void {
+                const value: allowed_types.Union = switch (this.type_tag) {
+                    .i32 => .{ .i32 = try std.fmt.parseInt(i32, parse_target, 0) },
+                    .i64 => .{ .i64 = try std.fmt.parseInt(i64, parse_target, 0) },
+                    .u32 => .{ .u32 = try std.fmt.parseInt(u32, parse_target, 0) },
+                    .u64 => .{ .u64 = try std.fmt.parseInt(u64, parse_target, 0) },
+                    .f32 => .{ .f32 = try std.fmt.parseFloat(f32, parse_target) },
+                    .f64 => .{ .f64 = try std.fmt.parseFloat(f64, parse_target) },
+                    .bool => .{ .bool = if (std.mem.eql(u8, parse_target, "true")) true else if (std.mem.eql(u8, parse_target, "false")) false else return error.BoolDoNotMatch },
+                    .str => .{ .str = parse_target },
+                };
+
                 const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
 
                 inline for (allowed_types.type_map) |entry| {
@@ -140,11 +151,7 @@ fn OptionsImpl(ItType: type) type {
                             break;
                         };
 
-                    if (parseFromFlag(flag_info, parse_target)) |parsed_value| {
-                        flag_info.writeAtOffset(&parsed_flags, parsed_value);
-                    } else |_| {
-                        parse_errors_mask.set(i);
-                    }
+                    flag_info.parseIntoField(&parsed_flags, parse_target) catch parse_errors_mask.set(i);
 
                     break;
                 } else {
@@ -175,19 +182,6 @@ fn OptionsImpl(ItType: type) type {
             };
 
             return runtime_flags;
-        }
-
-        fn parseFromFlag(flag_info: FlagInfo, parse_target: []const u8) !allowed_types.Union {
-            switch (flag_info.type_tag) {
-                .i32 => return .{ .i32 = try std.fmt.parseInt(i32, parse_target, 0) },
-                .i64 => return .{ .i64 = try std.fmt.parseInt(i64, parse_target, 0) },
-                .u32 => return .{ .u32 = try std.fmt.parseInt(u32, parse_target, 0) },
-                .u64 => return .{ .u64 = try std.fmt.parseInt(u64, parse_target, 0) },
-                .f32 => return .{ .f32 = try std.fmt.parseFloat(f32, parse_target) },
-                .f64 => return .{ .f64 = try std.fmt.parseFloat(f64, parse_target) },
-                .bool => return .{ .bool = if (std.mem.eql(u8, parse_target, "true")) true else if (std.mem.eql(u8, parse_target, "false")) false else return error.BoolDoNotMatch },
-                .str => return .{ .str = parse_target },
-            }
         }
     };
 }
