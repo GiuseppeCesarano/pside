@@ -194,7 +194,7 @@ pub const SubCommand = struct {
     handler: Handler,
 };
 
-pub fn execute(args_it: anytype, default_handler: Handler, subcommands: []SubCommand) void {
+pub fn execute(args_it: anytype, default_handler: Handler, subcommands: []const SubCommand) void {
     var args = args_it;
     if (args.next()) |possible_subcommand| {
         if (findSubcommand(subcommands, possible_subcommand)) |subcommand| {
@@ -206,7 +206,7 @@ pub fn execute(args_it: anytype, default_handler: Handler, subcommands: []SubCom
     default_handler(.{ .args = args_it });
 }
 
-fn findSubcommand(subcommands: []SubCommand, name: []const u8) ?*const SubCommand {
+fn findSubcommand(subcommands: []const SubCommand, name: []const u8) ?*const SubCommand {
     for (subcommands) |subcommand| {
         if (std.mem.eql(u8, subcommand.name, name)) {
             return &subcommand;
