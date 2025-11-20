@@ -1,5 +1,7 @@
 const std = @import("std");
 const cli = @import("cli");
+const record = @import("record");
+const report = @import("record");
 
 pub fn main() !void {
     var debug_allocator_contex: std.heap.DebugAllocator(.{}) = .init;
@@ -23,17 +25,9 @@ pub fn main() !void {
     _ = args.skip(); // Skip program name
 
     cli.execute(args, &printHelp, &.{
-        .{ .name = "record", .handler = &record },
-        .{ .name = "report", .handler = &report },
+        .{ .name = "record", .handler = &record.handler },
+        .{ .name = "report", .handler = &report.handler },
     }, .{ allocator, io });
-}
-
-fn record(options: cli.Options, _: std.mem.Allocator, _: std.Io) void {
-    std.log.debug("record", .{});
-}
-
-fn report(_: cli.Options, _: std.mem.Allocator, _: std.Io) void {
-    std.log.debug("report", .{});
 }
 
 fn printHelp(_: cli.Options, _: std.mem.Allocator, _: std.Io) void {

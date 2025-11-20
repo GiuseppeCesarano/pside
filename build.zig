@@ -20,13 +20,40 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const KernelMod_mod = b.addModule("KenrelModule", .{
+        .root_source_file = b.path("src/KernelModule.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const record_mod = b.addModule("record", .{
+        .root_source_file = b.path("src/record.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "cli", .module = cli_mod },
+            .{ .name = "KernelModule", .module = KernelMod_mod },
+        },
+    });
+
+    const report_mod = b.addModule("report", .{
+        .root_source_file = b.path("src/report.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "cli", .module = cli_mod }},
+    });
+
     const executable = b.addExecutable(.{
         .name = "pside",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "cli", .module = cli_mod }},
+            .imports = &.{
+                .{ .name = "cli", .module = cli_mod },
+                .{ .name = "record", .module = record_mod },
+                .{ .name = "report", .module = report_mod },
+            },
         }),
     });
     b.installArtifact(executable);
@@ -111,8 +138,8 @@ fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Bu
     const source = kernel_module_files.getDirectory().join(b.allocator, "pside.ko") catch @panic("OOM");
     const dest = brk: {
         const release = std.posix.uname().release;
-        const kernel_version = release[0..std.mem.indexOfScalar(u8, &release, 0).?];
-        break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", kernel_version, "/extra/pside.ko" }) catch @panic("OOM");
+        const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
+        break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", release[0..release_end], "/extra/pside.ko" }) catch @panic("OOM");
     };
     const install = b.addInstallFile(source, dest);
     install.step.dependOn(&compile.step);
