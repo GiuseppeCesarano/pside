@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// TODO: solve the iteration bug which points to last valid value instead of the flag that cause the parse error
+
 fn OptionsImpl(ItType: type) type {
     return struct {
         const allowed_types = struct {
@@ -99,7 +101,7 @@ fn OptionsImpl(ItType: type) type {
             }
         };
 
-        const SkipMaskIterator = struct {
+        pub const Iterator = struct {
             pub const Mask = std.bit_set.IntegerBitSet(128);
             args: ItType,
             mask: Mask.MaskInt,
@@ -116,14 +118,22 @@ fn OptionsImpl(ItType: type) type {
             }
         };
 
+        pub fn Parsed(FlagsSchema: type) type {
+            return struct {
+                flags: FlagsSchema,
+                positional_arguments: ?Iterator,
+                unknown_flags: ?Iterator,
+                parse_errors: ?Iterator,
+            };
+        }
         args: ItType,
 
-        pub fn parse(this: @This(), FlagsSchema: type) struct { flags: FlagsSchema, positional_arguments: SkipMaskIterator, unknown_flags: SkipMaskIterator, parse_errors: SkipMaskIterator } {
+        pub fn parse(this: @This(), FlagsSchema: type) Parsed(FlagsSchema) {
             var parsed_flags: FlagsSchema = .{};
             const flags_info = createFlagsInfo(FlagsSchema);
 
             var args = this.args;
-            const Mask = SkipMaskIterator.Mask;
+            const Mask = Iterator.Mask;
             var positional_mask: Mask = .initEmpty();
             var unknown_flags_mask: Mask = .initEmpty();
             var parse_errors_mask: Mask = .initEmpty();
@@ -161,9 +171,9 @@ fn OptionsImpl(ItType: type) type {
 
             return .{
                 .flags = parsed_flags,
-                .positional_arguments = .{ .mask = positional_mask.mask, .args = this.args },
-                .unknown_flags = .{ .mask = unknown_flags_mask.mask, .args = this.args },
-                .parse_errors = .{ .mask = parse_errors_mask.mask, .args = this.args },
+                .positional_arguments = if (positional_mask.count() != 0) .{ .mask = positional_mask.mask, .args = this.args } else null,
+                .unknown_flags = if (unknown_flags_mask.count() != 0) .{ .mask = unknown_flags_mask.mask, .args = this.args } else null,
+                .parse_errors = if (parse_errors_mask.count() != 0) .{ .mask = parse_errors_mask.mask, .args = this.args } else null,
             };
         }
 
