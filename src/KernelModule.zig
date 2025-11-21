@@ -64,6 +64,12 @@ pub fn unload(this: @This(), io: std.Io) !void {
     return switch (std.posix.errno(remove_res)) {
         .SUCCESS => {},
 
-        else => {}, //TODO: add erros
+        .BUSY => error.NotLive,
+        .NOENT => error.NoEntity,
+
+        // delete_module could also return PERM, FAULT, WOULDBLOCK
+        // but each of those errors shouldn't be appliacable in our
+        // case
+        else => unreachable,
     };
 }
