@@ -1,7 +1,5 @@
 const std = @import("std");
 
-// TODO: solve the iteration bug which points to last valid value instead of the flag that cause the parse error
-
 fn OptionsImpl(ItType: type) type {
     return struct {
         const allowed_types = struct {
@@ -153,11 +151,10 @@ fn OptionsImpl(ItType: type) type {
                         postfix[1..]
                     else if (flag_info.type_tag == .bool)
                         "true"
-                    else
-                        args.next() orelse {
-                            parse_errors_mask.set(i);
-                            break;
-                        };
+                    else if (args.next()) |target| blk: {
+                        i +|= 1;
+                        break :blk target;
+                    } else break;
 
                     flag_info.parseIntoField(&parsed_flags, parse_target) catch parse_errors_mask.set(i);
 
@@ -346,13 +343,13 @@ test "non-flags and unmatched flags iteration" {
 
     try std.testing.expect(res.flags.x == 3);
 
-    var nf = res.positional_arguments;
+    var nf = res.positional_arguments.?;
     try std.testing.expect(nf.count() == 3);
     try std.testing.expect(std.mem.eql(u8, nf.next().?, "file1"));
     try std.testing.expect(std.mem.eql(u8, nf.next().?, "file2"));
     try std.testing.expect(std.mem.eql(u8, nf.next().?, "file3"));
 
-    var uf = res.unknown_flags;
+    var uf = res.unknown_flags.?;
     try std.testing.expect(uf.count() == 2);
     try std.testing.expect(std.mem.eql(u8, uf.next().?, "-bad"));
     try std.testing.expect(std.mem.eql(u8, uf.next().?, "-unknown=val"));
@@ -369,7 +366,7 @@ test "parse error: invalid int" {
 
     try std.testing.expect(res.flags.x == 0);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 1);
 
     const first = pe.next().?;
@@ -388,7 +385,7 @@ test "parse error: invalid float" {
 
     try std.testing.expect(res.flags.y == 0);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 1);
 
     const first = pe.next().?;
@@ -406,7 +403,7 @@ test "parse error: invalid bool" {
 
     try std.testing.expect(res.flags.b == false);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 1);
 
     const first = pe.next().?;
@@ -427,7 +424,7 @@ test "multiple parse errors" {
     try std.testing.expect(res.flags.a == 0);
     try std.testing.expect(res.flags.b == 0);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 2);
 
     const one = pe.next().?;
@@ -453,7 +450,7 @@ test "parse error does not interfere with valid flags" {
 
     try std.testing.expect(res.flags.y == 0);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 1);
     try std.testing.expect(std.mem.eql(u8, pe.next().?, "-y=bad"));
 }
@@ -473,7 +470,7 @@ test "parse_errors iterator: mixed flags, unknown flags, and parse errors" {
     try std.testing.expect(res.flags.a == 5);
     try std.testing.expect(res.flags.b == -93);
 
-    var pe = res.parse_errors;
+    var pe = res.parse_errors.?;
     try std.testing.expect(pe.count() == 2);
 
     const e1 = pe.next().?;
