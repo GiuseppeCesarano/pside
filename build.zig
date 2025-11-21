@@ -15,19 +15,19 @@ pub fn build(b: *std.Build) void {
     }
 
     const cli_mod = b.addModule("cli", .{
-        .root_source_file = b.path("src/cli.zig"),
+        .root_source_file = b.path("src/userspace/cli.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const KernelMod_mod = b.addModule("KenrelModule", .{
-        .root_source_file = b.path("src/KernelModule.zig"),
+        .root_source_file = b.path("src/userspace/KernelModule.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const record_mod = b.addModule("record", .{
-        .root_source_file = b.path("src/record.zig"),
+        .root_source_file = b.path("src/userspace/record.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const report_mod = b.addModule("report", .{
-        .root_source_file = b.path("src/report.zig"),
+        .root_source_file = b.path("src/userspace/report.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "cli", .module = cli_mod }},
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
     const executable = b.addExecutable(.{
         .name = "pside",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/userspace/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -74,7 +74,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Buil
     return b.addObject(.{
         .name = "pside_zig",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernel_module/pside.zig"),
+            .root_source_file = b.path("src/kernelspace/pside.zig"),
             .target = kernel_target,
             .optimize = .ReleaseSmall,
             .link_libc = false,
@@ -99,7 +99,7 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = write_files.addCopyFile(b.path("src/kernel_module/bindings.c"), "bindings.c");
+    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings.c"), "bindings.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", b.fmt("" ++
@@ -123,7 +123,7 @@ fn installKernelModuleFiles(b: *std.Build, kernel_module_files: *std.Build.Step.
     const install = b.addInstallDirectory(.{
         .source_dir = kernel_module_files.getDirectory(),
         .install_dir = .prefix,
-        .install_subdir = "kernel_module",
+        .install_subdir = "kernelspace",
     });
 
     install.step.dependOn(&kernel_module_files.step);
