@@ -193,45 +193,48 @@ fn OptionsImpl(ItType: type) type {
 
 pub const Options = OptionsImpl(std.process.ArgIterator);
 
-fn SubCommand(FnPtr: type) type {
-    const Fn = std.meta.Child(FnPtr);
-    if (@typeInfo(Fn) != .@"fn") @compileError("SubCommand handler must be a function pointer!\n");
-
-    return struct {
-        pub const Handler = FnPtr;
-        pub const HandlerSignature = Fn;
-
-        name: []const u8,
-        handler: Handler,
-    };
-}
-
 pub fn execute(
     args_it: anytype,
-    default_handler: anytype,
-    subcommands: []const SubCommand(@TypeOf(default_handler)),
+    comptime default_handler: anytype,
+    comptime subcommands: anytype,
     data: anytype,
-) @typeInfo(std.meta.Child(@TypeOf(default_handler))).@"fn".return_type.? {
+) !@typeInfo(@TypeOf(default_handler)).@"fn".return_type.? {
     const full_data = prependTuple(data, Options{ .args = args_it });
 
     var args = args_it;
     if (args.next()) |possible_subcommand| {
-        if (findSubcommand(subcommands, possible_subcommand)) |subcommand| {
-            return @call(.auto, subcommand.handler, full_data);
+        inline for (subcommands) |subcommand| {
+            if (std.mem.eql(u8, possible_subcommand, &functionName(subcommand)))
+                return @call(.auto, subcommand, full_data);
         }
     }
 
     return @call(.auto, default_handler, full_data);
 }
 
-fn findSubcommand(subcommands: anytype, name: []const u8) ?*const std.meta.Child(@TypeOf(subcommands)) {
-    for (subcommands) |subcommand| {
-        if (std.mem.eql(u8, subcommand.name, name)) {
-            return &subcommand;
-        }
-    }
+fn functionName(function: anytype) [functionNameLen(function)]u8 {
+    const type_name = @typeName(@TypeOf(.{function}));
+    const start_target = " (function '";
+    const function_name_start = comptime std.mem.find(u8, type_name, start_target).? + start_target.len;
+    const function_name_end = comptime std.mem.findPos(u8, type_name, function_name_start, "')").?;
 
-    return null;
+    const name_slice = type_name[function_name_start..function_name_end];
+
+    comptime var name: [name_slice.len]u8 = undefined;
+    @memcpy(&name, name_slice);
+
+    return name;
+}
+
+fn functionNameLen(function: anytype) usize {
+    if (@typeInfo(@TypeOf(function)) != .@"fn") @compileError("subcommand field must be populated with a tuple of structs.");
+
+    const type_name = @typeName(@TypeOf(.{function}));
+    const start_target = " (function '";
+    const function_name_start = comptime std.mem.find(u8, type_name, start_target).? + start_target.len;
+    const function_name_end = comptime std.mem.findPos(u8, type_name, function_name_start, "')").?;
+
+    return type_name[function_name_start..function_name_end].len;
 }
 
 fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @TypeOf(value)) {
