@@ -155,7 +155,7 @@ pub const Path = extern struct {
     extern fn c_kern_path([*:0]const u8) @This();
     pub fn init(path: [:0]const u8) !@This() {
         const ret = c_kern_path(path);
-        return switch (std.os.linux.E.init(ret)) {
+        return switch (std.posix.errno(ret)) {
             .SUCCESS => ret,
 
             .NOTDIR => error.NotDirectory,
@@ -201,7 +201,7 @@ pub const probe = struct {
     };
 
     pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
-        return switch (std.os.linux.E.init(@intCast(val))) {
+        return switch (std.posix.errno(@intCast(val))) {
             .SUCCESS => val,
 
             .NOENT => RegistrationError.NoEntity,
