@@ -1,1 +1,3 @@
 # pside
+
+TODO: stronger errors

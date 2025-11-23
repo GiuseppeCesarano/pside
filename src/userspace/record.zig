@@ -3,7 +3,9 @@ const cli = @import("cli");
 const KernelModule = @import("KernelModule");
 
 pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !void {
-    const parsed_options = options.parse(struct {});
+    const parsed_options = options.parse(struct {
+        c: []const u8 = "",
+    });
 
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
@@ -11,11 +13,18 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     var future_module = io.async(KernelModule.loadFromDefaultModulePath, .{ allocator, io, "pside" });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch {} else |_| {};
 
+    const command = try createCommand(parsed_options, allocator);
+    defer allocator.free(command);
+
+    var child: std.process.Child = .init(command, allocator);
+    // TODO: Drop permissions to userspace using SUDO_USER
+    // _ = try child.spawnAndWait();
+
     const module = try future_module.await(io);
-    defer module.unload(io) catch {};
+    _ = module;
 }
 
-inline fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
+fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
     if (optinal_errors) |errors| {
         @branchHint(.cold);
         var it = errors;
@@ -25,4 +34,38 @@ inline fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: [
 
         return error.InvalidOption;
     }
+}
+
+fn createCommand(parsed: anytype, allocator: std.mem.Allocator) ![][]const u8 {
+    if (!std.mem.eql(u8, parsed.flags.c, "")) {
+        if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
+
+        return try createCommandFromString(parsed.flags.c, allocator);
+    }
+
+    if (parsed.positional_arguments) |args| {
+        var it = args;
+        if (it.count() == 1) return try createCommandFromString(it.next().?, allocator);
+
+        const buffer = try allocator.alloc([]const u8, it.count());
+
+        for (buffer) |*str| {
+            str.* = it.next().?;
+        }
+
+        return buffer;
+    }
+
+    return error.UnspecifiedCommand;
+}
+
+fn createCommandFromString(string: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
+    const buffer = try allocator.alloc([]const u8, std.mem.countScalar(u8, string, ' ') + 1);
+    var it = std.mem.splitScalar(u8, string, ' ');
+
+    for (buffer) |*str| {
+        str.* = it.next().?;
+    }
+
+    return buffer;
 }
