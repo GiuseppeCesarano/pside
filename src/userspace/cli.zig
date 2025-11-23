@@ -198,17 +198,15 @@ pub fn execute(
     comptime subcommands: anytype,
     data: anytype,
 ) !@typeInfo(@TypeOf(default_handler)).@"fn".return_type.? {
-    const full_data = prependTuple(data, Options{ .args = args_it });
-
     var args = args_it;
     if (args.next()) |possible_subcommand| {
         inline for (subcommands) |subcommand| {
             if (std.mem.eql(u8, possible_subcommand, &functionName(subcommand)))
-                return @call(.auto, subcommand, full_data);
+                return @call(.auto, subcommand, prependTuple(data, Options{ .args = args }));
         }
     }
 
-    return @call(.auto, default_handler, full_data);
+    return @call(.auto, default_handler, prependTuple(data, Options{ .args = args_it }));
 }
 
 fn functionName(function: anytype) [functionNameLen(function)]u8 {
