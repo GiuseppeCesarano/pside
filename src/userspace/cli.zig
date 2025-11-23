@@ -143,8 +143,7 @@ fn OptionsImpl(ItType: type) type {
                 if (is_positional) continue;
 
                 for (flags_info) |flag_info| {
-                    if (!std.mem.startsWith(u8, arg[1..], flag_info.name)) continue;
-                    const postfix = arg[1 + flag_info.name.len ..];
+                    const postfix = std.mem.cutPrefix(u8, arg[1..], flag_info.name) orelse continue;
                     if (postfix.len != 0 and postfix[0] != '=') continue;
 
                     const parse_target = if (postfix.len != 0)
