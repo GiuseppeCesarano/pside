@@ -25,16 +25,14 @@ fn read(_: *anyopaque, buff: [*]u8, _: usize, offset: *i64) callconv(.c) isize {
 }
 
 fn write(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.c) isize {
-    std.log.info("size: {}", .{size});
-    if (size != 4) return 0;
+    if (kernel.mem.userBytesToValue(std.os.linux.pid_t, buff[0..size])) |pid| {
+        std.log.info("pid: {}", .{pid});
+    } else |_| {
+        std.log.warn("Sent data doesn't match command size, ignoring...", .{});
+    }
 
-    var pid: std.os.linux.pid_t = 0;
-    _ = kernel.mem.copyBytesFromUser(std.mem.asBytes(&pid), buff);
-
-    std.log.info("pid: {}", .{pid});
-
-    offset.* += 4;
-    return 4;
+    offset.* += @intCast(size);
+    return @intCast(size);
 }
 
 var c: std.atomic.Value(u32) = .init(0);

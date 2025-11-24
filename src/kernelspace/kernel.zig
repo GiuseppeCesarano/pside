@@ -10,6 +10,13 @@ pub const mem = struct {
     pub fn copyBytesFromUser(to: []u8, from: [*]const u8) usize {
         return c_copy_from_user(to.ptr, from, to.len);
     }
+
+    pub fn userBytesToValue(Type: type, user_buffer: []const u8) !Type {
+        if (@sizeOf(Type) != user_buffer.len) return error.SizesDontMatch;
+        var ret: [@sizeOf(Type)]u8 = undefined;
+        _ = copyBytesFromUser(&ret, @ptrCast(user_buffer.ptr));
+        return std.mem.bytesToValue(Type, &ret);
+    }
 };
 
 pub const heap = struct {
