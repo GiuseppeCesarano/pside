@@ -20,8 +20,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const KernelMod_mod = b.addModule("KenrelModule", .{
-        .root_source_file = b.path("src/userspace/KernelModule.zig"),
+    const kernel_mod = b.addModule("KenrelModule", .{
+        .root_source_file = b.path("src/userspace/kernel_module.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
-            .{ .name = "KernelModule", .module = KernelMod_mod },
+            .{ .name = "kernel_module", .module = kernel_mod },
         },
     });
 

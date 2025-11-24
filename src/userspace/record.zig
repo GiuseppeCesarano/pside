@@ -1,6 +1,6 @@
 const std = @import("std");
 const cli = @import("cli");
-const KernelModule = @import("KernelModule");
+const KernelModule = @import("kernel_module").KernelModule;
 
 pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !void {
     const parsed_options = options.parse(struct {
@@ -10,18 +10,21 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
-    var future_module = io.async(KernelModule.loadFromDefaultModulePath, .{ allocator, io, "pside" });
-    defer if (future_module.cancel(io)) |module| module.unload(io) catch {} else |_| {};
+    var future_module = io.async(KernelModule("pside").loadFromDefaultPath, .{ allocator, io });
+    defer if (future_module.cancel(io)) |module| module.unload(io) catch {} else |_| {
+        std.log.warn("Could not remove the kernel module, please try manually with:\n\nsudo rmmod pside", .{});
+    };
 
     const command = try createCommand(parsed_options, allocator);
     defer allocator.free(command);
 
-    var child: std.process.Child = .init(command, allocator);
     // TODO: Drop permissions to userspace using SUDO_USER
-    // _ = try child.spawnAndWait();
+    var child: std.process.Child = .init(command, allocator);
+    try child.spawn();
 
-    const module = try future_module.await(io);
-    _ = module;
+    var module = try future_module.await(io);
+
+    try module.chardev_writer.interface.writeInt(@TypeOf(child.id), child.id, @import("builtin").target.cpu.arch.endian());
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {

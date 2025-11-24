@@ -24,6 +24,19 @@ fn read(_: *anyopaque, buff: [*]u8, _: usize, offset: *i64) callconv(.c) isize {
     return @intCast(to_copy - not_copied);
 }
 
+fn write(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.c) isize {
+    std.log.info("size: {}", .{size});
+    if (size != 4) return 0;
+
+    var pid: std.os.linux.pid_t = 0;
+    _ = kernel.mem.copyBytesFromUser(std.mem.asBytes(&pid), buff);
+
+    std.log.info("pid: {}", .{pid});
+
+    offset.* += 4;
+    return 4;
+}
+
 var c: std.atomic.Value(u32) = .init(0);
 var probe: kernel.probe.K = .init("__x64_sys_getpid", .{ .pre_handler = &count });
 var chardev: kernel.CharDevice = undefined;
@@ -49,7 +62,7 @@ export fn init_module() linksection(".init.text") c_int {
     probe.register() catch return -1;
 
     std.log.info("Creating chardev...", .{});
-    chardev.create("pside", &read, null);
+    chardev.create("pside", &read, &write);
 
     return 0;
 }

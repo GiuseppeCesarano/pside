@@ -7,7 +7,7 @@ pub const mem = struct {
     }
 
     extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyBytesFromUser(to: []u8, from: *anyopaque) usize {
+    pub fn copyBytesFromUser(to: []u8, from: [*]const u8) usize {
         return c_copy_from_user(to.ptr, from, to.len);
     }
 };
