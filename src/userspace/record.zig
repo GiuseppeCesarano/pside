@@ -20,13 +20,10 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
 
     // TODO: Drop permissions to userspace using SUDO_USER
     var child: std.process.Child = .init(command.buffer, allocator);
-    child.err_pipe = std.fs.File.stderr().handle;
     try child.spawn();
 
     var module = try future_module.await(io);
-
     try module.chardev_writer.interface.writeInt(@TypeOf(child.id), child.id, @import("builtin").target.cpu.arch.endian());
-
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
@@ -112,3 +109,18 @@ const Command = struct {
         allocator.free(this.buffer);
     }
 };
+
+// TODO: trasform in a custom type.
+pub fn loadDebugInfo(path: []const u8, allocator: std.mem.Allocator, io: std.Io) !std.debug.ElfFile {
+    var file = try if (path[0] == '/') std.Io.File.openAbsolute(io, path, .{}) else std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+
+    var elf: std.debug.ElfFile = try .load(allocator, .adaptFromNewApi(file), null, &.none);
+    errdefer elf.deinit(allocator);
+
+    if (elf.dwarf == null) return error.MissingDebugInfo;
+    try elf.dwarf.?.open(allocator, elf.endian);
+    try elf.dwarf.?.populateRanges(allocator, elf.endian);
+
+    return elf;
+}
