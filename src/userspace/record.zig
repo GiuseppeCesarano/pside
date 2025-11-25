@@ -15,16 +15,18 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
         std.log.warn("Could not remove the kernel module, please try manually with:\n\nsudo rmmod pside", .{});
     };
 
-    const command = try createCommand(parsed_options, allocator);
-    defer allocator.free(command);
+    const command: Command = try .initFromParsedOptions(parsed_options, allocator, io);
+    defer command.deinit(allocator);
 
     // TODO: Drop permissions to userspace using SUDO_USER
-    var child: std.process.Child = .init(command, allocator);
+    var child: std.process.Child = .init(command.buffer, allocator);
+    child.err_pipe = std.fs.File.stderr().handle;
     try child.spawn();
 
     var module = try future_module.await(io);
 
     try module.chardev_writer.interface.writeInt(@TypeOf(child.id), child.id, @import("builtin").target.cpu.arch.endian());
+
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
@@ -39,36 +41,74 @@ fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const 
     }
 }
 
-fn createCommand(parsed: anytype, allocator: std.mem.Allocator) ![][]const u8 {
-    if (!std.mem.eql(u8, parsed.flags.c, "")) {
-        if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
+const Command = struct {
+    buffer: [][]const u8,
 
-        return try createCommandFromString(parsed.flags.c, allocator);
-    }
+    pub fn initFromParsedOptions(parsed: anytype, allocator: std.mem.Allocator, io: std.Io) !@This() {
+        if (!std.mem.eql(u8, parsed.flags.c, "")) {
+            if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
 
-    if (parsed.positional_arguments) |args| {
-        var it = args;
-        if (it.count() == 1) return try createCommandFromString(it.next().?, allocator);
-
-        const buffer = try allocator.alloc([]const u8, it.count());
-
-        for (buffer) |*str| {
-            str.* = it.next().?;
+            return try initFromString(parsed.flags.c, allocator, io);
         }
 
-        return buffer;
+        if (parsed.positional_arguments) |args| {
+            var it = args;
+            if (it.count() == 1) return try initFromString(it.next().?, allocator, io);
+
+            const buffer = try allocator.alloc([]const u8, it.count());
+            errdefer allocator.free(buffer);
+
+            buffer[0] = try expandBinaryPath(it.next().?, allocator, io);
+            copyToBuffer(buffer, &it);
+
+            return .{ .buffer = buffer };
+        }
+
+        return error.UnspecifiedCommand;
     }
 
-    return error.UnspecifiedCommand;
-}
+    pub fn initFromString(string: []const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+        const buffer = try allocator.alloc([]const u8, std.mem.countScalar(u8, string, ' ') + 1);
+        errdefer allocator.free(buffer);
 
-fn createCommandFromString(string: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
-    const buffer = try allocator.alloc([]const u8, std.mem.countScalar(u8, string, ' ') + 1);
-    var it = std.mem.splitScalar(u8, string, ' ');
+        var it = std.mem.splitScalar(u8, string, ' ');
 
-    for (buffer) |*str| {
-        str.* = it.next().?;
+        buffer[0] = try expandBinaryPath(it.next().?, allocator, io);
+        copyToBuffer(buffer, &it);
+
+        return .{ .buffer = buffer };
     }
 
-    return buffer;
-}
+    fn copyToBuffer(buffer: [][]const u8, it: anytype) void {
+        for (buffer[1..]) |*str| {
+            str.* = it.next().?;
+        }
+    }
+
+    fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+        if (std.mem.findScalar(u8, binary_path, '/') != null) {
+            //Allocate and copy so we don't need special logic in deinit.
+            const copy = try allocator.alloc(u8, binary_path.len);
+            @memcpy(copy, binary_path);
+            return copy;
+        }
+
+        const path_env = try std.process.getEnvVarOwned(allocator, "PATH");
+        defer allocator.free(path_env);
+        var path_it = std.mem.tokenizeScalar(u8, path_env, ':');
+
+        while (path_it.next()) |current_path| {
+            const dir = std.Io.Dir.cwd().openDir(io, current_path, .{}) catch continue;
+            if (dir.statPath(io, binary_path, .{})) |_| {
+                return std.mem.concat(allocator, u8, &.{ current_path, "/", binary_path });
+            } else |_| {}
+        }
+
+        return error.notFoundInPath;
+    }
+
+    pub fn deinit(this: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(this.buffer[0]);
+        allocator.free(this.buffer);
+    }
+};
