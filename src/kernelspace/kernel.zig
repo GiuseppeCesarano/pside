@@ -1,5 +1,9 @@
 const std = @import("std");
 
+// TODO: this file should be replaced when we have full support
+// for translate-c in zig, in the mean time we should still
+// fix the error handling code.
+
 pub const mem = struct {
     extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
     pub fn copyBytesToUser(to: *anyopaque, from: []const u8) usize {
@@ -161,19 +165,8 @@ pub const Path = extern struct {
 
     extern fn c_kern_path([*:0]const u8) @This();
     pub fn init(path: [:0]const u8) !@This() {
-        const ret = c_kern_path(path);
-        return switch (std.posix.errno(ret)) {
-            .SUCCESS => ret,
-
-            .NOTDIR => error.NotDirectory,
-            .LOOP => error.Loop,
-            .NAMETOOLONG => error.NameTooLong,
-            .ACCES => error.Access,
-            .NOMEM => error.OutOfMemory,
-            .FAULT => error.Fault,
-            .INVAL => error.InvalidArgument,
-            else => error.Unexpected,
-        };
+        // TODO: reimplement error handling
+        return c_kern_path(path);
     }
 
     extern fn c_path_put(*@This()) void;
@@ -208,7 +201,8 @@ pub const probe = struct {
     };
 
     pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
-        return switch (std.posix.errno(@intCast(val))) {
+        const casted: u64 = if (@typeInfo(@TypeOf(val)) == .pointer) @intFromPtr(val) else @intCast(val);
+        return switch (std.posix.errno(casted)) {
             .SUCCESS => val,
 
             .NOENT => RegistrationError.NoEntity,
@@ -225,8 +219,8 @@ pub const probe = struct {
     pub const U = struct {
         // This struct is the Consumer struct in c land
         pub const Callbacks = extern struct {
-            pub const PreHandler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
-            pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
+            pub const PreHandler = ?*const fn (*U, *PtRegs, *u64) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*U, *PtRegs, c_ulong, *u64) callconv(.c) c_int;
             pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
 
             pre_handler: PreHandler = null,
@@ -242,7 +236,8 @@ pub const probe = struct {
         handle: *anyopaque = undefined,
 
         pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) @This() {
-            return .{ .path = .init(path), .callbacks = callbacks, .offset = offset };
+            // TODO: remove unreachable
+            return .{ .path = Path.init(path) catch unreachable, .callbacks = callbacks, .offset = offset };
         }
 
         extern fn c_uprobe_register(*anyopaque, u64, *Callbacks) *anyopaque;
