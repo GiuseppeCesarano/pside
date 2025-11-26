@@ -21,13 +21,13 @@ pub fn build(b: *std.Build) void {
     });
 
     const kernel_mod = b.addModule("KenrelModule", .{
-        .root_source_file = b.path("src/userspace/kernel_module.zig"),
+        .root_source_file = b.path("src/userspace/record/kernel_module.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const record_mod = b.addModule("record", .{
-        .root_source_file = b.path("src/userspace/record.zig"),
+        .root_source_file = b.path("src/userspace/record/record.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -37,7 +37,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const report_mod = b.addModule("report", .{
-        .root_source_file = b.path("src/userspace/report.zig"),
+        .root_source_file = b.path("src/userspace/report/report.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "cli", .module = cli_mod }},
