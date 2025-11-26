@@ -7,26 +7,24 @@ pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName("pside").logFn,
 };
 
-fn count(_: ?*kernel.probe.K, _: ?*kernel.probe.PtRegs) callconv(.c) c_int {
-    _ = c.fetchAdd(1, .monotonic);
+var c: std.atomic.Value(u32) = .init(0);
+var probe: kernel.probe.U = undefined;
+var chardev: kernel.CharDevice = undefined;
+var pid = std.atomic.Value(std.os.linux.pid_t).init(0);
+
+fn filter(_: ?*kernel.probe.U, _: *anyopaque) bool {
+    return kernel.current_task.pid() == pid.load(.unordered);
+}
+
+fn count(_: ?*kernel.probe.U, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
+    if (kernel.current_task.pid() == pid.load(.unordered))
+        _ = c.fetchAdd(1, .monotonic);
     return 0;
 }
 
-fn read(_: *anyopaque, buff: [*]u8, _: usize, offset: *i64) callconv(.c) isize {
-    const s = "Hello from chardev!!\n";
-    const uoffset: usize = @intCast(offset.*);
-
-    const to_copy = s.len -| uoffset;
-    const end = @min(uoffset + to_copy, s.len);
-    const not_copied = kernel.mem.copyBytesToUser(buff, s[uoffset..end]);
-
-    offset.* += @intCast(to_copy - not_copied);
-    return @intCast(to_copy - not_copied);
-}
-
 fn write(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.c) isize {
-    if (kernel.mem.userBytesToValue(std.os.linux.pid_t, buff[0..size])) |pid| {
-        std.log.info("pid: {}", .{pid});
+    if (kernel.mem.userBytesToValue(std.os.linux.pid_t, buff[0..size])) |readed_pid| {
+        pid.store(readed_pid, .unordered);
     } else |_| {
         std.log.warn("Sent data doesn't match command size, ignoring...", .{});
     }
@@ -35,32 +33,14 @@ fn write(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.
     return @intCast(size);
 }
 
-var c: std.atomic.Value(u32) = .init(0);
-var probe: kernel.probe.K = .init("__x64_sys_getpid", .{ .pre_handler = &count });
-var chardev: kernel.CharDevice = undefined;
-
 export fn init_module() linksection(".init.text") c_int {
-    const allocator = kernel.heap.allocator;
-
-    const zig = allocator.alloc(u8, 3) catch return -1;
-    defer allocator.free(zig);
-    @memcpy(zig, "Zig");
-
-    const start = kernel.time.now.us();
-    kernel.time.delay.us(5);
-
-    std.log.info("Hello from {s}, pid: {}, tid: {} waited: {}us", .{
-        zig,
-        kernel.current_task.pid(),
-        kernel.current_task.tid(),
-        kernel.time.now.us() - start,
-    });
-
-    std.log.info("Starting probe...", .{});
+    // TODO: the offset is for pthraed_mutex_lock,
+    // ofc this will need to be passed by the userspace util.
+    probe = .init("/usr/lib/libc.so.6", .{ .pre_handler = &count, .filter = null }, 0x99f20);
     probe.register() catch return -1;
 
     std.log.info("Creating chardev...", .{});
-    chardev.create("pside", &read, &write);
+    chardev.create("pside", null, &write);
 
     return 0;
 }
@@ -68,6 +48,6 @@ export fn init_module() linksection(".init.text") c_int {
 export fn cleanup_module() linksection(".exit.text") void {
     probe.unregister();
     chardev.remove();
-    std.log.info("kprobe stopped, getpid called: {} times", .{c.load(.unordered)});
+    std.log.info("probe stopped\n pthread_mutex_lock called: {} times", .{c.load(.unordered)});
     std.log.info("chardev removed", .{});
 }
