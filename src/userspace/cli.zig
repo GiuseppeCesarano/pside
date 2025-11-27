@@ -4,18 +4,7 @@ fn OptionsImpl(ItType: type) type {
     return struct {
         const allowed_types = struct {
             pub const map = struct {
-                const names: []const []const u8 = &.{
-                    "i32",
-                    "i64",
-                    "u32",
-                    "u64",
-                    "f32",
-                    "f64",
-                    "bool",
-                    "str",
-                };
-
-                const types: [names.len]type = .{
+                const types = [_]type{
                     i32,
                     i64,
                     u32,
@@ -24,6 +13,17 @@ fn OptionsImpl(ItType: type) type {
                     f64,
                     bool,
                     []const u8,
+                };
+
+                const names: []const []const u8 = names_block: {
+                    var n: []const []const u8 = &.{};
+
+                    for (types) |Type| {
+                        const name = [_][]const u8{@typeName(Type)};
+                        n = n ++ &name;
+                    }
+
+                    break :names_block n;
                 };
             };
 
@@ -54,12 +54,6 @@ fn OptionsImpl(ItType: type) type {
 
                 return @enumFromInt(index);
             }
-
-            pub fn tagToType(tag: Tag) type {
-                for (map) |pair| {
-                    if (pair.tag == tag) return pair.Type;
-                }
-            }
         };
 
         const FlagInfo = struct {
@@ -84,7 +78,7 @@ fn OptionsImpl(ItType: type) type {
                     .f32 => .{ .f32 = try std.fmt.parseFloat(f32, parse_target) },
                     .f64 => .{ .f64 = try std.fmt.parseFloat(f64, parse_target) },
                     .bool => .{ .bool = if (std.mem.eql(u8, parse_target, "true")) true else if (std.mem.eql(u8, parse_target, "false")) false else return error.BoolDoNotMatch },
-                    .str => .{ .str = parse_target },
+                    .@"[]const u8" => .{ .@"[]const u8" = parse_target },
                 };
 
                 const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
