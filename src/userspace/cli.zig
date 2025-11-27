@@ -3,61 +3,60 @@ const std = @import("std");
 fn OptionsImpl(ItType: type) type {
     return struct {
         const allowed_types = struct {
-            pub const type_map = .{
-                .{ .tag = .i32, .Type = i32 },
-                .{ .tag = .i64, .Type = i64 },
-                .{ .tag = .u32, .Type = u32 },
-                .{ .tag = .u64, .Type = u64 },
-                .{ .tag = .f32, .Type = f32 },
-                .{ .tag = .f64, .Type = f64 },
-                .{ .tag = .bool, .Type = bool },
-                .{ .tag = .str, .Type = []const u8 },
+            pub const map = struct {
+                const names: []const []const u8 = &.{
+                    "i32",
+                    "i64",
+                    "u32",
+                    "u64",
+                    "f32",
+                    "f64",
+                    "bool",
+                    "str",
+                };
+
+                const types: [names.len]type = .{
+                    i32,
+                    i64,
+                    u32,
+                    u64,
+                    f32,
+                    f64,
+                    bool,
+                    []const u8,
+                };
             };
 
             const Tag = tag_block: {
-                var enum_info: std.builtin.Type.Enum = .{
-                    .tag_type = u8,
-                    .fields = &.{},
-                    .decls = &.{},
-                    .is_exhaustive = true,
-                };
+                var field_values: [map.names.len]u8 = undefined;
 
-                for (type_map, 0..) |pair, i| {
-                    enum_info.fields = enum_info.fields ++ [_]std.builtin.Type.EnumField{.{ .name = @tagName(pair.tag), .value = i }};
+                for (&field_values, 0..) |*value, i| {
+                    value.* = i;
                 }
 
-                break :tag_block @Type(.{ .@"enum" = enum_info });
+                break :tag_block @Enum(u8, .exhaustive, map.names, &field_values);
             };
 
             const Union = union_block: {
-                var union_info: std.builtin.Type.Union = .{
-                    .layout = .auto,
-                    .tag_type = null,
-                    .decls = &.{},
-                    .fields = &.{},
-                };
+                const Attributes = std.builtin.Type.UnionField.Attributes;
 
-                for (type_map) |pair| {
-                    union_info.fields = union_info.fields ++ [_]std.builtin.Type.UnionField{.{
-                        .name = @tagName(pair.tag),
-                        .type = pair.Type,
-                        .alignment = @alignOf(pair.Type),
-                    }};
+                var fields_attributes: [map.types.len]Attributes = undefined;
+                for (&fields_attributes, map.types) |*attributes, Type| {
+                    attributes.* = .{ .@"align" = @alignOf(Type) };
                 }
 
-                break :union_block @Type(.{ .@"union" = union_info });
+                break :union_block @Union(.auto, null, map.names, &map.types, &fields_attributes);
             };
 
             pub fn tagFromType(Type: type) Tag {
-                for (type_map) |pair| {
-                    if (pair.Type == Type) return pair.tag;
-                }
+                const index = std.mem.findScalar(type, &map.types, Type) orelse
+                    @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
 
-                @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
+                return @enumFromInt(index);
             }
 
             pub fn tagToType(tag: Tag) type {
-                for (type_map) |pair| {
+                for (map) |pair| {
                     if (pair.tag == tag) return pair.Type;
                 }
             }
@@ -90,9 +89,9 @@ fn OptionsImpl(ItType: type) type {
 
                 const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
 
-                inline for (allowed_types.type_map) |entry| {
-                    if (entry.tag == this.type_tag) {
-                        @as(*entry.Type, @ptrCast(@alignCast(field_ptr))).* = @field(value, @tagName(entry.tag));
+                inline for (allowed_types.map.types, 0..) |Type, i| {
+                    if (i == @intFromEnum(this.type_tag)) {
+                        @as(*Type, @ptrCast(@alignCast(field_ptr))).* = @field(value, allowed_types.map.names[i]);
                         return;
                     }
                 }

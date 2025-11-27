@@ -90,7 +90,7 @@ pub fn LogWithName(comptime module_name: []const u8) type {
         extern fn c_pr_info([*:0]const u8) void;
         extern fn c_pr_debug([*:0]const u8) void;
 
-        pub fn logFn(comptime level: std.log.Level, comptime scope: @Type(.enum_literal), comptime fmt: []const u8, args: anytype) void {
+        pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime fmt: []const u8, args: anytype) void {
             var buf: [64]u8 = undefined;
             const scope_name = if (scope == .default) module_name else @tagName(scope);
             const scoped_fmt = scope_name ++ ": " ++ fmt ++ "\n";
