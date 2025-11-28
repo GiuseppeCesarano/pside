@@ -1,6 +1,6 @@
 const std = @import("std");
 const cli = @import("cli");
-const KernelModule = @import("kernel_module").KernelModule;
+const PsideKernelModule = @import("PsideKernelModule");
 
 pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !void {
     const parsed_options = options.parse(struct {
@@ -10,21 +10,21 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
-    var future_module = io.async(KernelModule("pside").loadFromDefaultPath, .{ allocator, io });
-    defer if (future_module.cancel(io)) |module| module.unload(io) catch {} else |_| {
+    var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ allocator, io });
+    defer if (future_module.cancel(io)) |module| module.unload(allocator, io) catch {} else |_| {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\nsudo rmmod pside", .{});
     };
 
-    const command: Command = try .initFromParsedOptions(parsed_options, allocator, io);
-    defer command.deinit(allocator);
+    const user_program: UserProgram = try .initFromParsedOptions(parsed_options, allocator, io);
+    defer user_program.deinit(allocator);
 
     // TODO: Drop permissions to userspace using SUDO_USER
-    var child: std.process.Child = .init(command.buffer, allocator);
+    var child: std.process.Child = .init(user_program.buffer, allocator);
     child.start_suspended = true;
     try child.spawn();
 
     var module = try future_module.await(io);
-    try module.chardev_writer.interface.writeInt(@TypeOf(child.id), child.id, @import("builtin").target.cpu.arch.endian());
+    try module.setPidForFilter(child.id);
 
     try std.posix.kill(child.id, .CONT);
     _ = try child.wait();
@@ -42,7 +42,7 @@ fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const 
     }
 }
 
-const Command = struct {
+const UserProgram = struct {
     buffer: [][]const u8,
 
     pub fn initFromParsedOptions(parsed: anytype, allocator: std.mem.Allocator, io: std.Io) !@This() {

@@ -1,5 +1,6 @@
 const std = @import("std");
 const kernel = @import("kernel.zig");
+const command = @import("command");
 
 export const license linksection(".modinfo") = "license=GPL".*;
 
@@ -23,13 +24,22 @@ fn count(_: ?*kernel.probe.U, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_
 }
 
 fn write(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.c) isize {
-    if (kernel.mem.userBytesToValue(std.os.linux.pid_t, buff[0..size])) |readed_pid| {
-        pid.store(readed_pid, .unordered);
-    } else |_| {
+    defer offset.* += @intCast(size); // Always read everything from the user.
+
+    if (size < @sizeOf(command.Data)) {
         std.log.warn("Sent data doesn't match command size, ignoring...", .{});
+        return @intCast(size);
     }
 
-    offset.* += @intCast(size);
+    // TODO: remove unreachable
+    const recived_command = kernel.mem.userBytesToValue(command.Data, buff[0..@sizeOf(command.Data)]) catch unreachable;
+
+    switch (recived_command) {
+        .set_pid_for_filter => pid.store(recived_command.set_pid_for_filter, .unordered),
+
+        else => std.log.err("unsupported.", .{}),
+    }
+
     return @intCast(size);
 }
 
@@ -48,6 +58,6 @@ export fn init_module() linksection(".init.text") c_int {
 export fn cleanup_module() linksection(".exit.text") void {
     probe.unregister();
     chardev.remove();
-    std.log.info("probe stopped\n pthread_mutex_lock called: {} times", .{c.load(.unordered)});
+    std.log.info("pthread_mutex_lock called: {} times", .{c.load(.unordered)});
     std.log.info("chardev removed", .{});
 }

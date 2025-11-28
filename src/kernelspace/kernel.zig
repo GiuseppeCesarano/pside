@@ -17,9 +17,9 @@ pub const mem = struct {
 
     pub fn userBytesToValue(Type: type, user_buffer: []const u8) !Type {
         if (@sizeOf(Type) != user_buffer.len) return error.SizesDontMatch;
-        var ret: [@sizeOf(Type)]u8 = undefined;
-        _ = copyBytesFromUser(&ret, @ptrCast(user_buffer.ptr));
-        return std.mem.bytesToValue(Type, &ret);
+        var ret: Type = undefined;
+        _ = copyBytesFromUser(std.mem.asBytes(&ret), @ptrCast(user_buffer.ptr));
+        return ret;
     }
 };
 

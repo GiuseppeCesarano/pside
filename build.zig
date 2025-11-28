@@ -4,7 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{ .whitelist = &.{.{ .os_tag = .linux }} });
     const optimize = b.standardOptimizeOption(.{});
 
-    const kernel_module_files = createKernelModuleFiles(b, createZigKernelObj(b, target));
+    const command_mod = b.addModule("cli", .{
+        .root_source_file = b.path("src/common/commands.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const kernel_module_files = createKernelModuleFiles(b, createZigKernelObj(b, target, &.{command_mod}));
 
     const is_build_standalone = b.option(bool, "standalone-build", "Create a self-contained build folder that can be used" ++
         "to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -21,9 +27,12 @@ pub fn build(b: *std.Build) void {
     });
 
     const kernel_mod = b.addModule("KenrelModule", .{
-        .root_source_file = b.path("src/userspace/record/kernel_module.zig"),
+        .root_source_file = b.path("src/userspace/record/PsideKernelModule.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "command", .module = command_mod },
+        },
     });
 
     const record_mod = b.addModule("record", .{
@@ -32,7 +41,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
-            .{ .name = "kernel_module", .module = kernel_mod },
+            .{ .name = "PsideKernelModule", .module = kernel_mod },
         },
     });
 
@@ -67,7 +76,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cli_tests.step);
 }
 
-fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.Compile {
+fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, deps: []const *std.Build.Module) *std.Build.Step.Compile {
     var kernel_target = target;
     kernel_target.result.os.tag = .freestanding;
 
@@ -90,6 +99,9 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget) *std.Buil
             .omit_frame_pointer = false,
             .error_tracing = false,
             .no_builtin = true,
+            .imports = &.{
+                .{ .name = "command", .module = deps[0] },
+            },
         }),
     });
 }
