@@ -25,23 +25,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-
-    const kernel_mod = b.addModule("KenrelModule", .{
-        .root_source_file = b.path("src/userspace/record/PsideKernelModule.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "command", .module = command_mod },
-        },
-    });
-
     const record_mod = b.addModule("record", .{
         .root_source_file = b.path("src/userspace/record/record.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
-            .{ .name = "PsideKernelModule", .module = kernel_mod },
+            .{ .name = "command", .module = command_mod },
         },
     });
 
