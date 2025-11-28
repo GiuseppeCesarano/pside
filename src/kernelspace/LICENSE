@@ -1,8 +1,6 @@
 Kernel Module Dual License Notice
 ================================
 
-Copyright (c) 2025 Giuseppe Cesarano
-
 The source code files in this folder (`kernel_module/`) are dual-licensed under:
 
 1. **MIT License**  
@@ -22,4 +20,3 @@ Notes:
   itself as `"GPL"` in `.modinfo`.  
 - You may choose either license when redistributing or modifying the source  
   in this folder.
-
