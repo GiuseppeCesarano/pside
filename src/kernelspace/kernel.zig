@@ -1,4 +1,10 @@
 const std = @import("std");
+const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
+
+// We test the custom allocator replacing kernel calls with malloc and free
+const c = if (!is_target_kernel) @cImport({
+    @cInclude("stdlib.h");
+}) else {};
 
 // TODO: this file should be replaced when we have full support
 // for translate-c in zig, in the mean time we should still
@@ -28,6 +34,9 @@ pub const heap = struct {
         extern fn c_kmalloc(c_ulong) ?*anyopaque;
         extern fn c_kfree(*anyopaque) void;
 
+        const cmalloc = if (is_target_kernel) c_kmalloc else c.malloc;
+        const cfree = if (is_target_kernel) c_kfree else c.free;
+
         const vtable: std.mem.Allocator.VTable = .{
             .alloc = alloc,
             .resize = resize,
@@ -43,11 +52,11 @@ pub const heap = struct {
             // + 1 byte of metadata to save how many bytes we skipped
             //
             // The metadata will be the byte preceding the returned ptr
-            const unaligned_address = @intFromPtr(c_kmalloc(@intCast(len + alignment_bytes)) orelse return null);
+            const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes)) orelse return null);
             // If the address is already aligned alignForward
             // will not advance and we will not have space for
             // our metadata byte so we need to advance by one
-            const aligned_address = std.mem.alignForward(usize, unaligned_address + 1, alignment_bytes);
+            const aligned_address = alignment.forward(unaligned_address + 1);
 
             const ptr: [*]u8 = @ptrFromInt(aligned_address);
             (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
@@ -73,7 +82,7 @@ pub const heap = struct {
             const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
             const skipped_bytes = (buf_ptr - 1)[0];
 
-            c_kfree(@ptrCast(buf_ptr - skipped_bytes));
+            cfree(@ptrCast(buf_ptr - skipped_bytes));
         }
     };
 
@@ -315,3 +324,15 @@ pub const CharDevice = extern struct {
         c_chardev_unregister(this);
     }
 };
+
+test "Allocator generally" {
+    try std.heap.testAllocator(heap.allocator);
+}
+
+test "Aligned allocations" {
+    try std.heap.testAllocatorAligned(heap.allocator);
+}
+
+test "Aligned allocations and shrinks" {
+    try std.heap.testAllocatorAlignedShrink(heap.allocator);
+}

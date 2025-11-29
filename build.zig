@@ -62,8 +62,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
+    const kernel_bindings_test_only_mod = b.addModule("kbtom", .{
+        .root_source_file = b.path("src/kernelspace/kernel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const kbto_tests = b.addTest(.{
+        .root_module = kernel_bindings_test_only_mod,
+    });
+    const run_kbto_tests = b.addRunArtifact(kbto_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_cli_tests.step);
+    test_step.dependOn(&run_kbto_tests.step);
 }
 
 fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, deps: []const *std.Build.Module) *std.Build.Step.Compile {
