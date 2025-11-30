@@ -17,14 +17,15 @@ pub const mem = struct {
     }
 
     extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyBytesFromUser(to: []u8, from: [*]const u8) usize {
-        return c_copy_from_user(to.ptr, from, to.len);
+    pub fn copyBytesFromUser(to: []u8, from: []const u8) []const u8 {
+        const len = @min(to.len, from.len);
+        return to[0..c_copy_from_user(to.ptr, from.ptr, len)];
     }
 
     pub fn userBytesToValue(Type: type, user_buffer: []const u8) !Type {
         if (@sizeOf(Type) != user_buffer.len) return error.SizesDontMatch;
         var ret: Type = undefined;
-        _ = copyBytesFromUser(std.mem.asBytes(&ret), @ptrCast(user_buffer.ptr));
+        _ = copyBytesFromUser(std.mem.asBytes(&ret), user_buffer);
         return ret;
     }
 };

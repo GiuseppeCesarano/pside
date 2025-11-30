@@ -8,7 +8,7 @@ file: std.Io.File,
 chardev: std.Io.File,
 chardev_writer: std.fs.File.Writer, // TODO: when implemented switch to std.Io.Writer
 chardev_reader: std.Io.File.Reader,
-buffer: []const u8,
+buffer: []u8,
 
 pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator);
@@ -99,12 +99,13 @@ pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
     _ = try this.chardev_writer.interface.write(std.mem.asBytes(&c));
 }
 
-pub fn loadProbeWithData(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
-    const c = @unionInit(command.Data, @tagName(kind), command.ProbeData{ .path_len = path.len, .offset = offset });
+pub fn loadProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
+    const c = @unionInit(command.Data, @tagName(kind), offset);
 
-    const buffer_writer: std.Io.Writer = .fixed(this.buffer);
-    try buffer_writer.write(std.mem.asBytes(&c));
-    try buffer_writer.write(path);
+    var buffer_writer: std.Io.Writer = .fixed(this.buffer);
+    // TODO: Check if we wrote all
+    _ = try buffer_writer.write(std.mem.asBytes(&c));
+    _ = try buffer_writer.write(path);
 
-    try this.chardev_writer.interface.write(this.buffer[0 .. @sizeOf(command.Data) + path.len]);
+    _ = try this.chardev_writer.interface.write(this.buffer[0 .. @sizeOf(command.Data) + path.len]);
 }

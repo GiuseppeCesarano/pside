@@ -1,7 +1,14 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{ .whitelist = &.{.{ .os_tag = .linux }} });
+    const target = b.standardTargetOptions(.{
+        .whitelist = &.{
+            .{
+                .os_tag = .linux,
+                .cpu_arch = .x86_64, // bindings.c is specific to x86_64, waiting for translate-c to support kernel modules for arm/riscv
+            },
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
 
     const command_mod = b.addModule("cli", .{
@@ -10,7 +17,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, createZigKernelObj(b, target, &.{command_mod}));
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{command_mod}));
 
     const is_build_standalone = b.option(bool, "standalone-build", "Create a self-contained build folder that can be used" ++
         "to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -79,16 +86,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_kbto_tests.step);
 }
 
-fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, deps: []const *std.Build.Module) *std.Build.Step.Compile {
+fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module) *std.Build.Step.Compile {
     var kernel_target = target;
-    kernel_target.result.os.tag = .freestanding;
+    kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
+
+    kernel_target.query = switch (kernel_target.query.cpu_arch.?) {
+        .x86_64 => .{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_add = std.Target.x86.featureSet(&.{.soft_float}),
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
+        },
+
+        else => @panic("Correct feature flags unimplemented for target arch..."),
+    };
 
     return b.addObject(.{
         .name = "pside_zig",
+        .use_llvm = true,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/kernelspace/pside.zig"),
             .target = kernel_target,
-            .optimize = .ReleaseSmall,
+            .optimize = optimize,
             .link_libc = false,
             .link_libcpp = false,
             .single_threaded = true,
@@ -109,7 +129,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, deps: []c
     });
 }
 
-fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
+fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
 
     const write_files = b.addWriteFiles();
@@ -120,6 +140,7 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
     _ = write_files.add("Makefile", b.fmt("" ++
         "obj-m += pside.o\n" ++
         "pside-objs := bindings.o {s}\n" ++
+        "{s}" ++ // Debug definition for bindings
         "\n" ++
         "PWD := $(CURDIR)\n" ++
         "\n" ++
@@ -127,7 +148,7 @@ fn createKernelModuleFiles(b: *std.Build, zig_kernel_obj: *std.Build.Step.Compil
         "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules\n" ++
         "\n" ++
         "clean:\n" ++
-        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n", .{zig_kernel_obj.out_filename}));
+        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n", .{ zig_kernel_obj.out_filename, if (is_debug) "CFLAGS_bindings.o := -DDEBUG\n" else "" }));
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 

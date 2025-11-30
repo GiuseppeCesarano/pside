@@ -26,6 +26,7 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
 
     var module = try future_module.await(io);
     try module.setPidForFilter(child.id);
+    try module.loadProbe(.load_benchmark_probe, "/usr/lib/libc.so.6", 0x99f20);
 
     try std.posix.kill(child.id, .CONT);
     _ = try child.wait();
