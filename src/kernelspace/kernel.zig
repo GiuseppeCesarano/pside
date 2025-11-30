@@ -40,6 +40,7 @@ pub const heap = struct {
         fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
             std.debug.assert(len > 0);
             const alignment_bytes = alignment.toByteUnits();
+            std.debug.assert(alignment_bytes < std.math.maxInt(u8));
 
             // We will overallocate for the maximum alignment padding
             // which is the alignement size - 1; +1 byte of metadata
