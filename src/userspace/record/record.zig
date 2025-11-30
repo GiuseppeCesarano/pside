@@ -13,7 +13,7 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
 
     var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(allocator, io) catch {} else |_| {
-        std.log.warn("Could not remove the kernel module, please try manually with:\n\nsudo rmmod pside", .{});
+        std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     };
 
     const user_program: UserProgram = try .initFromParsedOptions(parsed_options, allocator, io);

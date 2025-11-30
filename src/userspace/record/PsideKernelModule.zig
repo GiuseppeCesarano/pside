@@ -14,7 +14,9 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator);
     defer allocator.free(path);
 
-    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes + @sizeOf(command.Data));
+    // Allocate enough buffer for the reader to allow
+    // sending all possible commands with a single syscall.
+    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes + @sizeOf(command.Tag) + @sizeOf(usize));
     errdefer allocator.free(buffer);
 
     var rt: @This() = .{
@@ -33,7 +35,7 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     );
 
     rt.chardev = try std.Io.File.openAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
-    rt.chardev_writer = std.fs.File.adaptFromNewApi(rt.chardev).writerStreaming(&.{}); // switch to new api
+    rt.chardev_writer = std.fs.File.adaptFromNewApi(rt.chardev).writerStreaming(rt.buffer); // switch to new api
     rt.chardev_reader = rt.chardev.reader(io, &.{});
 
     return switch (std.posix.errno(load_res)) {
@@ -94,18 +96,26 @@ pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
-    const c: command.Data = .{ .set_pid_for_filter = pid };
-
-    _ = try this.chardev_writer.interface.write(std.mem.asBytes(&c));
+    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.set_pid_for_filter), native_endianess);
+    _ = try this.chardev_writer.interface.writeInt(std.os.linux.pid_t, pid, native_endianess);
+    try this.chardev_writer.interface.flush();
 }
 
 pub fn loadProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
-    const c = @unionInit(command.Data, @tagName(kind), offset);
+    switch (kind) {
+        .load_benchmark_probe, .load_function_probe, .load_mutex_probe => {},
+        else => @compileError("Please provide a command which loads an uprobe."),
+    }
 
-    var buffer_writer: std.Io.Writer = .fixed(this.buffer);
-    // TODO: Check if we wrote all
-    _ = try buffer_writer.write(std.mem.asBytes(&c));
-    _ = try buffer_writer.write(path);
+    // This would excede the buffer and couse the writer to call
+    // the syscall two times which would result in the kenel
+    // module to treat those as two separated commands.
+    if (path.len >= std.fs.max_path_bytes) return error.pathTooLong;
 
-    _ = try this.chardev_writer.interface.write(this.buffer[0 .. @sizeOf(command.Data) + path.len]);
+    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(kind), native_endianess);
+    _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
+    _ = try this.chardev_writer.interface.write(path);
+    _ = try this.chardev_writer.interface.writeInt(u8, 0, native_endianess);
+
+    try this.chardev_writer.interface.flush();
 }

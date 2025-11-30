@@ -1,6 +1,8 @@
 const std = @import("std");
 const kernel = @import("kernel.zig");
 const command = @import("command");
+const native_endian = @import("builtin").target.cpu.arch.endian();
+const allocator = kernel.heap.allocator;
 
 const name = "pside";
 export const license linksection(".modinfo") = "license=GPL".*;
@@ -8,8 +10,6 @@ export const license linksection(".modinfo") = "license=GPL".*;
 pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName(name).logFn,
 };
-
-const allocator = kernel.heap.allocator;
 
 var call_count: std.atomic.Value(u32) = .init(0);
 var filter_pid = std.atomic.Value(std.os.linux.pid_t).init(0);
@@ -40,43 +40,69 @@ export fn cleanup_module() linksection(".exit.text") void {
     kprobes.deinit(allocator);
 
     chardev.remove();
-    std.log.debug("pthread_mutex_lock called: {} times", .{call_count.load(.unordered)});
     std.log.debug("chardev removed", .{});
+
+    std.log.info("pthread_mutex_lock called: {} times", .{call_count.load(.unordered)});
 }
 
-fn writeCallBack(_: *anyopaque, buff: [*]const u8, size: usize, offset: *i64) callconv(.c) isize {
-    defer offset.* +|= @intCast(size); // Always read everything from the user.
-    _ = buff;
+fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_len: usize, offset: *i64) callconv(.c) isize {
+    defer offset.* +|= @intCast(userspace_buffer_len); // Always read everything from the user.
 
-    //     const input = buff[0..size];
-    //     const data_size = @sizeOf(command.Data);
+    var we_allocated = false;
+    var kernelspace_buffer: [std.atomic.cache_line * 2]u8 = undefined;
+    var kernelspace_slice: []u8 = &kernelspace_buffer;
 
-    //     if (size < data_size) {
-    //         std.log.warn("Sent data doesn't match command size, ignoring...", .{});
-    //         return @intCast(size);
-    //     }
+    std.log.debug("userspace sent {} bytes", .{userspace_buffer_len});
 
-    //     // TODO: remove unreachable
-    //     const recived_command = kernel.mem.userBytesToValue(command.Data, input) catch unreachable;
-    //     var path_buff: [100]u8 = @splat(0); // TODO: maybe handle with allocator
-    //     const path = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(kernel.mem.copyBytesFromUser(&path_buff, input[data_size..]).ptr)), 0);
+    if (kernelspace_buffer.len < userspace_buffer_len) {
+        kernelspace_slice = allocator.alloc(u8, userspace_buffer_len) catch {
+            std.log.warn("could not allocate enough data to read userspace message. Ignoring written data...", .{});
+            return @intCast(userspace_buffer_len);
+        };
+        we_allocated = true;
+    }
+    defer if (we_allocated) allocator.free(kernelspace_slice);
 
-    //     switch (recived_command) {
-    //         .set_pid_for_filter => filter_pid.store(recived_command.set_pid_for_filter, .unordered),
+    var reader: std.Io.Reader = .fixed(kernel.mem.copyBytesFromUser(kernelspace_slice, userspace_buffer[0..userspace_buffer_len]));
 
-    //         .load_benchmark_probe => loadBenchmarkProbe(path, recived_command.load_benchmark_probe),
+    const recived_command = reader.takeEnum(command.Tag, native_endian) catch |err| {
+        std.log.warn("Reading command gave: {s}. Ignoring written data...", .{@errorName(err)});
+        return @intCast(userspace_buffer_len);
+    };
 
-    //         // .load_mutex_probe => loadMutexProbe(kernel.mem.copyBytesFromUser(&path, input[data_size..]), recived_command.load_benchmark_probe),
-    //         // .load_function_probe => loadFunctionProbe(kernel.mem.copyBytesFromUser(&path, input[data_size..]), recived_command.load_benchmark_probe),
+    switch (recived_command) {
+        .set_pid_for_filter => {
+            const pid = reader.takeInt(std.os.linux.pid_t, native_endian) catch |err| {
+                std.log.warn("Reading pid gave:{s}. Ignoring written data...", .{@errorName(err)});
+                return @intCast(userspace_buffer_len);
+            };
+            filter_pid.store(pid, .unordered);
+        },
 
-    //         else => std.log.err("unsupported command: {any}.", .{recived_command}),
-    //     }
+        .load_benchmark_probe => {
+            const probe_offset = reader.takeInt(usize, native_endian) catch |err| {
+                std.log.warn("Reading probe offset gave:{s}. Ignoring written data...", .{@errorName(err)});
+                return @intCast(userspace_buffer_len);
+            };
 
-    return @intCast(size);
+            const probe_path: [:0]const u8 = reader.takeSentinel(0) catch |err| {
+                std.log.warn("Reading probe path gave:{s}. Ignoring written data...", .{@errorName(err)});
+                return @intCast(userspace_buffer_len);
+            };
+
+            loadBenchmarkProbe(probe_path, probe_offset);
+        },
+
+        else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
+    }
+
+    return @intCast(userspace_buffer_len);
 }
 
 fn loadBenchmarkProbe(path: [:0]const u8, offset: usize) void {
-    uprobes.append(allocator, .init(path, .{ .filter = &doesPidMatch, .pre_handler = &count }, offset)) catch {};
+    const new = uprobes.addOne(allocator) catch return;
+    new.* = .init(path, .{ .filter = &doesPidMatch, .pre_handler = &count }, offset);
+    new.register() catch return;
 }
 
 fn loadMutexProbe(path: [:0]const u8, offset: usize) void {

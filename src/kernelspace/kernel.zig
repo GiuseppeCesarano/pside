@@ -18,15 +18,7 @@ pub const mem = struct {
 
     extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
     pub fn copyBytesFromUser(to: []u8, from: []const u8) []const u8 {
-        const len = @min(to.len, from.len);
-        return to[0..c_copy_from_user(to.ptr, from.ptr, len)];
-    }
-
-    pub fn userBytesToValue(Type: type, user_buffer: []const u8) !Type {
-        if (@sizeOf(Type) != user_buffer.len) return error.SizesDontMatch;
-        var ret: Type = undefined;
-        _ = copyBytesFromUser(std.mem.asBytes(&ret), user_buffer);
-        return ret;
+        return to[0 .. from.len - c_copy_from_user(to.ptr, from.ptr, from.len)];
     }
 };
 
@@ -50,10 +42,13 @@ pub const heap = struct {
             const alignment_bytes = alignment.toByteUnits();
 
             // We will overallocate for the maximum alignment padding
-            // + 1 byte of metadata to save how many bytes we skipped
+            // which is the alignement size - 1; +1 byte of metadata
+            // to save how many bytes we skipped. So we just allocate
+            // an eccess of alignement size bytes.
             //
             // The metadata will be the byte preceding the returned ptr
             const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes)) orelse return null);
+
             // If the address is already aligned alignForward
             // will not advance and we will not have space for
             // our metadata byte so we need to advance by one
@@ -101,7 +96,7 @@ pub fn LogWithName(comptime module_name: []const u8) type {
         extern fn c_pr_debug([*:0]const u8) void;
 
         pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime fmt: []const u8, args: anytype) void {
-            var buf: [64]u8 = undefined;
+            var buf: [128]u8 = undefined;
             const scope_name = if (scope == .default) module_name else @tagName(scope);
             const scoped_fmt = scope_name ++ ": " ++ fmt ++ "\n";
             const string = if (@inComptime())
@@ -212,7 +207,7 @@ pub const probe = struct {
 
     pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
         const casted: u64 = if (@typeInfo(@TypeOf(val)) == .pointer) @intFromPtr(val) else @intCast(val);
-        return switch (std.posix.errno(casted)) {
+        return switch (std.os.linux.errno(casted)) {
             .SUCCESS => val,
 
             .NOENT => RegistrationError.NoEntity,
