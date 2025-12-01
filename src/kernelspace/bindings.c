@@ -44,7 +44,7 @@ int c_register_kprobe(struct kprobe *);
 void c_unregister_kprobe(struct kprobe *);
 
 /* Paths */
-struct path c_kern_path(const char *);
+struct path c_kern_path(const char *, int *);
 void c_path_put(struct path *);
 
 /* Dentry / inode */
@@ -108,9 +108,9 @@ int c_register_kprobe(struct kprobe *probe) { return register_kprobe(probe); }
 void c_unregister_kprobe(struct kprobe *probe) { unregister_kprobe(probe); }
 
 /* Paths */
-struct path c_kern_path(const char *path) {
+struct path c_kern_path(const char *path, int *err) {
   struct path p;
-  kern_path(path, LOOKUP_FOLLOW, &p);
+  *err = kern_path(path, LOOKUP_FOLLOW, &p);
   return p;
 }
 

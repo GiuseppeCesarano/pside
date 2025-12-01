@@ -52,11 +52,11 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
     var kernelspace_buffer: [std.atomic.cache_line * 2]u8 = undefined;
     var kernelspace_slice: []u8 = &kernelspace_buffer;
 
-    std.log.debug("userspace sent {} bytes", .{userspace_buffer_len});
+    std.log.debug("Userspace sent {} bytes", .{userspace_buffer_len});
 
     if (kernelspace_buffer.len < userspace_buffer_len) {
         kernelspace_slice = allocator.alloc(u8, userspace_buffer_len) catch {
-            std.log.warn("could not allocate enough data to read userspace message. Ignoring written data...", .{});
+            std.log.warn("Could not allocate enough data to read userspace message. Ignoring written data...", .{});
             return @intCast(userspace_buffer_len);
         };
         we_allocated = true;
@@ -66,32 +66,19 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
     var reader: std.Io.Reader = .fixed(kernel.mem.copyBytesFromUser(kernelspace_slice, userspace_buffer[0..userspace_buffer_len]));
 
     const recived_command = reader.takeEnum(command.Tag, native_endian) catch |err| {
-        std.log.warn("Reading command gave: {s}. Ignoring written data...", .{@errorName(err)});
+        std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)});
         return @intCast(userspace_buffer_len);
     };
 
     switch (recived_command) {
         .set_pid_for_filter => {
             const pid = reader.takeInt(std.os.linux.pid_t, native_endian) catch |err| {
-                std.log.warn("Reading pid gave:{s}. Ignoring written data...", .{@errorName(err)});
-                return @intCast(userspace_buffer_len);
+                std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)});
             };
             filter_pid.store(pid, .unordered);
         },
 
-        .load_benchmark_probe => {
-            const probe_offset = reader.takeInt(usize, native_endian) catch |err| {
-                std.log.warn("Reading probe offset gave:{s}. Ignoring written data...", .{@errorName(err)});
-                return @intCast(userspace_buffer_len);
-            };
-
-            const probe_path: [:0]const u8 = reader.takeSentinel(0) catch |err| {
-                std.log.warn("Reading probe path gave:{s}. Ignoring written data...", .{@errorName(err)});
-                return @intCast(userspace_buffer_len);
-            };
-
-            loadBenchmarkProbe(probe_path, probe_offset);
-        },
+        .load_benchmark_probe => loadBenchmarkProbe(&reader) catch |err| std.log.warn("Loading benchmark probe went wrong: {s} ", .{@errorName(err)}),
 
         else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
     }
@@ -99,10 +86,13 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
     return @intCast(userspace_buffer_len);
 }
 
-fn loadBenchmarkProbe(path: [:0]const u8, offset: usize) void {
-    const new = uprobes.addOne(allocator) catch return;
-    new.* = .init(path, .{ .filter = &doesPidMatch, .pre_handler = &count }, offset);
-    new.register() catch return;
+fn loadBenchmarkProbe(reader: *std.Io.Reader) !void {
+    const probe_offset = try reader.takeInt(usize, native_endian);
+    const probe_path: [:0]const u8 = try reader.takeSentinel(0);
+
+    const new = try uprobes.addOne(allocator);
+    new.* = try .init(probe_path, .{ .filter = &doesPidMatch, .pre_handler = &count }, probe_offset);
+    try new.register();
 }
 
 fn loadMutexProbe(path: [:0]const u8, offset: usize) void {

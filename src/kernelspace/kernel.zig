@@ -18,7 +18,8 @@ pub const mem = struct {
 
     extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
     pub fn copyBytesFromUser(to: []u8, from: []const u8) []const u8 {
-        return to[0 .. from.len - c_copy_from_user(to.ptr, from.ptr, from.len)];
+        const len = @min(to.len, from.len);
+        return to[0 .. len - c_copy_from_user(to.ptr, from.ptr, len)];
     }
 };
 
@@ -83,6 +84,7 @@ pub const heap = struct {
         }
     };
 
+    // This allocator doesn't support alignments requiroments > 255 bytes.
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
         .vtable = &KAllocator.vtable,
@@ -166,13 +168,30 @@ pub const current_task = struct {
 };
 
 pub const Path = extern struct {
+    pub const OpenError = error{
+        NoEntity,
+        ComponentNotDir,
+        OutOfMemory,
+        Invalid,
+        Unknown,
+    };
+
     mount: *anyopaque,
     dentry: *anyopaque,
 
-    extern fn c_kern_path([*:0]const u8) @This();
-    pub fn init(path: [:0]const u8) !@This() {
-        // TODO: reimplement error handling
-        return c_kern_path(path);
+    extern fn c_kern_path([*:0]const u8, *i32) @This();
+    pub fn init(path: [:0]const u8) OpenError!@This() {
+        var err: i32 = undefined;
+        const ret = c_kern_path(path.ptr, &err);
+        return switch (std.os.linux.errno(@intCast(err))) {
+            .SUCCESS => ret,
+
+            .NOENT => OpenError.NoEntitya,
+            .NOTDIR => OpenError.ComponentNotDir,
+            .NOMEM => OpenError.OutOfMemory,
+            .INVAL => OpenError.Invalid,
+            else => OpenError.Unknown,
+        };
     }
 
     extern fn c_path_put(*@This()) void;
@@ -186,13 +205,6 @@ pub const Path = extern struct {
     }
 };
 
-// TODO: This struct is very brittle since it directly
-// interfaces with the unstable kernel ABI.
-//
-// For now, Zig's translate-c cannot process kernel headers,
-// but as soon as it does, we should replace this with a
-// type translated directly from the Linux headers.
-// moreover this is only valid for x86_64
 pub const probe = struct {
     pub const PtRegs = anyopaque;
     pub const RegistrationError = error{
@@ -239,11 +251,10 @@ pub const probe = struct {
         path: Path,
         callbacks: Callbacks,
         offset: u64,
-        handle: *anyopaque = undefined,
+        handle: ?*anyopaque = null,
 
-        pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) @This() {
-            // TODO: remove unreachable
-            return .{ .path = Path.init(path) catch unreachable, .callbacks = callbacks, .offset = offset };
+        pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) !@This() {
+            return .{ .path = try .init(path), .callbacks = callbacks, .offset = offset };
         }
 
         extern fn c_uprobe_register(*anyopaque, u64, *Callbacks) *anyopaque;
@@ -253,7 +264,9 @@ pub const probe = struct {
 
         extern fn c_uprobe_unregister(*anyopaque, *Callbacks) void;
         pub fn unregister(this: *@This()) void {
-            c_uprobe_unregister(this.handle, &this.callbacks);
+            if (this.handle) |handle| {
+                c_uprobe_unregister(handle, &this.callbacks);
+            }
         }
 
         pub fn deinit(this: *@This()) void {
@@ -303,10 +316,6 @@ pub const probe = struct {
 };
 
 pub const CharDevice = extern struct {
-    // TODO: actually match the struct and add init/deinit
-    // We're going to fake the struct since we will just giving
-    // the correct ammount of bytes since only the c bindings
-    // will access those fields.
     _: [400]u8 = undefined,
     pub const ReadHandler = ?*const fn (*anyopaque, [*]u8, usize, *i64) callconv(.c) isize;
     pub const WriteHandler = ?*const fn (*anyopaque, [*]const u8, usize, *i64) callconv(.c) isize;
