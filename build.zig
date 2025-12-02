@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "cli", .module = cli_mod }},
     });
 
-    const executable = b.addExecutable(.{
+    const executable_options: std.Build.ExecutableOptions = .{
         .name = "pside",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/userspace/main.zig"),
@@ -61,9 +61,16 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "report", .module = report_mod },
             },
         }),
-    });
+    };
+    const executable = b.addExecutable(executable_options);
     b.installArtifact(executable);
 
+    // Zls check
+    const check_exe = b.addExecutable(executable_options);
+    const check = b.step("check", "Check for compilation errors");
+    check.dependOn(&check_exe.step);
+
+    // Tests
     const cli_tests = b.addTest(.{
         .root_module = cli_mod,
     });
