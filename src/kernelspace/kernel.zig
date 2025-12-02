@@ -185,7 +185,7 @@ pub const Path = extern struct {
         return switch (std.os.linux.errno(@intCast(err))) {
             .SUCCESS => ret,
 
-            .NOENT => OpenError.NoEntitya,
+            .NOENT => OpenError.NoEntity,
             .NOTDIR => OpenError.ComponentNotDir,
             .NOMEM => OpenError.OutOfMemory,
             .INVAL => OpenError.Invalid,
@@ -250,7 +250,7 @@ pub const probe = struct {
         path: Path,
         callbacks: Callbacks,
         offset: u64,
-        handle: ?*anyopaque = null,
+        handle: *anyopaque = undefined,
 
         pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) Path.OpenError!@This() {
             return .{ .path = try .init(path), .callbacks = callbacks, .offset = offset };
@@ -263,9 +263,7 @@ pub const probe = struct {
 
         extern fn c_uprobe_unregister(*anyopaque, *Callbacks) void;
         pub fn unregister(this: *@This()) void {
-            if (this.handle) |handle| {
-                c_uprobe_unregister(handle, &this.callbacks);
-            }
+            c_uprobe_unregister(this.handle, &this.callbacks);
         }
 
         pub fn deinit(this: *@This()) void {
@@ -274,8 +272,8 @@ pub const probe = struct {
     };
 
     pub const K = extern struct {
-        // kprobes don't really have a consumer struct
-        // but i've added one for simmery with uprobes
+        // kprobes doesn't really have a consumer struct
+        // but i've added one for symmetry with uprobes
         // Simply moving Handlers here.
         pub const Callbacks = extern struct {
             pub const PreHandler = ?*const fn (*K, *PtRegs) callconv(.c) c_int;
@@ -300,7 +298,7 @@ pub const probe = struct {
             return .{ .symbol_name = symbol_name, .callbacks = callbacks };
         }
 
-        pub fn deinit(_: @This()) @This() {} // Just for simmetry with probe.U
+        pub fn deinit(_: @This()) void {} // Just for simmetry with probe.U
 
         extern fn c_register_kprobe(*@This()) c_int;
         pub fn register(this: *@This()) RegistrationError!void {

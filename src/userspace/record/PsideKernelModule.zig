@@ -54,7 +54,7 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
         .FBIG => error.FileTooLarge,
         .OPNOTSUPP => error.CompressedModuleNotSupported,
         .TXTBSY => error.FileOpenedReadWrite,
-        else => unreachable,
+        else => error.Unknown,
     };
 }
 
@@ -91,7 +91,7 @@ pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
         // delete_module could also return PERM, FAULT
         // but each of those errors shouldn't be appliacable in our
         // case
-        else => unreachable,
+        else => error.Unknown,
     };
 }
 
@@ -101,9 +101,9 @@ pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
     try this.chardev_writer.interface.flush();
 }
 
-pub fn loadProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
+pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
     switch (kind) {
-        .load_benchmark_probe, .load_function_probe, .load_mutex_probe => {},
+        .send_benchmark_probe, .send_function_probe, .send_mutex_probe => {},
         else => @compileError("Please provide a command which loads an uprobe."),
     }
 
@@ -116,6 +116,12 @@ pub fn loadProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
     _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
     _ = try this.chardev_writer.interface.write(path);
     _ = try this.chardev_writer.interface.writeInt(u8, 0, native_endianess);
+
+    try this.chardev_writer.interface.flush();
+}
+
+pub fn registerProbes(this: *@This()) !void {
+    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.register_probes), native_endianess);
 
     try this.chardev_writer.interface.flush();
 }
