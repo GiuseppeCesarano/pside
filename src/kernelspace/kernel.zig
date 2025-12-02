@@ -1,3 +1,6 @@
+// TODO: this file should be replaced when we have full support
+// for translate-c in zig
+
 const std = @import("std");
 const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
 
@@ -5,10 +8,6 @@ const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
 const c = if (!is_target_kernel) @cImport({
     @cInclude("stdlib.h");
 }) else {};
-
-// TODO: this file should be replaced when we have full support
-// for translate-c in zig, in the mean time we should still
-// fix the error handling code.
 
 pub const mem = struct {
     extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
@@ -253,12 +252,12 @@ pub const probe = struct {
         offset: u64,
         handle: ?*anyopaque = null,
 
-        pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) !@This() {
+        pub fn init(path: [:0]const u8, callbacks: Callbacks, offset: u64) Path.OpenError!@This() {
             return .{ .path = try .init(path), .callbacks = callbacks, .offset = offset };
         }
 
         extern fn c_uprobe_register(*anyopaque, u64, *Callbacks) *anyopaque;
-        pub fn register(this: *@This()) !void {
+        pub fn register(this: *@This()) RegistrationError!void {
             this.handle = try checkRegistration(c_uprobe_register(this.path.inode(), this.offset, &this.callbacks));
         }
 
@@ -304,7 +303,7 @@ pub const probe = struct {
         pub fn deinit(_: @This()) @This() {} // Just for simmetry with probe.U
 
         extern fn c_register_kprobe(*@This()) c_int;
-        pub fn register(this: *@This()) !void {
+        pub fn register(this: *@This()) RegistrationError!void {
             _ = try checkRegistration(c_register_kprobe(this));
         }
 
