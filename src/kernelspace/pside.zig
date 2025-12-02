@@ -59,9 +59,10 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
     switch (recived_command) {
         .set_pid_for_filter => setPidForFilter(&reader) catch |err| std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)}),
-        .send_benchmark_probe => sendBenchmarkProbe(&reader) catch |err| std.log.warn("Sending benchmark probe went wrong: {s}", .{@errorName(err)}),
-        .register_probes => if (uprobes.register()) |err_value| std.log.err("Registering probe #{} went wrong: {s}", .{ err_value[1], @errorName(err_value[0]) }),
-        .unregister_probes => uprobes.unregister(),
+        .send_probe_benchmark => sendBenchmarkProbe(&reader) catch |err| std.log.warn("Sending benchmark probe went wrong: {s}", .{@errorName(err)}),
+        .register_sent_probes => if (uprobes.register()) |err_value| std.log.err("Registering probe #{} went wrong: {s}", .{ err_value[1], @errorName(err_value[0]) }),
+        .unregister_sent_probes => uprobes.unregister(),
+        .clear_sent_probes => uprobes.clear(),
 
         else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
     }

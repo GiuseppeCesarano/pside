@@ -103,7 +103,7 @@ pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
 
 pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
     switch (kind) {
-        .send_benchmark_probe, .send_function_probe, .send_mutex_probe => {},
+        .send_probe_benchmark => {},
         else => @compileError("Please provide a command which loads an uprobe."),
     }
 
@@ -120,8 +120,17 @@ pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
     try this.chardev_writer.interface.flush();
 }
 
-pub fn registerProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.register_probes), native_endianess);
+pub fn registerSentProbes(this: *@This()) !void {
+    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.register_sent_probes), native_endianess);
+    try this.chardev_writer.interface.flush();
+}
 
+pub fn unregisterSentProbes(this: *@This()) !void {
+    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.unregister_sent_probes), native_endianess);
+    try this.chardev_writer.interface.flush();
+}
+
+pub fn clearSentProbes(this: *@This()) !void {
+    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.clear_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
