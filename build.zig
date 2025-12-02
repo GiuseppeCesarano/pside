@@ -11,13 +11,15 @@ pub fn build(b: *std.Build) void {
     });
     const optimize = b.standardOptimizeOption(.{});
 
+    const check = b.step("check", "Check for compilation errors");
+
     const command_mod = b.addModule("cli", .{
         .root_source_file = b.path("src/common/commands.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{command_mod}));
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{command_mod}, check));
 
     const is_build_standalone = b.option(bool, "standalone-build", "Create a self-contained build folder that can be used" ++
         "to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -65,9 +67,8 @@ pub fn build(b: *std.Build) void {
     const executable = b.addExecutable(executable_options);
     b.installArtifact(executable);
 
-    // Zls check
+    // Zls check without emitting object
     const check_exe = b.addExecutable(executable_options);
-    const check = b.step("check", "Check for compilation errors");
     check.dependOn(&check_exe.step);
 
     // Tests
@@ -93,7 +94,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_kbto_tests.step);
 }
 
-fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module) *std.Build.Step.Compile {
+fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module, check_step: *std.Build.Step) *std.Build.Step.Compile {
     var kernel_target = target;
     kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
 
@@ -109,7 +110,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         else => @panic("Correct feature flags unimplemented for target arch..."),
     };
 
-    return b.addObject(.{
+    const object_options: std.Build.ObjectOptions = .{
         .name = "pside_zig",
         .use_llvm = true,
         .root_module = b.createModule(.{
@@ -133,7 +134,13 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
                 .{ .name = "command", .module = deps[0] },
             },
         }),
-    });
+    };
+
+    // Zls check without emitting object
+    const check_obj = b.addObject(object_options);
+    check_step.dependOn(&check_obj.step);
+
+    return b.addObject(object_options);
 }
 
 fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
