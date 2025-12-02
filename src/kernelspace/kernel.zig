@@ -310,6 +310,68 @@ pub const probe = struct {
             c_unregister_kprobe(this);
         }
     };
+
+    fn List(Probe: type) type {
+        if (Probe != U and Probe != K) @compileError("probe.List() only accepts probe.U or probe.K");
+
+        return struct {
+            list: std.ArrayList(Probe),
+            are_registered: bool = false,
+
+            pub fn initCapacity(allocator: std.mem.Allocator, size: usize) !@This() {
+                return .{ .list = try .initCapacity(allocator, size) };
+            }
+
+            pub fn register(this: *@This()) ?struct { RegistrationError, usize } {
+                if (this.are_registered) return null;
+
+                var correctly_initted: usize = 0;
+                var err: RegistrationError = undefined;
+
+                for (this.list.items, 0..) |*p, i| {
+                    p.register() catch |e| {
+                        err = e;
+                        break;
+                    };
+                    correctly_initted = i;
+                }
+
+                this.are_registered = correctly_initted == this.list.items.len - 1;
+                if (!this.are_registered) {
+                    @branchHint(.cold);
+                    for (this.list.items[0..correctly_initted]) |*p| {
+                        p.unregister();
+                    }
+
+                    return .{ err, correctly_initted };
+                }
+
+                return null;
+            }
+
+            pub fn unregister(this: *@This()) void {
+                if (!this.are_registered) return;
+
+                for (this.list.items) |*p| {
+                    p.unregister();
+                }
+                this.are_registered = false;
+            }
+
+            pub fn clear(this: *@This()) void {
+                this.unregister();
+                this.list.clearRetainingCapacity();
+            }
+
+            pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
+                this.unregister();
+                this.list.deinit(allocator);
+            }
+        };
+    }
+
+    pub const ListU = List(U);
+    pub const ListK = List(K);
 };
 
 pub const CharDevice = extern struct {

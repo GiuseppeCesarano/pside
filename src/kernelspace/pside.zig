@@ -13,26 +13,20 @@ pub const std_options: std.Options = .{
 
 var call_count: std.atomic.Value(u32) = .init(0);
 var filter_pid = std.atomic.Value(std.os.linux.pid_t).init(0);
-var uprobes: struct { are_registered: bool = false, probes: std.ArrayList(kernel.probe.U) = undefined } = .{};
+var uprobes: kernel.probe.ListU = undefined;
 var chardev: kernel.CharDevice = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
 
-    uprobes.probes = std.ArrayList(kernel.probe.U).initCapacity(allocator, 10) catch return 1;
+    uprobes = kernel.probe.ListU.initCapacity(allocator, 10) catch return 1;
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    unregisterProbes();
-    for (uprobes.probes.items) |*probe| {
-        probe.deinit();
-    }
-
-    uprobes.probes.deinit(allocator);
-
+    uprobes.deinit(allocator);
     chardev.remove();
 
     std.log.info("pthread_mutex_lock called: {} times", .{call_count.load(.unordered)});
@@ -66,8 +60,8 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
     switch (recived_command) {
         .set_pid_for_filter => setPidForFilter(&reader) catch |err| std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)}),
         .send_benchmark_probe => sendBenchmarkProbe(&reader) catch |err| std.log.warn("Sending benchmark probe went wrong: {s}", .{@errorName(err)}),
-        .register_probes => registerProbes(),
-        .unregister_probes => unregisterProbes(),
+        .register_probes => if (uprobes.register()) |err_value| std.log.err("Registering probe #{} went wrong: {s}", .{ err_value[1], @errorName(err_value[0]) }),
+        .unregister_probes => uprobes.unregister(),
 
         else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
     }
@@ -84,7 +78,7 @@ fn sendBenchmarkProbe(reader: *std.Io.Reader) !void {
     const probe_offset = try reader.takeInt(usize, native_endian);
     const probe_path: [:0]const u8 = try reader.takeSentinel(0);
 
-    const new = try uprobes.probes.addOne(allocator);
+    const new = try uprobes.list.addOne(allocator);
     new.* = try .init(probe_path, .{ .filter = &doesPidMatch, .pre_handler = &count }, probe_offset);
 
     if (uprobes.are_registered) try new.register();
@@ -97,33 +91,4 @@ fn doesPidMatch(_: ?*kernel.probe.U, _: *anyopaque) bool {
 fn count(_: ?*kernel.probe.U, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
     _ = call_count.fetchAdd(1, .monotonic);
     return 0;
-}
-
-fn registerProbes() void {
-    var correctlly_initted: usize = 0;
-    var err: kernel.probe.RegistrationError = undefined;
-
-    for (uprobes.probes.items, 0..) |*probe, i| {
-        probe.register() catch |e| {
-            err = e;
-            break;
-        };
-        correctlly_initted = i;
-    }
-    uprobes.are_registered = correctlly_initted == uprobes.probes.items.len - 1;
-    if (!uprobes.are_registered) {
-        for (uprobes.probes.items[0..correctlly_initted]) |*probe| {
-            probe.unregister();
-        }
-        std.log.err("Registering uprobe[{}] gave: {s}", .{ correctlly_initted, @errorName(err) });
-    }
-}
-
-fn unregisterProbes() void {
-    if (uprobes.are_registered) {
-        for (uprobes.probes.items) |*probe| {
-            probe.unregister();
-        }
-        uprobes.are_registered = false;
-    }
 }
