@@ -236,9 +236,9 @@ pub const probe = struct {
     pub const U = struct {
         // This struct is the Consumer struct in c land
         pub const Callbacks = extern struct {
-            pub const PreHandler = ?*const fn (*U, *PtRegs, *u64) callconv(.c) c_int;
-            pub const PostHandler = ?*const fn (*U, *PtRegs, c_ulong, *u64) callconv(.c) c_int;
-            pub const Filter = ?*const fn (*U, *anyopaque) bool;
+            pub const PreHandler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
+            pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
 
             pre_handler: PreHandler = null,
             post_handler: PostHandler = null,

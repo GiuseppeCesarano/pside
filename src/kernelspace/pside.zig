@@ -85,11 +85,11 @@ fn sendBenchmarkProbe(reader: *std.Io.Reader) !void {
     if (uprobes.are_registered) try new.register();
 }
 
-fn doesPidMatch(_: ?*kernel.probe.U, _: *anyopaque) bool {
+fn doesPidMatch(_: *kernel.probe.U.Callbacks, _: *anyopaque) bool {
     return kernel.current_task.pid() == filter_pid.load(.unordered);
 }
 
-fn count(_: ?*kernel.probe.U, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
+fn count(_: *kernel.probe.U.Callbacks, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
     _ = call_count.fetchAdd(1, .monotonic);
     return 0;
 }
