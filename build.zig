@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
     const kernel_bindings_test_only_mod = b.addModule("kbtom", .{
-        .root_source_file = b.path("src/kernelspace/kernel.zig"),
+        .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -148,7 +148,7 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings.c"), "bindings.c");
+    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/bindings.c"), "bindings.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", b.fmt("" ++

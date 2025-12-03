@@ -326,27 +326,24 @@ pub const probe = struct {
                 if (this.are_registered) return null;
 
                 var correctly_initted: usize = 0;
-                var err: RegistrationError = undefined;
-
-                for (this.list.items, 0..) |*p, i| {
-                    p.register() catch |e| {
-                        err = e;
-                        break;
+                const err =
+                    err_label: for (this.list.items, 0..) |*p, i| {
+                        p.register() catch |e| break :err_label e;
+                        correctly_initted = i;
+                    } else {
+                        @branchHint(.likely);
+                        this.are_registered = true;
+                        return null;
                     };
-                    correctly_initted = i;
+
+                // If we hit the break with an error we must
+                // unregister all the correctlly registered
+                // probes.
+                for (this.list.items[0..correctly_initted]) |*p| {
+                    p.unregister();
                 }
 
-                this.are_registered = correctly_initted == this.list.items.len - 1;
-                if (!this.are_registered) {
-                    @branchHint(.cold);
-                    for (this.list.items[0..correctly_initted]) |*p| {
-                        p.unregister();
-                    }
-
-                    return .{ err, correctly_initted };
-                }
-
-                return null;
+                return .{ err, correctly_initted };
             }
 
             pub fn unregister(this: *@This()) void {
@@ -374,7 +371,7 @@ pub const probe = struct {
     pub const ListK = List(K);
 };
 
-pub const CharDevice = extern struct {
+pub const CharDevice = struct {
     _: [400]u8 = undefined,
     pub const ReadHandler = ?*const fn (*anyopaque, [*]u8, usize, *i64) callconv(.c) isize;
     pub const WriteHandler = ?*const fn (*anyopaque, [*]const u8, usize, *i64) callconv(.c) isize;

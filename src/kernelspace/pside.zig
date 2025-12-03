@@ -1,5 +1,5 @@
 const std = @import("std");
-const kernel = @import("kernel.zig");
+const kernel = @import("bindings/kernel.zig");
 const command = @import("command");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const allocator = kernel.heap.allocator;
