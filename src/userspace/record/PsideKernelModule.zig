@@ -112,7 +112,7 @@ pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
     // module to treat those as two separated commands.
     if (path.len >= std.fs.max_path_bytes) return error.pathTooLong;
 
-    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(kind), native_endianess);
+    _ = try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(kind), native_endianess);
     _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
     _ = try this.chardev_writer.interface.write(path);
     _ = try this.chardev_writer.interface.writeInt(u8, 0, native_endianess);
@@ -121,16 +121,16 @@ pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
 }
 
 pub fn registerSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.register_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.register_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
 
 pub fn unregisterSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.unregister_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.unregister_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
 
 pub fn clearSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.clear_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.clear_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }

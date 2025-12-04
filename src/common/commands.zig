@@ -26,7 +26,8 @@ const std = @import("std");
 // clear_sent_probes will clear the probe array, if the probes are
 // registered it will also unregister them.
 
-pub const Tag = enum(u8) {
+pub const TagInt = u8;
+pub const Tag = enum(TagInt) {
     set_pid_for_filter, //   followed by std.os.linux.pid_t
 
     send_probe_benchmark, // followed by usize, [:0]const u8
