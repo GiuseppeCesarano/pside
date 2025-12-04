@@ -15,7 +15,7 @@ fn OptionsImpl(ItType: type) type {
                     []const u8,
                 };
 
-                const names: []const []const u8 = names_block: {
+                const names = names_block: {
                     var n: []const []const u8 = &.{};
 
                     for (types) |Type| {
@@ -229,12 +229,11 @@ fn functionNameLen(function: anytype) usize {
 
 fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @TypeOf(value)) {
     var preappended: PrependedTuple(@TypeOf(tuple), @TypeOf(value)) = undefined;
+
     preappended[0] = value;
 
-    inline for (&preappended, 0..) |*preappended_field, i| {
-        if (i == 0) continue;
-        preappended_field.* = tuple[i - 1];
-    }
+    const offset = @offsetOf(@TypeOf(preappended), "1");
+    @memcpy(std.mem.asBytes(&preappended)[offset..], std.mem.asBytes(&tuple));
 
     return preappended;
 }
