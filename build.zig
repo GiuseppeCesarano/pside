@@ -13,13 +13,13 @@ pub fn build(b: *std.Build) void {
 
     const check = b.step("check", "Check for compilation errors");
 
-    const command_mod = b.addModule("cli", .{
-        .root_source_file = b.path("src/common/commands.zig"),
+    const communications_mod = b.addModule("cli", .{
+        .root_source_file = b.path("src/common/communications.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{command_mod}, check));
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{communications_mod}, check));
 
     const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
         " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
-            .{ .name = "command", .module = command_mod },
+            .{ .name = "communications", .module = communications_mod },
         },
     });
 
@@ -131,7 +131,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .error_tracing = false,
             .no_builtin = true,
             .imports = &.{
-                .{ .name = "command", .module = deps[0] },
+                .{ .name = "communications", .module = deps[0] },
             },
         }),
     };

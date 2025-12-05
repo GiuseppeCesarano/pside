@@ -26,8 +26,9 @@ const std = @import("std");
 // clear_sent_probes will clear the probe array, if the probes are
 // registered it will also unregister them.
 
-pub const TagInt = u8;
-pub const Tag = enum(TagInt) {
+pub const Commands = enum(u8) {
+    pub const Tag = @typeInfo(@This()).@"enum".tag_type;
+
     set_pid_for_filter, //   followed by std.os.linux.pid_t
 
     send_probe_benchmark, // followed by usize, [:0]const u8
@@ -39,3 +40,8 @@ pub const Tag = enum(TagInt) {
     register_disk_probes,
     register_network_probes,
 };
+
+pub const Responses = error{
+    Ok,
+};
+pub const ResponsesAsInt = std.meta.Int(.unsigned, @bitSizeOf(Responses));

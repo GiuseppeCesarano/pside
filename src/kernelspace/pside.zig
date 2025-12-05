@@ -1,6 +1,6 @@
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
-const command = @import("command");
+const communications = @import("communications");
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const allocator = kernel.heap.allocator;
 
@@ -50,7 +50,7 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
     var reader: std.Io.Reader = .fixed(kernel.mem.copyBytesFromUser(kernelspace_slice, userspace_buffer[0..userspace_buffer_len]));
 
-    const recived_command = reader.takeEnum(command.Tag, native_endian) catch |err| {
+    const recived_command = reader.takeEnum(communications.Commands, native_endian) catch |err| {
         std.log.warn("Reading command went wrong: {s}", .{@errorName(err)});
         return @intCast(userspace_buffer_len);
     };

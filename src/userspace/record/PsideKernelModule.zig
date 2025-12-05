@@ -1,6 +1,6 @@
 const std = @import("std");
 const native_endianess = @import("builtin").target.cpu.arch.endian();
-const command = @import("command");
+const communications = @import("communications");
 
 const name = "pside";
 
@@ -16,7 +16,7 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
 
     // Allocate enough buffer for the reader to allow
     // sending all possible commands with a single syscall.
-    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes + @sizeOf(command.Tag) + @sizeOf(usize));
+    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes + @sizeOf(communications.Commands) + @sizeOf(usize));
     errdefer allocator.free(buffer);
 
     var rt: @This() = .{
@@ -96,12 +96,12 @@ pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
-    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(command.Tag.set_pid_for_filter), native_endianess);
+    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(communications.Commands.set_pid_for_filter), native_endianess);
     _ = try this.chardev_writer.interface.writeInt(std.os.linux.pid_t, pid, native_endianess);
     try this.chardev_writer.interface.flush();
 }
 
-pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, offset: usize) !void {
+pub fn sendProbe(this: *@This(), comptime kind: communications.Commands, path: []const u8, offset: usize) !void {
     switch (kind) {
         .send_probe_benchmark => {},
         else => @compileError("Please provide a command which loads an uprobe."),
@@ -112,7 +112,7 @@ pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
     // module to treat those as two separated commands.
     if (path.len >= std.fs.max_path_bytes) return error.pathTooLong;
 
-    _ = try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(kind), native_endianess);
+    _ = try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(kind), native_endianess);
     _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
     _ = try this.chardev_writer.interface.write(path);
     _ = try this.chardev_writer.interface.writeInt(u8, 0, native_endianess);
@@ -121,16 +121,16 @@ pub fn sendProbe(this: *@This(), comptime kind: command.Tag, path: []const u8, o
 }
 
 pub fn registerSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.register_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.register_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
 
 pub fn unregisterSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.unregister_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.unregister_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
 
 pub fn clearSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(command.TagInt, @intFromEnum(command.Tag.clear_sent_probes), native_endianess);
+    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.clear_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
