@@ -16,7 +16,7 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
 
     // Allocate enough buffer for the reader to allow
     // sending all possible commands with a single syscall.
-    const buffer = try allocator.alloc(u8, std.fs.max_path_bytes + @sizeOf(communications.Commands) + @sizeOf(usize));
+    const buffer = try allocator.alloc(u8, std.atomic.cache_line * 2);
     errdefer allocator.free(buffer);
 
     var rt: @This() = .{
@@ -107,10 +107,11 @@ pub fn sendProbe(this: *@This(), comptime kind: communications.Commands, path: [
         else => @compileError("Please provide a command which loads an uprobe."),
     }
 
+    const total_len = path.len + @sizeOf(communications.Commands.Tag) + @sizeOf(@TypeOf(offset)) + 1;
     // This would excede the buffer and couse the writer to call
     // the syscall two times which would result in the kenel
     // module to treat those as two separated commands.
-    if (path.len >= std.fs.max_path_bytes) return error.pathTooLong;
+    if (total_len > this.buffer.len) return error.NoEnoughSpace;
 
     _ = try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(kind), native_endianess);
     _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
