@@ -30,6 +30,8 @@ pub const heap = struct {
         const cmalloc = if (is_target_kernel) c_kmalloc else c.malloc;
         const cfree = if (is_target_kernel) c_kfree else c.free;
 
+        const Metadata = u16;
+
         const vtable: std.mem.Allocator.VTable = .{
             .alloc = alloc,
             .resize = resize,
@@ -40,25 +42,24 @@ pub const heap = struct {
         fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
             std.debug.assert(len > 0);
             const alignment_bytes = alignment.toByteUnits();
-            std.debug.assert(alignment_bytes < std.math.maxInt(u8));
+            std.debug.assert(alignment_bytes < std.math.maxInt(Metadata));
 
             // We will overallocate for the maximum alignment padding
-            // which is the alignement size - 1; +1 byte of metadata
-            // to save how many bytes we skipped. So we just allocate
-            // an eccess of alignement size bytes.
+            // which is the alignement_bytes - 1 + @SizeOf(metadata)
+            // to save how many bytes we skipped.
             //
-            // The metadata will be the byte preceding the returned ptr
-            const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes)) orelse return null);
+            // The metadata will be the value preceding the returned ptr
+            const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes + @sizeOf(Metadata) - 1)) orelse return null);
 
             // If the address is already aligned alignForward
             // will not advance and we will not have space for
             // our metadata byte so we need to advance by one
-            const aligned_address = alignment.forward(unaligned_address + 1);
+            const aligned_address = alignment.forward(unaligned_address + @sizeOf(Metadata));
 
-            const ptr: [*]u8 = @ptrFromInt(aligned_address);
+            const ptr: [*]align(1) Metadata = @ptrFromInt(aligned_address);
             (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
 
-            return ptr;
+            return @ptrCast(ptr);
         }
 
         fn resize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
@@ -77,7 +78,9 @@ pub const heap = struct {
 
         fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
             const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
-            const skipped_bytes = (buf_ptr - 1)[0];
+
+            const metadata_ptr: [*]align(1) Metadata = @ptrCast(buf_ptr);
+            const skipped_bytes = (metadata_ptr - 1)[0];
 
             cfree(@ptrCast(buf_ptr - skipped_bytes));
         }
@@ -387,14 +390,9 @@ pub const CharDevice = struct {
     }
 };
 
-test "Allocator generally" {
+test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
-}
-
-test "Aligned allocations" {
     try std.heap.testAllocatorAligned(heap.allocator);
-}
-
-test "Aligned allocations and shrinks" {
     try std.heap.testAllocatorAlignedShrink(heap.allocator);
+    try std.heap.testAllocatorLargeAlignment(heap.allocator);
 }
