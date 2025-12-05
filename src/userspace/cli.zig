@@ -16,14 +16,13 @@ fn OptionsImpl(ItType: type) type {
                 };
 
                 const names = names_block: {
-                    var n: []const []const u8 = &.{};
+                    var ret: [types.len][]const u8 = undefined;
 
-                    for (types) |Type| {
-                        const name = [_][]const u8{@typeName(Type)};
-                        n = n ++ &name;
+                    for (&ret, types) |*name, Type| {
+                        name.* = @typeName(Type);
                     }
 
-                    break :names_block n;
+                    break :names_block ret;
                 };
             };
 
@@ -34,7 +33,7 @@ fn OptionsImpl(ItType: type) type {
                     value.* = i;
                 }
 
-                break :tag_block @Enum(u8, .exhaustive, map.names, &field_values);
+                break :tag_block @Enum(u8, .exhaustive, &map.names, &field_values);
             };
 
             const Union = union_block: {
@@ -45,7 +44,7 @@ fn OptionsImpl(ItType: type) type {
                     attributes.* = .{ .@"align" = @alignOf(Type) };
                 }
 
-                break :union_block @Union(.auto, null, map.names, &map.types, &fields_attributes);
+                break :union_block @Union(.auto, null, &map.names, &map.types, &fields_attributes);
             };
 
             pub fn tagFromType(Type: type) Tag {
@@ -231,23 +230,24 @@ fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @
     var preappended: PrependedTuple(@TypeOf(tuple), @TypeOf(value)) = undefined;
 
     preappended[0] = value;
-
-    const offset = @offsetOf(@TypeOf(preappended), "1");
-    @memcpy(std.mem.asBytes(&preappended)[offset..], std.mem.asBytes(&tuple));
+    inline for (tuple, 1..) |field, i| {
+        preappended[i] = field;
+    }
 
     return preappended;
 }
 
 fn PrependedTuple(Tuple: type, Value: type) type {
-    var struct_info = @typeInfo(Tuple).@"struct";
+    const struct_fields = @typeInfo(Tuple).@"struct".fields;
 
-    var types: []const type = &.{Value};
+    var types: [struct_fields.len + 1]type = undefined;
 
-    for (struct_info.fields) |field| {
-        types = types ++ &[_]type{field.type};
+    types[0] = Value;
+    for (types[1..], struct_fields) |*current_type, field| {
+        current_type.* = field.type;
     }
 
-    return std.meta.Tuple(types);
+    return std.meta.Tuple(&types);
 }
 
 const OptionsTest = OptionsImpl(std.mem.SplitIterator(u8, .scalar));
