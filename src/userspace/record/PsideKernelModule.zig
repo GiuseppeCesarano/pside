@@ -6,7 +6,7 @@ const name = "pside";
 
 file: std.Io.File,
 chardev: std.Io.File,
-chardev_writer: std.fs.File.Writer, // TODO: when implemented switch to std.Io.Writer
+chardev_writer: std.fs.File.Writer, // TODO: when implemented switch to std.Io.File.Writer
 chardev_reader: std.Io.File.Reader,
 buffer: []u8,
 
