@@ -53,6 +53,8 @@ void c_uprobe_unregister(struct uprobe *, struct uprobe_consumer *);
 /* Fprobes */
 int c_register_fprobe(struct fprobe *, const char *, const char *);
 int c_unregister_fprobe(struct fprobe *);
+void c_disable_fprobe(struct fprobe *);
+void c_enable_fprobe(struct fprobe *);
 
 /* Chardev */
 struct chardev {
@@ -135,6 +137,9 @@ int c_register_fprobe(struct fprobe *probe, const char *filter,
 int c_unregister_fprobe(struct fprobe *probe) {
   return unregister_fprobe(probe);
 }
+
+void c_disable_fprobe(struct fprobe *fp) { disable_fprobe(fp); }
+void c_enable_fprobe(struct fprobe *fp) { enable_fprobe(fp); }
 
 /* Chardev */
 

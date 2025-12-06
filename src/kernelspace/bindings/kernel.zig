@@ -302,6 +302,16 @@ pub const probe = struct {
         pub fn unregister(this: *@This()) void {
             _ = c_unregister_fprobe(this);
         }
+
+        extern fn c_disable_fprobe(*@This()) void;
+        pub fn disable(this: *@This()) void {
+            c_disable_fprobe(this);
+        }
+
+        extern fn c_enable_fprobe(*@This()) void;
+        pub fn enable(this: *@This()) void {
+            c_enable_fprobe(this);
+        }
     };
 
     fn List(Probe: type) type {
