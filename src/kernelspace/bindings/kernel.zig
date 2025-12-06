@@ -274,46 +274,6 @@ pub const probe = struct {
         }
     };
 
-    pub const K = extern struct {
-        // kprobes doesn't really have a consumer struct
-        // but i've added one for symmetry with uprobes
-        // Simply moving Handlers here.
-        pub const Callbacks = extern struct {
-            pub const PreHandler = ?*const fn (*K, *PtRegs) callconv(.c) c_int;
-            pub const PostHandler = ?*const fn (*K, *PtRegs, c_ulong) callconv(.c) c_int;
-
-            pre_handler: PreHandler = null,
-            post_handler: PostHandler = null,
-        };
-
-        _hlist_list: [4]usize = undefined, // skip hlist and list fields
-        nmissed: c_ulong = undefined,
-        addr: *c_int = undefined,
-        symbol_name: [*:0]const u8,
-        offset: c_uint = undefined,
-        callbacks: Callbacks,
-        opcode: u8 = undefined,
-        asin: [32]u8 = undefined,
-        falgs: u32 = 0,
-        _padding: [4]u8 = undefined,
-
-        pub fn init(symbol_name: [:0]const u8, callbacks: Callbacks) @This() {
-            return .{ .symbol_name = symbol_name, .callbacks = callbacks };
-        }
-
-        pub fn deinit(_: @This()) void {} // Just for simmetry with probe.U
-
-        extern fn c_register_kprobe(*@This()) c_int;
-        pub fn register(this: *@This()) RegistrationError!void {
-            _ = try checkRegistration(c_register_kprobe(this));
-        }
-
-        extern fn c_unregister_kprobe(*@This()) void;
-        pub fn unregister(this: *@This()) void {
-            c_unregister_kprobe(this);
-        }
-    };
-
     pub const F = extern struct {
         pub const Callbacks = extern struct {
             pub const PreHandler = ?*const fn (*F, c_ulong, c_ulong, *anyopaque, *anyopaque) callconv(.c) c_int;
@@ -345,7 +305,7 @@ pub const probe = struct {
     };
 
     fn List(Probe: type) type {
-        if (Probe != U and Probe != K) @compileError("probe.List() only accepts probe.U or probe.K");
+        if (Probe != U) @compileError("probe.List() only accepts probe.U");
 
         return struct {
             list: std.ArrayList(Probe),
@@ -401,7 +361,6 @@ pub const probe = struct {
     }
 
     pub const ListU = List(U);
-    pub const ListK = List(K);
 };
 
 pub const CharDevice = struct {

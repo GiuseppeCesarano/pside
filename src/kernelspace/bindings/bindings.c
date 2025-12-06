@@ -3,7 +3,6 @@
 #include <linux/device.h>
 #include <linux/fprobe.h>
 #include <linux/fs.h>
-#include <linux/kprobes.h>
 #include <linux/ktime.h>
 #include <linux/namei.h>
 #include <linux/pid.h>
@@ -39,10 +38,6 @@ u64 c_ktime_get_ns(void);
 /* Task info */
 pid_t c_pid(void);
 pid_t c_tid(void);
-
-/* Kprobes */
-int c_register_kprobe(struct kprobe *);
-void c_unregister_kprobe(struct kprobe *);
 
 /* Paths */
 struct path c_kern_path(const char *, int *);
@@ -107,10 +102,6 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 /* Task info */
 pid_t c_pid(void) { return task_tgid_nr(current); }
 pid_t c_tid(void) { return task_pid_nr(current); }
-
-/* Kprobes */
-int c_register_kprobe(struct kprobe *probe) { return register_kprobe(probe); }
-void c_unregister_kprobe(struct kprobe *probe) { unregister_kprobe(probe); }
 
 /* Paths */
 struct path c_kern_path(const char *path, int *err) {

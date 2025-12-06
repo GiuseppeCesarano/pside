@@ -20,7 +20,7 @@ var chardev: kernel.CharDevice = undefined;
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-    fprobe.register("__x64_sys_getpid", null) catch return -1;
+    fprobe.register("__do_sys_getpid", null) catch return -1;
 
     return 0;
 }
