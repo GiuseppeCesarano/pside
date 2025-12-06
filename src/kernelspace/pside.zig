@@ -1,10 +1,11 @@
 const std = @import("std");
-const kernel = @import("bindings/kernel.zig");
 const communications = @import("communications");
+const kernel = @import("bindings/kernel.zig");
+
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const allocator = kernel.heap.allocator;
-
 const name = "pside";
+
 export const license linksection(".modinfo") = "license=GPL".*;
 
 pub const std_options: std.Options = .{
@@ -13,20 +14,19 @@ pub const std_options: std.Options = .{
 
 var call_count: std.atomic.Value(u32) = .init(0);
 var filter_pid = std.atomic.Value(std.os.linux.pid_t).init(0);
-var uprobes: kernel.probe.ListU = undefined;
+var fprobe: kernel.probe.F = .init(.{ .pre_handler = &count });
 var chardev: kernel.CharDevice = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-
-    uprobes = kernel.probe.ListU.initCapacity(allocator, 10) catch return 1;
+    fprobe.register("__x64_sys_getpid", null) catch return -1;
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    uprobes.deinit(allocator);
+    fprobe.unregister();
     chardev.remove();
 
     std.log.info("pthread_mutex_lock called: {} times", .{call_count.load(.unordered)});
@@ -59,11 +59,6 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
     switch (recived_command) {
         .set_pid_for_filter => setPidForFilter(&reader) catch |err| std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)}),
-        .send_probe_benchmark => sendBenchmarkProbe(&reader) catch |err| std.log.warn("Sending benchmark probe went wrong: {s}", .{@errorName(err)}),
-        .register_sent_probes => if (uprobes.register()) |err_value| std.log.err("Registering probe #{} went wrong: {s}", .{ err_value[1], @errorName(err_value[0]) }),
-        .unregister_sent_probes => uprobes.unregister(),
-        .clear_sent_probes => uprobes.clear(),
-
         else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
     }
 
@@ -75,21 +70,11 @@ fn setPidForFilter(reader: *std.Io.Reader) !void {
     filter_pid.store(pid, .unordered);
 }
 
-fn sendBenchmarkProbe(reader: *std.Io.Reader) !void {
-    const probe_offset = try reader.takeInt(usize, native_endian);
-    const probe_path: [:0]const u8 = try reader.takeSentinel(0);
-
-    const new = try uprobes.list.addOne(allocator);
-    new.* = try .init(probe_path, .{ .filter = &doesPidMatch, .pre_handler = &count }, probe_offset);
-
-    if (uprobes.are_registered) try new.register();
-}
-
-fn doesPidMatch(_: *kernel.probe.U.Callbacks, _: *anyopaque) bool {
+fn doesPidMatch(_: *kernel.probe.U.Callbacks, _: *anyopaque) callconv(.c) bool {
     return kernel.current_task.pid() == filter_pid.load(.unordered);
 }
 
-fn count(_: *kernel.probe.U.Callbacks, _: ?*kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
+fn count(_: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *anyopaque, _: *anyopaque) callconv(.c) c_int {
     _ = call_count.fetchAdd(1, .monotonic);
     return 0;
 }

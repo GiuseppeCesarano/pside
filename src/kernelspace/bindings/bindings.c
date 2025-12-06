@@ -1,6 +1,7 @@
 #include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/fprobe.h>
 #include <linux/fs.h>
 #include <linux/kprobes.h>
 #include <linux/ktime.h>
@@ -53,6 +54,10 @@ void *c_d_inode(void *);
 /* Uprobes */
 struct uprobe *c_uprobe_register(void *, u64, struct uprobe_consumer *);
 void c_uprobe_unregister(struct uprobe *, struct uprobe_consumer *);
+
+/* Fprobes */
+int c_register_fprobe(struct fprobe *, const char *, const char *);
+int c_unregister_fprobe(struct fprobe *);
 
 /* Chardev */
 struct chardev {
@@ -128,6 +133,16 @@ struct uprobe *c_uprobe_register(void *inode, u64 offset,
 void c_uprobe_unregister(struct uprobe *u, struct uprobe_consumer *uc) {
   uprobe_unregister_nosync(u, uc);
   uprobe_unregister_sync();
+}
+
+/* Fprobes */
+int c_register_fprobe(struct fprobe *probe, const char *filter,
+                      const char *nofilter) {
+  return register_fprobe(probe, filter, nofilter);
+}
+
+int c_unregister_fprobe(struct fprobe *probe) {
+  return unregister_fprobe(probe);
 }
 
 /* Chardev */

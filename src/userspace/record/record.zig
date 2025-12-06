@@ -25,14 +25,10 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     try child.spawn();
 
     var module = try future_module.await(io);
-    try module.setPidForFilter(child.id);
-
-    try module.sendProbe(.send_probe_benchmark, "/usr/lib/libc.so.6", 0x99f20);
-    try module.registerSentProbes();
+    _ = &module;
 
     try std.posix.kill(child.id, .CONT);
     _ = try child.wait();
-    try module.clearSentProbes();
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {

@@ -221,7 +221,7 @@ pub const probe = struct {
     };
 
     pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
-        const casted: u64 = if (@typeInfo(@TypeOf(val)) == .pointer) @intFromPtr(val) else @intCast(val);
+        const casted: u64 = if (@typeInfo(@TypeOf(val)) == .pointer) @intFromPtr(val) else @intCast(@abs(val));
         return switch (std.os.linux.errno(casted)) {
             .SUCCESS => val,
 
@@ -241,7 +241,7 @@ pub const probe = struct {
         pub const Callbacks = extern struct {
             pub const PreHandler = ?*const fn (*@This(), *PtRegs, *u64) callconv(.c) c_int;
             pub const PostHandler = ?*const fn (*@This(), *PtRegs, c_ulong, *u64) callconv(.c) c_int;
-            pub const Filter = ?*const fn (*@This(), *anyopaque) bool;
+            pub const Filter = ?*const fn (*@This(), *anyopaque) callconv(.c) bool;
 
             pre_handler: PreHandler = null,
             post_handler: PostHandler = null,
@@ -311,6 +311,36 @@ pub const probe = struct {
         extern fn c_unregister_kprobe(*@This()) void;
         pub fn unregister(this: *@This()) void {
             c_unregister_kprobe(this);
+        }
+    };
+
+    pub const F = extern struct {
+        pub const Callbacks = extern struct {
+            pub const PreHandler = ?*const fn (*F, c_ulong, c_ulong, *anyopaque, *anyopaque) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*F, c_ulong, c_ulong, *anyopaque, *anyopaque) callconv(.c) void;
+
+            pre_handler: PreHandler = null,
+            post_handler: PreHandler = null,
+        };
+
+        nmissed: c_ulong = undefined,
+        flags: c_uint = undefined,
+        entry_data_size: usize = undefined,
+        callbacks: Callbacks,
+        hlist_array: *anyopaque = undefined,
+
+        pub fn init(cb: Callbacks) @This() {
+            return .{ .callbacks = cb };
+        }
+
+        extern fn c_register_fprobe(*@This(), ?[*]const u8, ?[*]const u8) c_int;
+        pub fn register(this: *@This(), filter: [:0]const u8, notfilter: ?[:0]const u8) RegistrationError!void {
+            _ = try checkRegistration(c_register_fprobe(this, filter.ptr, if (notfilter) |n| n.ptr else null));
+        }
+
+        extern fn c_unregister_fprobe(*@This()) void;
+        pub fn unregister(this: *@This()) void {
+            _ = c_unregister_fprobe(this);
         }
     };
 
