@@ -209,6 +209,38 @@ pub const Path = extern struct {
 
 pub const probe = struct {
     pub const PtRegs = anyopaque;
+    pub const FtraceRegs = opaque {
+        extern fn c_ftrace_regs_get_instruction_pointer(*@This()) c_ulong;
+        pub fn getInstructionPointer(this: *@This()) c_ulong {
+            return c_ftrace_regs_get_instruction_pointer(this);
+        }
+
+        extern fn c_ftrace_regs_get_argument(*@This(), c_uint) c_ulong;
+        pub fn getArgument(this: *@This(), n: c_uint) c_ulong {
+            return c_ftrace_regs_get_argument(this, n);
+        }
+
+        extern fn c_ftrace_regs_get_stack_pointer(*@This()) c_ulong;
+        pub fn getStackPointer(this: *@This()) c_ulong {
+            return c_ftrace_regs_get_stack_pointer(this);
+        }
+
+        extern fn c_ftrace_regs_get_return_value(*@This()) c_ulong;
+        pub fn getReturnValue(this: *@This()) c_ulong {
+            return c_ftrace_regs_get_return_value(this);
+        }
+
+        extern fn c_ftrace_regs_set_return_value(*@This(), c_ulong) void;
+        pub fn setReturnValue(this: *@This(), ret: c_ulong) void {
+            c_ftrace_regs_set_return_value(this, ret);
+        }
+
+        extern fn c_ftrace_regs_get_frame_pointer(*@This()) c_ulong;
+        pub fn getFramePointer(this: *@This()) c_ulong {
+            return c_ftrace_regs_get_frame_pointer(this);
+        }
+    };
+
     pub const RegistrationError = error{
         NoEntity,
         Again,
@@ -276,16 +308,16 @@ pub const probe = struct {
 
     pub const F = extern struct {
         pub const Callbacks = extern struct {
-            pub const PreHandler = ?*const fn (*F, c_ulong, c_ulong, *anyopaque, *anyopaque) callconv(.c) c_int;
-            pub const PostHandler = ?*const fn (*F, c_ulong, c_ulong, *anyopaque, *anyopaque) callconv(.c) void;
+            pub const PreHandler = ?*const fn (*F, c_ulong, c_ulong, *FtraceRegs, ?*anyopaque) callconv(.c) c_int;
+            pub const PostHandler = ?*const fn (*F, c_ulong, c_ulong, *FtraceRegs, ?*anyopaque) callconv(.c) void;
 
             pre_handler: PreHandler = null,
             post_handler: PreHandler = null,
         };
 
         nmissed: c_ulong = undefined,
-        flags: c_uint = undefined,
-        entry_data_size: usize = undefined,
+        flags: c_uint = 0,
+        entry_data_size: usize = 0,
         callbacks: Callbacks,
         hlist_array: *anyopaque = undefined,
 

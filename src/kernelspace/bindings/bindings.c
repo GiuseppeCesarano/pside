@@ -3,6 +3,7 @@
 #include <linux/device.h>
 #include <linux/fprobe.h>
 #include <linux/fs.h>
+#include <linux/ftrace_regs.h>
 #include <linux/ktime.h>
 #include <linux/namei.h>
 #include <linux/pid.h>
@@ -55,6 +56,16 @@ int c_register_fprobe(struct fprobe *, const char *, const char *);
 int c_unregister_fprobe(struct fprobe *);
 void c_disable_fprobe(struct fprobe *);
 void c_enable_fprobe(struct fprobe *);
+
+/* ftrace_regs */
+unsigned long c_ftrace_regs_get_instruction_pointer(struct ftrace_regs *);
+unsigned long c_ftrace_regs_get_argument(struct ftrace_regs *, unsigned int);
+unsigned long c_ftrace_regs_get_stack_pointer(struct ftrace_regs *);
+unsigned long c_ftrace_regs_get_return_value(struct ftrace_regs *);
+void c_ftrace_regs_set_return_value(struct ftrace_regs *, unsigned long);
+void c_ftrace_override_function_with_return(struct ftrace_regs *);
+int c_ftrace_regs_query_register_offset(const char *);
+unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *);
 
 /* Chardev */
 struct chardev {
@@ -141,8 +152,34 @@ int c_unregister_fprobe(struct fprobe *probe) {
 void c_disable_fprobe(struct fprobe *fp) { disable_fprobe(fp); }
 void c_enable_fprobe(struct fprobe *fp) { enable_fprobe(fp); }
 
-/* Chardev */
+/* ftrace_regs */
+unsigned long c_ftrace_regs_get_instruction_pointer(struct ftrace_regs *regs) {
+  return ftrace_regs_get_instruction_pointer(regs);
+}
 
+unsigned long c_ftrace_regs_get_argument(struct ftrace_regs *regs,
+                                         unsigned int n) {
+  return ftrace_regs_get_argument(regs, n);
+}
+
+unsigned long c_ftrace_regs_get_stack_pointer(struct ftrace_regs *regs) {
+  return ftrace_regs_get_stack_pointer(regs);
+}
+
+unsigned long c_ftrace_regs_get_return_value(struct ftrace_regs *regs) {
+  return ftrace_regs_get_return_value(regs);
+}
+
+void c_ftrace_regs_set_return_value(struct ftrace_regs *regs,
+                                    unsigned long ret) {
+  ftrace_regs_set_return_value(regs, ret);
+}
+
+unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *regs) {
+  return ftrace_regs_get_frame_pointer(regs);
+}
+
+/* Chardev */
 int c_chardev_register(struct chardev *d, const char *name, read_fn rd_fn,
                        write_fn wr_fn) {
   alloc_chrdev_region(&d->dev, 0, 1, name);
