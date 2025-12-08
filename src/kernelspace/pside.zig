@@ -1,10 +1,11 @@
 const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("bindings/kernel.zig");
+const causal_logic = @import("causal_logic.zig");
 
+const name = "pside";
 const native_endian = @import("builtin").target.cpu.arch.endian();
 const allocator = kernel.heap.allocator;
-const name = "pside";
 
 export const license linksection(".modinfo") = "license=GPL".*;
 
@@ -12,24 +13,19 @@ pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName(name).logFn,
 };
 
-var call_count: std.atomic.Value(u32) = .init(0);
-var filter_pid = std.atomic.Value(std.os.linux.pid_t).init(0);
-var fprobe: kernel.probe.F = .init(.{ .pre_handler = &count });
 var chardev: kernel.CharDevice = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-    fprobe.register("futex_wake", null) catch return -1;
+    causal_logic.init() catch return 1;
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    fprobe.unregister();
     chardev.remove();
-
-    std.log.info("pthread_mutex_lock called: {} times", .{call_count.load(.unordered)});
+    causal_logic.deinit();
 }
 
 fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_len: usize, offset: *i64) callconv(.c) isize {
@@ -67,14 +63,5 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
 fn setPidForFilter(reader: *std.Io.Reader) !void {
     const pid = try reader.takeInt(std.os.linux.pid_t, native_endian);
-    filter_pid.store(pid, .unordered);
-}
-
-fn doesPidMatch(_: *kernel.probe.U.Callbacks, _: *anyopaque) callconv(.c) bool {
-    return kernel.current_task.pid() == filter_pid.load(.unordered);
-}
-
-fn count(_: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
-    _ = call_count.fetchAdd(1, .monotonic);
-    return 0;
+    causal_logic.start(pid);
 }

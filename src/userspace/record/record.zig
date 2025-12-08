@@ -25,7 +25,7 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     try child.spawn();
 
     var module = try future_module.await(io);
-    _ = &module;
+    try module.setPidForFilter(child.id);
 
     try std.posix.kill(child.id, .CONT);
     _ = try child.wait();

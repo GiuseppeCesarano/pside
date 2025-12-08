@@ -312,18 +312,14 @@ pub const probe = struct {
             pub const PostHandler = ?*const fn (*F, c_ulong, c_ulong, *FtraceRegs, ?*anyopaque) callconv(.c) void;
 
             pre_handler: PreHandler = null,
-            post_handler: PreHandler = null,
+            post_handler: PostHandler = null,
         };
 
-        nmissed: c_ulong = undefined,
+        nmissed: c_ulong = 0,
         flags: c_uint = 0,
         entry_data_size: usize = 0,
         callbacks: Callbacks,
-        hlist_array: *anyopaque = undefined,
-
-        pub fn init(cb: Callbacks) @This() {
-            return .{ .callbacks = cb };
-        }
+        hlist_array: ?*anyopaque = null,
 
         extern fn c_register_fprobe(*@This(), ?[*]const u8, ?[*]const u8) c_int;
         pub fn register(this: *@This(), filter: [:0]const u8, notfilter: ?[:0]const u8) RegistrationError!void {
