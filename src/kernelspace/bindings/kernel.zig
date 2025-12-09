@@ -341,64 +341,6 @@ pub const probe = struct {
             c_enable_fprobe(this);
         }
     };
-
-    fn List(Probe: type) type {
-        if (Probe != U) @compileError("probe.List() only accepts probe.U");
-
-        return struct {
-            list: std.ArrayList(Probe),
-            are_registered: bool = false,
-
-            pub fn initCapacity(allocator: std.mem.Allocator, size: usize) !@This() {
-                return .{ .list = try .initCapacity(allocator, size) };
-            }
-
-            pub fn register(this: *@This()) ?struct { RegistrationError, usize } {
-                if (this.are_registered) return null;
-
-                var correctly_initted: usize = 0;
-                const err =
-                    err_label: for (this.list.items, 0..) |*p, i| {
-                        p.register() catch |e| break :err_label e;
-                        correctly_initted = i;
-                    } else {
-                        @branchHint(.likely);
-                        this.are_registered = true;
-                        return null;
-                    };
-
-                // If we hit the break with an error we must
-                // unregister all the correctlly registered
-                // probes.
-                for (this.list.items[0..correctly_initted]) |*p| {
-                    p.unregister();
-                }
-
-                return .{ err, correctly_initted };
-            }
-
-            pub fn unregister(this: *@This()) void {
-                if (!this.are_registered) return;
-
-                for (this.list.items) |*p| {
-                    p.unregister();
-                }
-                this.are_registered = false;
-            }
-
-            pub fn clear(this: *@This()) void {
-                this.unregister();
-                this.list.clearRetainingCapacity();
-            }
-
-            pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
-                this.unregister();
-                this.list.deinit(allocator);
-            }
-        };
-    }
-
-    pub const ListU = List(U);
 };
 
 pub const CharDevice = struct {
