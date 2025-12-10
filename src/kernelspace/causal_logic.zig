@@ -26,7 +26,7 @@ const allocator = kernel.heap.allocator;
 
 var histrumented_pid: std.atomic.Value(Pid) = .init(0);
 var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
-var wait_lenght: std.atomic.Value(usize) = .init(0);
+pub var wait_lenght: std.atomic.Value(usize) = .init(0);
 
 var thread_wait_count_map: std.AutoHashMapUnmanaged(Tid, WaitCounter) = .empty;
 var futex_wakers_wait_count_map: std.AutoHashMapUnmanaged(FutexHandle, WaitCounter) = .empty;
@@ -52,8 +52,8 @@ pub fn start(pid: Pid) void {
     thread_wait_count_map.clearRetainingCapacity();
     futex_wakers_wait_count_map.clearRetainingCapacity();
 
-    // std.log.debug("wait counter {}", .{wait_counter.load(.monotonic)});
-    // wait_counter.store(0, .monotonic);
+    std.log.debug("wait counter {}", .{wait_counter.load(.monotonic)});
+    wait_counter.store(0, .monotonic);
     thread_wait_count_map.putAssumeCapacity(pid, 0);
     histrumented_pid.store(pid, .release);
 }
@@ -80,7 +80,7 @@ fn applyWaitDebit(this_thread_wait_count: *WaitCounter) void {
 
     this_thread_wait_count.* = global_wait_counter;
 
-    if (wait_debit != 0) kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
+    kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
 }
 
 fn not_histrumented() bool {
@@ -113,7 +113,7 @@ fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaq
 
     const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
     this_thread_wait_count.* = futex_wakers_wait_count_map.get(data.futex_hande).?;
-    if (data.wait_debit != 0) kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
+    kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
 }
 
 fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {

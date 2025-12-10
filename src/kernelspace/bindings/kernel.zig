@@ -123,17 +123,24 @@ pub const time = struct {
     pub const delay = struct {
         extern fn c_ndelay(c_ulong) void;
         pub fn ns(nsec: usize) void {
-            c_ndelay(nsec);
+            if (nsec == 0) return;
+
+            c_ndelay(@intCast(@mod(nsec, 1000)));
+            us(@divFloor(nsec, 1000));
         }
 
         extern fn c_udelay(c_ulong) void;
         pub fn us(usec: usize) void {
-            c_udelay(usec);
+            if (usec == 0) return;
+
+            c_udelay(@intCast(@mod(usec, 1000)));
+            ms(@divFloor(usec, 1000));
         }
 
         extern fn c_mdelay(c_ulong) void;
         pub fn ms(msec: usize) void {
-            c_mdelay(msec);
+            if (msec == 0) return;
+            c_mdelay(@intCast(msec));
         }
     };
 
