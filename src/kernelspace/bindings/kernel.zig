@@ -123,7 +123,7 @@ pub const time = struct {
     pub const delay = struct {
         extern fn c_ndelay(c_ulong) void;
         pub fn ns(nsec: usize) void {
-            c_udelay(nsec);
+            c_ndelay(nsec);
         }
 
         extern fn c_udelay(c_ulong) void;
@@ -133,7 +133,7 @@ pub const time = struct {
 
         extern fn c_mdelay(c_ulong) void;
         pub fn ms(msec: usize) void {
-            c_udelay(msec);
+            c_mdelay(msec);
         }
     };
 

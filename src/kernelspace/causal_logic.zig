@@ -40,8 +40,8 @@ var probes = [filters.len]FProbe{
 };
 
 pub fn init() !void {
-    try thread_wait_count_map.ensureTotalCapacity(allocator, 300);
-    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 300);
+    try thread_wait_count_map.ensureTotalCapacity(allocator, 1000);
+    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 1000);
 
     for (probes[0..], filters) |*probe, filter| {
         try probe.register(filter, null);
@@ -52,6 +52,8 @@ pub fn start(pid: Pid) void {
     thread_wait_count_map.clearRetainingCapacity();
     futex_wakers_wait_count_map.clearRetainingCapacity();
 
+    // std.log.debug("wait counter {}", .{wait_counter.load(.monotonic)});
+    // wait_counter.store(0, .monotonic);
     thread_wait_count_map.putAssumeCapacity(pid, 0);
     histrumented_pid.store(pid, .release);
 }
@@ -65,11 +67,11 @@ pub fn deinit() void {
     }
 }
 
-fn increment() void {
+pub fn increment() void {
     const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
     this_thread_wait_count.* += 1;
 
-    wait_counter.cmpxchgStrong(this_thread_wait_count.* - 1, this_thread_wait_count.*, .monotonic);
+    _ = wait_counter.cmpxchgStrong(this_thread_wait_count.* - 1, this_thread_wait_count.*, .monotonic, .monotonic);
 }
 
 fn applyWaitDebit(this_thread_wait_count: *WaitCounter) void {
@@ -78,11 +80,11 @@ fn applyWaitDebit(this_thread_wait_count: *WaitCounter) void {
 
     this_thread_wait_count.* = global_wait_counter;
 
-    if (wait_debit != 0) kernel.time.delay.us(wait_debit * wait_lenght.load(.unordered));
+    if (wait_debit != 0) kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
 }
 
 fn not_histrumented() bool {
-    return kernel.current_task.pid() != histrumented_pid.load(.unordered);
+    return kernel.current_task.pid() != histrumented_pid.load(.monotonic);
 }
 
 fn addThread(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) void {
@@ -111,8 +113,7 @@ fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaq
 
     const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
     this_thread_wait_count.* = futex_wakers_wait_count_map.get(data.futex_hande).?;
-
-    if (data.wait_debit != 0) kernel.time.delay.us(data.futex_hande * wait_lenght.load(.unordered));
+    if (data.wait_debit != 0) kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
 }
 
 fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
@@ -122,7 +123,6 @@ fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaq
     applyWaitDebit(this_thread_wait_count);
 
     const futex_handle = regs.getArgument(0);
-    std.log.debug("wake fh: {}", .{futex_handle});
     // TODO: handle map growth if needed
     futex_wakers_wait_count_map.putAssumeCapacity(futex_handle, this_thread_wait_count.*);
 
