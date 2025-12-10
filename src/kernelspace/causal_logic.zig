@@ -17,6 +17,11 @@ const Tid = Pid;
 const FutexHandle = usize;
 const WaitCounter = usize;
 
+const WaitProbeData = struct {
+    wait_debit: WaitCounter,
+    futex_hande: FutexHandle,
+};
+
 const allocator = kernel.heap.allocator;
 
 var histrumented_pid: std.atomic.Value(Pid) = .init(0);
@@ -29,14 +34,14 @@ var futex_wakers_wait_count_map: std.AutoHashMapUnmanaged(FutexHandle, WaitCount
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{
     .{ .callbacks = .{ .post_handler = &addThread } },
-    .{ .callbacks = .{ .pre_handler = &futexWaitStart, .post_handler = &futexWaitEnd }, .entry_data_size = @sizeOf(WaitCounter) },
+    .{ .callbacks = .{ .pre_handler = &futexWaitStart, .post_handler = &futexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeData) },
     .{ .callbacks = .{ .pre_handler = &futexWake } },
     .{ .callbacks = .{ .pre_handler = &exit } },
 };
 
 pub fn init() !void {
-    try thread_wait_count_map.ensureTotalCapacity(allocator, 100);
-    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 100);
+    try thread_wait_count_map.ensureTotalCapacity(allocator, 300);
+    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 300);
 
     for (probes[0..], filters) |*probe, filter| {
         try probe.register(filter, null);
@@ -88,24 +93,26 @@ fn addThread(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaq
     thread_wait_count_map.putAssumeCapacity(@intCast(regs.getReturnValue()), parent_wait_count);
 }
 
-fn futexWaitStart(_: *FProbe, _: c_ulong, _: c_ulong, _: *FtraceRegs, wait_debit_opa: ?*anyopaque) callconv(.c) c_int {
+fn futexWaitStart(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
     if (not_histrumented()) return 1; // returning 1 will cancel futexWaitEnd call
 
-    const wait_debit: *WaitCounter = @ptrCast(@alignCast(wait_debit_opa.?));
+    const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
 
-    std.log.debug("wait tid:{}", .{kernel.current_task.tid()});
-    wait_debit.* = wait_counter.load(.monotonic) - thread_wait_count_map.get(kernel.current_task.tid()).?;
+    data.wait_debit = wait_counter.load(.monotonic) - thread_wait_count_map.get(kernel.current_task.tid()).?;
+    data.futex_hande = regs.getArgument(0); // We save the handle since it gets clobbered
+
     return 0;
 }
 
-fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, wait_debit_opa: ?*anyopaque) callconv(.c) void {
+fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
     if (regs.getReturnValue() != 0) return; // Not woke by other threads.
-    const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
-    const futex_handle = regs.getArgument(0);
-    this_thread_wait_count.* = futex_wakers_wait_count_map.get(futex_handle).?;
 
-    const wait_debit = @as(*WaitCounter, @ptrCast(@alignCast(wait_debit_opa.?))).*;
-    if (wait_debit != 0) kernel.time.delay.us(wait_debit * wait_lenght.load(.unordered));
+    const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
+
+    const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
+    this_thread_wait_count.* = futex_wakers_wait_count_map.get(data.futex_hande).?;
+
+    if (data.wait_debit != 0) kernel.time.delay.us(data.futex_hande * wait_lenght.load(.unordered));
 }
 
 fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
@@ -115,6 +122,7 @@ fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaq
     applyWaitDebit(this_thread_wait_count);
 
     const futex_handle = regs.getArgument(0);
+    std.log.debug("wake fh: {}", .{futex_handle});
     // TODO: handle map growth if needed
     futex_wakers_wait_count_map.putAssumeCapacity(futex_handle, this_thread_wait_count.*);
 
