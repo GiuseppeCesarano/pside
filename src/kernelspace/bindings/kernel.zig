@@ -123,6 +123,7 @@ pub const time = struct {
     pub const delay = struct {
         extern fn c_ndelay(c_ulong) void;
         pub fn ns(nsec: usize) void {
+            std.log.debug("delay ns {}", .{nsec});
             if (nsec == 0) return;
 
             c_ndelay(@intCast(@mod(nsec, 1000)));
@@ -131,6 +132,7 @@ pub const time = struct {
 
         extern fn c_udelay(c_ulong) void;
         pub fn us(usec: usize) void {
+            std.log.debug("delay us {}", .{usec});
             if (usec == 0) return;
 
             c_udelay(@intCast(@mod(usec, 1000)));
@@ -139,6 +141,7 @@ pub const time = struct {
 
         extern fn c_mdelay(c_ulong) void;
         pub fn ms(msec: usize) void {
+            std.log.debug("delay ms {}", .{msec});
             if (msec == 0) return;
             c_mdelay(@intCast(msec));
         }

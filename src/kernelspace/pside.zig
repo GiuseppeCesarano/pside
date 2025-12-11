@@ -14,17 +14,9 @@ pub const std_options: std.Options = .{
 };
 
 var chardev: kernel.CharDevice = undefined;
-var uprobe: kernel.probe.U = undefined;
-
-fn cb(_: *kernel.probe.U.Callbacks, _: *kernel.probe.PtRegs, _: *u64) callconv(.c) c_int {
-    causal_logic.increment();
-    return 0;
-}
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
-    uprobe = kernel.probe.U.init("/home/giuseppe/Documents/pside/a.out", .{ .pre_handler = &cb }, 0x1280) catch return -1;
-    uprobe.register() catch return -1;
     std.log.debug("chardev created at: /dev/" ++ name, .{});
     causal_logic.init() catch return 1;
 
@@ -32,8 +24,6 @@ export fn init_module() linksection(".init.text") c_int {
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    uprobe.unregister();
-    uprobe.deinit();
     chardev.remove();
     causal_logic.deinit();
 }
@@ -72,11 +62,6 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 }
 
 fn setPidForFilter(reader: *std.Io.Reader) !void {
-    const s = struct {
-        var l: usize = 0;
-    };
     const pid = try reader.takeInt(std.os.linux.pid_t, native_endian);
-    causal_logic.wait_lenght.store(s.l, .monotonic);
     causal_logic.start(pid);
-    s.l += 50;
 }

@@ -26,7 +26,7 @@ const allocator = kernel.heap.allocator;
 
 var histrumented_pid: std.atomic.Value(Pid) = .init(0);
 var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
-pub var wait_lenght: std.atomic.Value(usize) = .init(0);
+var wait_lenght: std.atomic.Value(usize) = .init(0);
 
 var thread_wait_count_map: std.AutoHashMapUnmanaged(Tid, WaitCounter) = .empty;
 var futex_wakers_wait_count_map: std.AutoHashMapUnmanaged(FutexHandle, WaitCounter) = .empty;
@@ -40,8 +40,8 @@ var probes = [filters.len]FProbe{
 };
 
 pub fn init() !void {
-    try thread_wait_count_map.ensureTotalCapacity(allocator, 1000);
-    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 1000);
+    try thread_wait_count_map.ensureTotalCapacity(allocator, 300);
+    try futex_wakers_wait_count_map.ensureTotalCapacity(allocator, 300);
 
     for (probes[0..], filters) |*probe, filter| {
         try probe.register(filter, null);
@@ -52,8 +52,7 @@ pub fn start(pid: Pid) void {
     thread_wait_count_map.clearRetainingCapacity();
     futex_wakers_wait_count_map.clearRetainingCapacity();
 
-    std.log.debug("wait counter {}", .{wait_counter.load(.monotonic)});
-    wait_counter.store(0, .monotonic);
+    // TODO: maybe clear the WaitCounter?
     thread_wait_count_map.putAssumeCapacity(pid, 0);
     histrumented_pid.store(pid, .release);
 }
@@ -67,7 +66,7 @@ pub fn deinit() void {
     }
 }
 
-pub fn increment() void {
+fn increment() void {
     const this_thread_wait_count = thread_wait_count_map.getPtr(kernel.current_task.tid()).?;
     this_thread_wait_count.* += 1;
 

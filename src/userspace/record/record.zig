@@ -21,19 +21,14 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
 
     // TODO: Drop permissions to userspace using SUDO_USER
     var module = try future_module.await(io);
-    var timer: std.time.Timer = try .start();
-    for (0..20) |_| {
-        var child: std.process.Child = .init(user_program.buffer, allocator);
-        child.start_suspended = true;
-        try child.spawn();
+    var child: std.process.Child = .init(user_program.buffer, allocator);
+    child.start_suspended = true;
+    try child.spawn();
 
-        try module.setPidForFilter(child.id);
+    try module.setPidForFilter(child.id);
 
-        timer.reset();
-        try std.posix.kill(child.id, .CONT);
-        _ = try child.wait();
-        std.log.info("{}", .{timer.read()});
-    }
+    try std.posix.kill(child.id, .CONT);
+    _ = try child.wait();
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
