@@ -1,26 +1,24 @@
 const std = @import("std");
 const atomic = std.atomic;
 
-/// Before accessing the map field acquireAcess must be called.
-/// Once all the needed access to the map are done the user
-/// must call releaseAccess
-pub fn BlockFreeMap(Map: type) type {
+/// Directlly accessing the map field wihtout calling .acquireAccess() will result in ub.
+/// Once .acquireAccess has ben called, the user must also call releaseAccess().
+///
+/// Unsafe methods also require calling .acquireAccess() before calling them; and 
+/// releaseAccess() after
+pub fn ThreadSafeMap(Key: type, Value: type) type {
     return struct {
-        map: Map,
+        map: std.AutoHashMapUnmanaged(Key, Value),
         can_read: atomic.Value(bool) align(atomic.cache_line),
         users: atomic.Value(u32) align(atomic.cache_line),
 
-        /// Init should be called before the map is accessible by
-        /// more than one thread; so no syncronization is required.
         pub fn init(allocator: std.mem.Allocator, size: u32) !@This() {
-            var ret: @This() = .{ .map = Map.empty, .can_read = .init(true), .users = .init(0) };
+            var ret: @This() = .{ .map = .empty, .can_read = .init(true), .users = .init(0) };
             try ret.map.ensureTotalCapacity(allocator, size);
 
             return ret;
         }
 
-        /// To deinit user must not call acquire access.
-        /// Since signaling possible access to a destructed map is broken semantic.
         pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
             // TODO: maybe we should signal that the map has to be destroyed
             // setting can_read at a special value?
@@ -43,7 +41,30 @@ pub fn BlockFreeMap(Map: type) type {
             _ = this.users.fetchSub(1, .monotonic);
         }
 
-        pub fn grow(this: *@This(), allocator: std.mem.Allocator) !void {
+        pub fn put(this: *@This(), allocator: std.mem.Allocator, key: Key, value: Value) !void {
+            this.acquireAccess();
+            defer this.releaseAccess();
+
+            if (this.map.available == 0) try this.growUnsafe(allocator);
+
+            this.map.putAssumeCapacity(key, value);
+        }
+
+        pub fn putAssumeCapacity(this: *@This(), key: Key, value: Value) void {
+            this.acquireAccess();
+            defer this.releaseAccess();
+
+            this.map.putAssumeCapacity(key, value);
+        }
+
+        pub fn get(this: *@This(), key: Key) ?Value {
+            this.acquireAccess();
+            defer this.releaseAccess();
+
+            return this.map.get(key);
+        }
+
+        pub fn growUnsafe(this: *@This(), allocator: std.mem.Allocator) !void {
             this.can_read.store(false, .monotonic);
             defer this.can_read.store(true, .release);
 
@@ -56,13 +77,11 @@ pub fn BlockFreeMap(Map: type) type {
             try this.map.ensureTotalCapacity(allocator, this.map.capacity() * 2);
         }
 
-        /// Clear must be used without calling acquireAcess.
         pub fn clear(this: *@This()) void {
             this.can_read.store(false, .monotonic);
             defer this.can_read.store(true, .release);
 
-            // The only user allowed is the one which also called clear
-            while (this.users.load(.monotonic) != 1) {
+            while (this.users.load(.monotonic) != 0) {
                 atomic.spinLoopHint();
             }
 

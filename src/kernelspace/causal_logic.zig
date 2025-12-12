@@ -8,10 +8,9 @@
 //
 // TODO: remove the thread_wait_count_map .? since they can actually be null
 // TODO: Check if the normal kernel.heap.allocator is fine to be used in the probes (may return in_atomic() == true)
-// TODO: maybe clear acquire realase semantic and just wrap map calls.
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
-const BlockFreeMap = @import("block_free_map.zig").BlockFreeMap;
+const ThreadSafeMap = @import("thread_safe_map.zig").ThreadSafeMap;
 
 const FProbe = kernel.probe.F;
 const FtraceRegs = kernel.probe.FtraceRegs;
@@ -31,8 +30,8 @@ var histrumented_pid: std.atomic.Value(Pid) = .init(0);
 var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
 var wait_lenght: std.atomic.Value(usize) = .init(0);
 
-var threads_wait_count: BlockFreeMap(std.AutoHashMapUnmanaged(Tid, WaitCounter)) = undefined;
-var futex_wakers_wait_count: BlockFreeMap(std.AutoHashMapUnmanaged(FutexHandle, WaitCounter)) = undefined;
+var threads_wait_count: ThreadSafeMap(Tid, WaitCounter) = undefined;
+var futex_wakers_wait_count: ThreadSafeMap(FutexHandle, WaitCounter) = undefined;
 
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{
@@ -52,14 +51,10 @@ pub fn init() !void {
 }
 
 pub fn start(pid: Pid) void {
-    futex_wakers_wait_count.acquireAccess();
     futex_wakers_wait_count.clear();
-    futex_wakers_wait_count.releaseAccess();
 
-    threads_wait_count.acquireAccess();
     threads_wait_count.clear();
-    threads_wait_count.map.putAssumeCapacity(pid, 0);
-    threads_wait_count.releaseAccess();
+    threads_wait_count.putAssumeCapacity(pid, 0);
 
     // TODO: maybe clear the WaitCounter?
 
@@ -82,15 +77,6 @@ fn increment() void {
     _ = wait_counter.cmpxchgStrong(this_thread_wait_count.* - 1, this_thread_wait_count.*, .monotonic, .monotonic);
 }
 
-fn nuked(this_thread_wait_count: *WaitCounter) void {
-    const global_wait_counter = wait_counter.load(.monotonic);
-    const wait_debit = global_wait_counter - this_thread_wait_count.*;
-
-    this_thread_wait_count.* = global_wait_counter;
-
-    kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
-}
-
 fn not_histrumented() bool {
     return kernel.current_task.pid() != histrumented_pid.load(.monotonic);
 }
@@ -101,7 +87,7 @@ fn addThread(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaq
     threads_wait_count.acquireAccess();
     defer threads_wait_count.releaseAccess();
 
-    if (threads_wait_count.map.capacity() == 0) threads_wait_count.grow(allocator) catch return; //TODO: should signal error
+    if (threads_wait_count.map.available == 0) threads_wait_count.growUnsafe(allocator) catch return; //TODO: should signal error
 
     const parent_wait_count = threads_wait_count.map.get(kernel.current_task.tid()).?;
     threads_wait_count.map.putAssumeCapacity(@intCast(regs.getReturnValue()), parent_wait_count);
@@ -112,9 +98,7 @@ fn futexWaitStart(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_op
 
     const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
 
-    threads_wait_count.acquireAccess();
-    data.wait_debit = wait_counter.load(.monotonic) - threads_wait_count.map.get(kernel.current_task.tid()).?;
-    threads_wait_count.releaseAccess();
+    data.wait_debit = wait_counter.load(.monotonic) - threads_wait_count.get(kernel.current_task.tid()).?;
     data.futex_hande = regs.getArgument(0); // We save the handle since it gets clobbered
 
     return 0;
@@ -125,11 +109,8 @@ fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaq
 
     const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
 
-    threads_wait_count.acquireAccess();
-    futex_wakers_wait_count.acquireAccess();
-    threads_wait_count.map.putAssumeCapacity(kernel.current_task.tid(), futex_wakers_wait_count.map.get(data.futex_hande).?);
-    threads_wait_count.releaseAccess();
-    futex_wakers_wait_count.releaseAccess();
+    // TODO: in rare cases this could grow the map; same as the .? so we will need to handle that better.
+    threads_wait_count.putAssumeCapacity(kernel.current_task.tid(), futex_wakers_wait_count.get(data.futex_hande).?);
 
     kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
 }
@@ -137,21 +118,11 @@ fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaq
 fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     if (not_histrumented()) return 1;
 
-    futex_wakers_wait_count.acquireAccess();
+    const this_thread_wait_count = threads_wait_count.get(kernel.current_task.tid()).?;
 
-    if (futex_wakers_wait_count.map.capacity() == 0) futex_wakers_wait_count.grow(allocator) catch return 1; //TODO: should signal error
-
-    threads_wait_count.acquireAccess();
-    const this_thread_wait_count = threads_wait_count.map.get(kernel.current_task.tid()).?;
-    threads_wait_count.releaseAccess();
+    futex_wakers_wait_count.put(allocator, regs.getArgument(0), this_thread_wait_count) catch return 1; //TODO: should signal error;
 
     const wait_debit = wait_counter.load(.monotonic) - this_thread_wait_count;
-
-    const futex_handle = regs.getArgument(0);
-    futex_wakers_wait_count.map.putAssumeCapacity(futex_handle, this_thread_wait_count);
-
-    futex_wakers_wait_count.releaseAccess();
-
     kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
 
     return 0;
@@ -159,9 +130,7 @@ fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaq
 
 fn exit(_: *FProbe, _: c_ulong, _: c_ulong, _: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     if (not_histrumented()) return 1;
-    threads_wait_count.acquireAccess();
-    const this_thread_wait_count = threads_wait_count.map.get(kernel.current_task.tid()).?;
-    threads_wait_count.releaseAccess();
+    const this_thread_wait_count = threads_wait_count.get(kernel.current_task.tid()).?;
 
     const wait_debit = wait_counter.load(.monotonic) - this_thread_wait_count;
     kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
