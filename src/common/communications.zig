@@ -1,7 +1,5 @@
 const std = @import("std");
 
-// TODO: consider decuppling uprobes and kprobes registration.
-
 // This is the list of the supported commands by the kernel
 // module. To send a command, the cli tool needs to write in the
 // chardev the enum followed by the rest of the necessary info.
