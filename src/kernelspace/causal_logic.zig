@@ -34,7 +34,7 @@ var futex_wakers_wait_count: ThreadSafeMap(FutexHandle, WaitCounter) = undefined
 
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{
-    .{ .callbacks = .{ .post_handler = &addThread } },
+    .{ .callbacks = .{ .post_handler = &clone } },
     .{ .callbacks = .{ .pre_handler = &futexWaitStart, .post_handler = &futexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeData) },
     .{ .callbacks = .{ .pre_handler = &futexWake } },
     .{ .callbacks = .{ .pre_handler = &exit } },
@@ -69,6 +69,7 @@ pub fn deinit() void {
     }
 }
 
+
 fn increment() void {
     const this_thread_wait_count = threads_wait_count.getPtr(kernel.current_task.tid()).?;
     this_thread_wait_count.* += 1;
@@ -80,7 +81,7 @@ fn not_histrumented() bool {
     return kernel.current_task.pid() != histrumented_pid.load(.monotonic);
 }
 
-fn addThread(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) void {
+fn clone(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) void {
     if (not_histrumented()) return;
 
     threads_wait_count.acquireAccess();
