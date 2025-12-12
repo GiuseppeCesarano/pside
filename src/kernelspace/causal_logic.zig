@@ -7,7 +7,6 @@
 // sigsuspend
 //
 // TODO: remove the thread_wait_count_map .? since they can actually be null
-// TODO: Check if the normal kernel.heap.allocator is fine to be used in the probes (may return in_atomic() == true)
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
 const ThreadSafeMap = @import("thread_safe_map.zig").ThreadSafeMap;
@@ -24,7 +23,7 @@ const WaitProbeData = struct {
     futex_hande: FutexHandle,
 };
 
-const allocator = kernel.heap.allocator;
+const allocator = kernel.heap.atomic_allocator;
 
 var histrumented_pid: std.atomic.Value(Pid) = .init(0);
 var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
@@ -42,8 +41,8 @@ var probes = [filters.len]FProbe{
 };
 
 pub fn init() !void {
-    threads_wait_count = try .init(allocator, 128);
-    futex_wakers_wait_count = try .init(allocator, 128);
+    threads_wait_count = try .init(allocator, 32);
+    futex_wakers_wait_count = try .init(allocator, 32);
 
     for (probes[0..], filters) |*probe, filter| {
         try probe.register(filter, null);

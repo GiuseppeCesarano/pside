@@ -27,6 +27,7 @@ unsigned long c_copy_from_user(void *, const void *, unsigned long);
 /* Memory management */
 void *c_kmalloc(size_t);
 void c_kfree(void *);
+void *c_kmalloc_atomic(size_t);
 
 /* Delay utilities */
 void c_ndelay(unsigned long);
@@ -103,6 +104,7 @@ unsigned long c_copy_from_user(void *to, const void *from, unsigned long n) {
 /* Memory management */
 void *c_kmalloc(size_t size) { return kmalloc(size, GFP_KERNEL); }
 void c_kfree(void *ptr) { kfree(ptr); }
+void *c_kmalloc_atomic(size_t size) { return kmalloc(size, GFP_ATOMIC); }
 
 /* Delay utilities */
 void c_ndelay(unsigned long nsec) { ndelay(nsec); }

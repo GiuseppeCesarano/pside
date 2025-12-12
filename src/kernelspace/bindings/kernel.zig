@@ -23,73 +23,81 @@ pub const mem = struct {
 };
 
 pub const heap = struct {
-    const KAllocator = struct {
-        extern fn c_kmalloc(c_ulong) ?*anyopaque;
-        extern fn c_kfree(*anyopaque) void;
+    pub fn KAllocator(malloc: fn (c_ulong) callconv(.c) ?*anyopaque) type {
+        return struct {
+            extern fn c_kfree(*anyopaque) void;
 
-        const cmalloc = if (is_target_kernel) c_kmalloc else c.malloc;
-        const cfree = if (is_target_kernel) c_kfree else c.free;
+            const cmalloc = if (is_target_kernel) malloc else c.malloc;
+            const cfree = if (is_target_kernel) c_kfree else c.free;
 
-        const Metadata = u16;
+            const Metadata = u16;
 
-        const vtable: std.mem.Allocator.VTable = .{
-            .alloc = alloc,
-            .resize = resize,
-            .remap = remap,
-            .free = free,
+            const vtable: std.mem.Allocator.VTable = .{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            };
+
+            fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+                std.debug.assert(len > 0);
+                const alignment_bytes = alignment.toByteUnits();
+                std.debug.assert(alignment_bytes < std.math.maxInt(Metadata));
+
+                // We will overallocate for the maximum alignment padding
+                // which is the alignement_bytes - 1 + @SizeOf(metadata)
+                // to save how many bytes we skipped.
+                //
+                // The metadata will be the value preceding the returned ptr
+                const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes + @sizeOf(Metadata) - 1)) orelse return null);
+
+                // If the address is already aligned alignForward
+                // will not advance and we will not have space for
+                // our metadata byte so we need to advance by one
+                const aligned_address = alignment.forward(unaligned_address + @sizeOf(Metadata));
+
+                const ptr: [*]align(1) Metadata = @ptrFromInt(aligned_address);
+                (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
+
+                return @ptrCast(ptr);
+            }
+
+            fn resize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
+                // We don't have any facility that forces in place resizing
+                // so this operation can only succeed if the new len is less
+                // than the old one.
+                return new_len <= buf.len;
+            }
+
+            fn remap(context: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+                // krealloc could potentially return an allocation that
+                // doesn't respect the alginment required so is not
+                // suitable to achive the remap implementation
+                return if (resize(context, buf, alignment, new_len, return_address)) buf.ptr else null;
+            }
+
+            fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
+                const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
+
+                const metadata_ptr: [*]align(1) Metadata = @ptrCast(buf_ptr);
+                const skipped_bytes = (metadata_ptr - 1)[0];
+
+                cfree(@ptrCast(buf_ptr - skipped_bytes));
+            }
         };
-
-        fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
-            std.debug.assert(len > 0);
-            const alignment_bytes = alignment.toByteUnits();
-            std.debug.assert(alignment_bytes < std.math.maxInt(Metadata));
-
-            // We will overallocate for the maximum alignment padding
-            // which is the alignement_bytes - 1 + @SizeOf(metadata)
-            // to save how many bytes we skipped.
-            //
-            // The metadata will be the value preceding the returned ptr
-            const unaligned_address = @intFromPtr(cmalloc(@intCast(len + alignment_bytes + @sizeOf(Metadata) - 1)) orelse return null);
-
-            // If the address is already aligned alignForward
-            // will not advance and we will not have space for
-            // our metadata byte so we need to advance by one
-            const aligned_address = alignment.forward(unaligned_address + @sizeOf(Metadata));
-
-            const ptr: [*]align(1) Metadata = @ptrFromInt(aligned_address);
-            (ptr - 1)[0] = @truncate(aligned_address - unaligned_address);
-
-            return @ptrCast(ptr);
-        }
-
-        fn resize(_: *anyopaque, buf: []u8, _: std.mem.Alignment, new_len: usize, _: usize) bool {
-            // We don't have any facility that forces in place resizing
-            // so this operation can only succeed if the new len is less
-            // than the old one.
-            return new_len <= buf.len;
-        }
-
-        fn remap(context: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
-            // krealloc could potentially return an allocation that
-            // doesn't respect the alginment required so is not
-            // suitable to achive the remap implementation
-            return if (resize(context, buf, alignment, new_len, return_address)) buf.ptr else null;
-        }
-
-        fn free(_: *anyopaque, buf: []u8, _: std.mem.Alignment, _: usize) void {
-            const buf_ptr: [*]u8 = @ptrCast(buf.ptr);
-
-            const metadata_ptr: [*]align(1) Metadata = @ptrCast(buf_ptr);
-            const skipped_bytes = (metadata_ptr - 1)[0];
-
-            cfree(@ptrCast(buf_ptr - skipped_bytes));
-        }
-    };
+    }
 
     // This allocator doesn't support alignments requiroments > 255 bytes.
+    extern fn c_kmalloc(c_ulong) ?*anyopaque;
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator.vtable,
+        .vtable = &KAllocator(c_kmalloc).vtable,
+    };
+
+    extern fn c_kmalloc_atomic(c_ulong) ?*anyopaque;
+    pub const atomic_allocator: std.mem.Allocator = .{
+        .ptr = undefined,
+        .vtable = &KAllocator(c_kmalloc).vtable,
     };
 };
 
