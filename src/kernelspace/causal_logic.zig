@@ -7,6 +7,7 @@
 // sigsuspend
 //
 // TODO: remove the thread_wait_count_map .? since they can actually be null
+// TODO: threadsafemap is actually not threadsafe.
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
 const ThreadSafeMap = @import("thread_safe_map.zig").ThreadSafeMap;
@@ -69,6 +70,22 @@ pub fn deinit() void {
     }
 }
 
+fn profilingLoop() void {
+    // while running:
+    //     wait_for_points_if_needed()
+    //     line = pick_line()
+    //     delay = pick_delay()
+    //     snapshot_all_points()
+
+    //     experiment_active = true
+    //     sleep(experiment_length)
+    //     experiment_active = false
+
+    //     compute_deltas()
+    //     log_results()
+    //     experiment_length = adjust_length(min_delta)
+    //     cooldown()
+}
 
 fn increment() void {
     const this_thread_wait_count = threads_wait_count.getPtr(kernel.current_task.tid()).?;
