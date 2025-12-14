@@ -1,7 +1,7 @@
 Kernel Module Dual License Notice
 ================================
 
-The source code files in this folder (`kernel_module/`) are dual-licensed under:
+The source code files in this folder (`kernelspace/`) are dual-licensed under:
 
 1. **MIT License**  
    You may use, modify, and redistribute these files under the MIT License.  
