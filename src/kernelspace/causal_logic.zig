@@ -8,7 +8,6 @@
 // sigsuspend
 //
 // TODO: remove the thread_wait_count_map .? since they can actually be null
-// TODO: threadsafemap is actually not threadsafe.
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
 const ThreadSafeMap = @import("thread_safe_map.zig").ThreadSafeMap;
@@ -32,8 +31,8 @@ var histrumented_pid: std.atomic.Value(Pid) = .init(0);
 var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
 var wait_lenght: std.atomic.Value(usize) = .init(0);
 
-var threads_wait_count: thread_safe.SegmentedSparseVector(WaitCounter) = .init;
-var futex_wakers_wait_count: ThreadSafeMap(FutexHandle, WaitCounter) = undefined;
+var threads_wait_count: thread_safe.SegmentedSparseVector(WaitCounter, std.math.maxInt(WaitCounter)) = .init;
+var futex_wakers_wait_count: thread_safe.AddressMap(WaitCounter) = .init;
 
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{
@@ -44,7 +43,7 @@ var probes = [filters.len]FProbe{
 };
 
 pub fn init() !void {
-    futex_wakers_wait_count = try .init(allocator, 32);
+    try futex_wakers_wait_count.grow(allocator);
     for (probes[0..], filters) |*probe, filter| {
         probe.register(filter, null) catch {};
     }
