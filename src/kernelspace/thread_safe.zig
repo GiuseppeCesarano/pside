@@ -2,7 +2,7 @@
 const std = @import("std");
 
 const RefGate = struct {
-    const lock_bit = @as(usize, 1) << 63;
+    const lock_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
     const references_mask = ~lock_bit;
 
     reference: std.atomic.Value(usize) = .init(0),
@@ -79,14 +79,16 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             defer this.ref_gate.decrement();
 
             if (block_index >= this.blocks.len) {
+                this.ref_gate.decrement();
                 try this.grow(allocator, block_index + 1);
+                this.ref_gate.increment();
             }
 
             const block = this.blocks[block_index].load(.monotonic) orelse try this.createBlock(allocator, block_index);
             block[at % block_len].store(value, .monotonic);
         }
 
-        pub fn createBlock(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
+        fn createBlock(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
             @branchHint(.unlikely);
             const new_block = try allocator.create(Block);
             @memset(new_block, .{ .raw = empty_value });
@@ -101,7 +103,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             } else new_block;
         }
 
-        pub fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
+        fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
             @branchHint(.unlikely);
 
             const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
@@ -109,8 +111,6 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
                 new_block.store(null, .monotonic);
             }
 
-            this.ref_gate.decrement();
-            defer this.ref_gate.increment();
             this.ref_gate.close();
             this.ref_gate.waitZero();
 
