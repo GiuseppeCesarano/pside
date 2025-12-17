@@ -10,7 +10,6 @@
 // TODO: remove the thread_wait_count_map .? since they can actually be null
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
-const ThreadSafeMap = @import("thread_safe_map.zig").ThreadSafeMap;
 const thread_safe = @import("thread_safe.zig");
 
 const FProbe = kernel.probe.F;
@@ -32,7 +31,7 @@ var wait_counter: std.atomic.Value(WaitCounter) = .init(0);
 var wait_lenght: std.atomic.Value(usize) = .init(0);
 
 var threads_wait_count: thread_safe.SegmentedSparseVector(WaitCounter, std.math.maxInt(WaitCounter)) = .init;
-var futex_wakers_wait_count: thread_safe.AddressMap(WaitCounter) = .init;
+var futex_wakers_wait_count: thread_safe.AddressMap(WaitCounter, std.math.maxInt(WaitCounter)) = .init;
 
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{

@@ -143,7 +143,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 }
 
 /// This will thorow away top three bits of the key.
-pub fn AddressMap(Value: type) type {
+pub fn AddressMap(Value: type, empty_value: Value) type {
     return struct {
         const Key = usize;
         const KeyWithMetadata = packed struct {
@@ -186,7 +186,9 @@ pub fn AddressMap(Value: type) type {
                 }
             } else return null;
 
-            return this.values[value_index].load(.monotonic);
+            // We may load between key write and value write
+            const v = this.values[value_index].load(.monotonic);
+            return if (v != empty_value) v else null;
         }
 
         pub fn put(this: *@This(), allocator: std.mem.Allocator, key: Key, value: Value) !void {
@@ -210,7 +212,6 @@ pub fn AddressMap(Value: type) type {
                 for (this.keys_with_metadata[i..], this.values[i..]) |*stored_key, *stored_value| {
                     if (stored_key.cmpxchgStrong(KeyWithMetadata.empty, new_key_data, .monotonic, .monotonic) == null) {
                         @branchHint(.likely);
-                        //TODO: FIX THE RACE HERE (reader could read before we write the value)
                         stored_value.store(value, .monotonic);
                         return;
                     }
@@ -228,8 +229,10 @@ pub fn AddressMap(Value: type) type {
 
             const new_keys = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
             @memset(new_keys, .{ .raw = KeyWithMetadata.empty });
+
             const ValueChild = std.meta.Child(@TypeOf(this.values));
-            const new_values: [*]ValueChild = @ptrCast((try allocator.alloc(ValueChild, new_len)).ptr);
+            const new_values = try allocator.alloc(ValueChild, new_len);
+            @memset(new_values, .{ .raw = empty_value });
 
             this.ref_gate.close();
             this.ref_gate.waitZero();
@@ -237,7 +240,7 @@ pub fn AddressMap(Value: type) type {
             if (new_len <= this.keys_with_metadata.len) {
                 @branchHint(.unlikely);
                 this.ref_gate.open();
-                allocator.free(new_values[0..new_keys.len]);
+                allocator.free(new_values);
                 allocator.free(new_keys);
             }
 
@@ -246,7 +249,7 @@ pub fn AddressMap(Value: type) type {
             this.capacity.store(new_len - old_keys.len, .monotonic);
 
             this.keys_with_metadata = new_keys;
-            this.values = new_values;
+            this.values = @ptrCast(new_values.ptr);
 
             for (old_keys, old_values) |*old_key, *old_value| {
                 const k = old_key.load(.monotonic).key;
