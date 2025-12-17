@@ -89,9 +89,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_kbto_tests = b.addRunArtifact(kbto_tests);
 
+    const thread_safe_test_only_mod = b.addModule("tftom", .{
+        .root_source_file = b.path("src/kernelspace/thread_safe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+    });
+    const thread_safe_tests = b.addTest(.{
+        .root_module = thread_safe_test_only_mod,
+    });
+    const run_tfto_tests = b.addRunArtifact(thread_safe_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_kbto_tests.step);
+    test_step.dependOn(&run_tfto_tests.step);
 }
 
 fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module, check_step: *std.Build.Step) *std.Build.Step.Compile {

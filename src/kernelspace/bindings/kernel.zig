@@ -23,11 +23,9 @@ pub const mem = struct {
 };
 
 pub const heap = struct {
-    pub fn KAllocator(malloc: fn (c_ulong) callconv(.c) ?*anyopaque) type {
+    pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque) type {
         return struct {
             extern fn c_kfree(*anyopaque) void;
-
-            const cmalloc = if (is_target_kernel) malloc else c.malloc;
             const cfree = if (is_target_kernel) c_kfree else c.free;
 
             const Metadata = u16;
@@ -91,13 +89,13 @@ pub const heap = struct {
     extern fn c_kmalloc(c_ulong) ?*anyopaque;
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(c_kmalloc).vtable,
+        .vtable = &KAllocator(if (is_target_kernel) c_kmalloc else c.malloc).vtable,
     };
 
     extern fn c_kmalloc_atomic(c_ulong) ?*anyopaque;
     pub const atomic_allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(c_kmalloc).vtable,
+        .vtable = &KAllocator(c_kmalloc_atomic).vtable,
     };
 };
 
