@@ -1,4 +1,3 @@
-// TODO: check those logics once again
 const std = @import("std");
 
 const RefGate = struct {
@@ -154,10 +153,13 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             collided: u1,
             key: std.meta.Int(.unsigned, @bitSizeOf(usize) - 2),
         };
+        const KeyWithMetadataAtomic = std.atomic.Value(KeyWithMetadata);
 
-        const hash = std.hash.int;
+        fn hash(in: Key) Key {
+            return std.hash.int(in);
+        }
 
-        keys_with_metadata: []std.atomic.Value(KeyWithMetadata),
+        keys_with_metadata: []KeyWithMetadataAtomic,
         values: [*]std.atomic.Value(Value),
         capacity: std.atomic.Value(isize),
 
@@ -176,14 +178,15 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             this.ref_gate.increment();
             defer this.ref_gate.decrement();
 
-            const key_index = hashed_key & (this.keys_with_metadata.len - 1);
-
-            const value_index = blk: inline for ([2]usize{ key_index, 0 }) |i| {
-                for (this.keys_with_metadata[i..], i..) |key_and_metadata, index| {
-                    const k_n_m = key_and_metadata.load(.monotonic);
-                    if (k_n_m.key == key) if (k_n_m.full == 1) break :blk index;
-                    if (k_n_m.collided != 1) return null;
-                }
+            var i: usize = 0;
+            const len = this.keys_with_metadata.len;
+            std.debug.assert(@popCount(len) <= 1);
+            const offset = hashed_key & (len -| 1);
+            const value_index = search: while (i < len) : (i += 1) {
+                const index = (i + offset) & (len - 1);
+                const entry = this.keys_with_metadata[index].load(.monotonic);
+                if (entry.key == key) if (entry.full == 1) break :search index;
+                if (entry.collided != 1) return null;
             } else return null;
 
             // We may load between key write and value write
@@ -192,7 +195,8 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
         }
 
         pub fn put(this: *@This(), allocator: std.mem.Allocator, key: Key, value: Value) !void {
-            if (this.capacity.fetchSub(1, .monotonic) == 0) try this.grow(allocator);
+            while (this.capacity.fetchSub(1, .monotonic) <= 1) try this.grow(allocator);
+
             const hashed_key = hash(key);
 
             this.ref_gate.increment();
@@ -201,22 +205,24 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
         }
 
         fn putUnsafe(this: *@This(), key: Key, hashed_key: Key, value: Value) void {
-            const key_index = hashed_key & (this.keys_with_metadata.len - 1);
             const new_key_data: KeyWithMetadata = .{
                 .full = 1,
                 .collided = 0,
                 .key = @truncate(key),
             };
 
-            inline for ([2]usize{ key_index, 0 }) |i| {
-                for (this.keys_with_metadata[i..], this.values[i..]) |*stored_key, *stored_value| {
-                    if (stored_key.cmpxchgStrong(KeyWithMetadata.empty, new_key_data, .monotonic, .monotonic) == null) {
-                        @branchHint(.likely);
-                        stored_value.store(value, .monotonic);
-                        return;
-                    }
-                    _ = stored_key.fetchOr(KeyWithMetadata.collided_bit, .monotonic);
+            var i: usize = 0;
+            const len = this.keys_with_metadata.len;
+            std.debug.assert(@popCount(len) <= 1);
+            const offset = hashed_key & (len - 1);
+            while (i < len) : (i += 1) {
+                const index = (i + offset) & (len - 1);
+                if (this.keys_with_metadata[index].cmpxchgStrong(KeyWithMetadata.empty, new_key_data, .monotonic, .monotonic) == null) {
+                    @branchHint(.likely);
+                    this.values[index].store(value, .monotonic);
+                    return;
                 }
+                _ = this.keys_with_metadata[index].fetchOr(KeyWithMetadata.collided_bit, .monotonic);
             }
         }
 
@@ -228,31 +234,33 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             this.ref_gate.decrement();
 
             const new_keys = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
-            @memset(new_keys, .{ .raw = KeyWithMetadata.empty });
+            for (new_keys) |*new_key| new_key.store(KeyWithMetadata.empty, .unordered);
 
-            const ValueChild = std.meta.Child(@TypeOf(this.values));
-            const new_values = try allocator.alloc(ValueChild, new_len);
-            @memset(new_values, .{ .raw = empty_value });
+            const new_values = try allocator.alloc(std.meta.Child(@TypeOf(this.values)), new_len);
+            for (new_values) |*new_value| new_value.store(empty_value, .unordered);
 
             this.ref_gate.close();
 
-            if (new_len <= this.keys_with_metadata.len) {
+            const old_keys = this.keys_with_metadata;
+            const old_values = this.values;
+
+            if (new_len <= old_keys.len) {
                 @branchHint(.unlikely);
                 this.ref_gate.open();
                 allocator.free(new_values);
                 allocator.free(new_keys);
+                return;
             }
 
-            const old_keys = this.keys_with_metadata;
-            const old_values = this.values;
             this.capacity.store(@intCast(new_len - old_keys.len), .monotonic);
 
             this.keys_with_metadata = new_keys;
             this.values = @ptrCast(new_values.ptr);
 
             for (old_keys, old_values) |*old_key, *old_value| {
+                const old_v = old_value.load(.monotonic);
                 const k = old_key.load(.monotonic).key;
-                this.putUnsafe(@intCast(k), hash(k), old_value.load(.monotonic));
+                this.putUnsafe(k, hash(k), old_v);
             }
 
             this.ref_gate.open();
@@ -359,25 +367,25 @@ test "AddressMap: single thread functional" {
     var map = AddressMap(u64, std.math.maxInt(u64)).init;
     defer map.deinit(std.testing.allocator);
 
-    try map.put(std.testing.allocator, 123, 456);
-    try std.testing.expectEqual(456, map.get(123));
     try std.testing.expectEqual(null, map.get(999));
 
     var i: usize = 0;
-    while (i < 100) : (i += 1) {
-        try map.put(std.testing.allocator, i + 1000, i * 2);
+    while (i < 3000) : (i += 1) {
+        try map.put(std.testing.allocator, i, i * 100);
     }
 
-    try std.testing.expectEqual(50, map.get(1025));
+    i = 0;
+    while (i < 3000) : (i += 1) {
+        try std.testing.expectEqual(i * 100, map.get(i).?);
+    }
 }
 
 test "AddressMap: concurrent stress test" {
     const Map = AddressMap(u64, std.math.maxInt(u64));
     var map = Map.init;
     defer map.deinit(std.testing.allocator);
-
     const thread_count = 4;
-    const ops_per_thread = 1000;
+    const ops_per_thread = 10000;
 
     const Context = struct {
         map: *Map,
@@ -393,16 +401,15 @@ test "AddressMap: concurrent stress test" {
 
     var threads: [thread_count]std.Thread = undefined;
     for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .map = &map, .offset = i * 10000 }});
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .map = &map, .offset = i * ops_per_thread}});
     }
 
     for (threads) |t| t.join();
 
     for (0..thread_count) |t_id| {
         for (0..ops_per_thread) |i| {
-            const key = (t_id * 10000) + i;
+            const key = (t_id * ops_per_thread) + i;
             const val = map.get(key);
-            try std.testing.expect(val != null);
             try std.testing.expectEqual(key * 2, val.?);
         }
     }
