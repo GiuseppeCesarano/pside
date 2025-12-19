@@ -122,7 +122,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             this.ref_gate.increment();
 
             // Release the unrdered stores in the blocks.
-            return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .monotonic)) |actual| blk: {
+            return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .acquire)) |actual| blk: {
                 @branchHint(.unlikely);
                 allocator.destroy(new_block);
                 break :blk actual.?;
@@ -146,7 +146,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
     return struct {
         const Key = usize;
         const KeyWithMetadata = packed struct {
-            pub const empty: @This() = .{ .full = 0, .collided = 0, .key = 0 };
+            pub const empty_bit: @This() = .{ .full = 0, .collided = 0, .key = 0 };
             pub const collided_bit: @This() = .{ .full = 0, .collided = 1, .key = 0 };
 
             full: u1,
@@ -185,12 +185,14 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             const value_index = search: while (i < len) : (i += 1) {
                 const index = (i + offset) & (len - 1);
                 const entry = this.keys_with_metadata[index].load(.monotonic);
-                if (entry.key == key) if (entry.full == 1) break :search index;
-                if (entry.collided != 1) return null;
-            } else return null;
+                if (entry.key == key) break :search if (entry.full == 1) index else null;
+                if (entry.collided != 1) break :search null;
+            } else null;
+
+            if (value_index == null) return null;
 
             // We may load between key write and value write
-            const v = this.values[value_index].load(.monotonic);
+            const v = this.values[value_index.?].load(.monotonic);
             return if (v != empty_value) v else null;
         }
 
@@ -217,8 +219,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             const offset = hashed_key & (len - 1);
             while (i < len) : (i += 1) {
                 const index = (i + offset) & (len - 1);
-                if (this.keys_with_metadata[index].cmpxchgStrong(KeyWithMetadata.empty, new_key_data, .monotonic, .monotonic) == null) {
-                    @branchHint(.likely);
+                if (this.keys_with_metadata[index].cmpxchgStrong(KeyWithMetadata.empty_bit, new_key_data, .monotonic, .monotonic) == null) {
                     this.values[index].store(value, .monotonic);
                     return;
                 }
@@ -233,41 +234,40 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             const new_len = @max(this.keys_with_metadata.len * 2, 256);
             this.ref_gate.decrement();
 
-            const new_keys = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
-            for (new_keys) |*new_key| new_key.store(KeyWithMetadata.empty, .unordered);
+            const new_keys_with_metadata = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
+            for (new_keys_with_metadata) |*new_key| new_key.store(KeyWithMetadata.empty_bit, .unordered);
 
             const new_values = try allocator.alloc(std.meta.Child(@TypeOf(this.values)), new_len);
             for (new_values) |*new_value| new_value.store(empty_value, .unordered);
 
             this.ref_gate.close();
 
-            const old_keys = this.keys_with_metadata;
+            const old_keys_with_metadata = this.keys_with_metadata;
             const old_values = this.values;
 
-            if (new_len <= old_keys.len) {
+            if (new_len <= old_keys_with_metadata.len) {
                 @branchHint(.unlikely);
                 this.ref_gate.open();
                 allocator.free(new_values);
-                allocator.free(new_keys);
+                allocator.free(new_keys_with_metadata);
                 return;
             }
 
-            this.capacity.store(@intCast(new_len - old_keys.len), .monotonic);
+            this.capacity.store(@intCast(new_len - old_keys_with_metadata.len), .monotonic);
 
-            this.keys_with_metadata = new_keys;
+            this.keys_with_metadata = new_keys_with_metadata;
             this.values = @ptrCast(new_values.ptr);
 
-            for (old_keys, old_values) |*old_key, *old_value| {
-                const old_v = old_value.load(.monotonic);
-                const k = old_key.load(.monotonic).key;
-                this.putUnsafe(k, hash(k), old_v);
+            for (old_keys_with_metadata, old_values) |*old_kwm, *old_value| {
+                const kwm = old_kwm.load(.monotonic);
+                if (kwm.full == 1) this.putUnsafe(kwm.key, hash(kwm.key), old_value.load(.monotonic));
             }
 
             this.ref_gate.open();
 
-            if (old_keys.len > 0) {
-                allocator.free(old_values[0..old_keys.len]);
-                allocator.free(old_keys);
+            if (old_keys_with_metadata.len > 0) {
+                allocator.free(old_values[0..old_keys_with_metadata.len]);
+                allocator.free(old_keys_with_metadata);
             }
         }
     };
@@ -328,9 +328,12 @@ test "SparseVector: single thread functional" {
 }
 
 test "SparseVector: concurrent growth and access" {
+    var allocator_status = std.heap.ThreadSafeAllocator{ .child_allocator = std.testing.allocator };
+    const allocator = allocator_status.allocator();
+
     const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize));
     var vec = Vector.init;
-    defer vec.deinit(std.testing.allocator);
+    defer vec.deinit(allocator);
 
     const thread_count = 4;
     const items_per_thread = 100_000;
@@ -338,18 +341,18 @@ test "SparseVector: concurrent growth and access" {
     const Context = struct {
         vec: *Vector,
         id: usize,
-        fn run(ctx: @This()) !void {
+        fn run(ctx: @This(), alloc: std.mem.Allocator) !void {
             var i: usize = 0;
             while (i < items_per_thread) : (i += 1) {
                 const index = (i * thread_count) + ctx.id;
-                try ctx.vec.put(std.testing.allocator, index, index * 10);
+                try ctx.vec.put(alloc, index, index * 10);
             }
         }
     };
 
     var threads: [thread_count]std.Thread = undefined;
     for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .vec = &vec, .id = i }});
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{ Context{ .vec = &vec, .id = i }, allocator });
     }
 
     for (threads) |t| t.join();
@@ -381,27 +384,30 @@ test "AddressMap: single thread functional" {
 }
 
 test "AddressMap: concurrent stress test" {
+    var allocator_status = std.heap.ThreadSafeAllocator{ .child_allocator = std.testing.allocator };
+    const allocator = allocator_status.allocator();
+
     const Map = AddressMap(u64, std.math.maxInt(u64));
     var map = Map.init;
-    defer map.deinit(std.testing.allocator);
+    defer map.deinit(allocator);
     const thread_count = 4;
     const ops_per_thread = 10000;
 
     const Context = struct {
         map: *Map,
         offset: usize,
-        fn run(ctx: @This()) !void {
+        fn run(ctx: @This(), alloc: std.mem.Allocator) !void {
             var i: usize = 0;
             while (i < ops_per_thread) : (i += 1) {
                 const key = ctx.offset + i;
-                try ctx.map.put(std.testing.allocator, key, key * 2);
+                try ctx.map.put(alloc, key, key * 2);
             }
         }
     };
 
     var threads: [thread_count]std.Thread = undefined;
     for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .map = &map, .offset = i * ops_per_thread}});
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{ Context{ .map = &map, .offset = i * ops_per_thread }, allocator });
     }
 
     for (threads) |t| t.join();
