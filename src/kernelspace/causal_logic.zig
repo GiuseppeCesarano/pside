@@ -8,6 +8,7 @@
 // sigsuspend
 //
 // TODO: remove the thread_wait_count_map .? since they can actually be null
+// TODO: create error handling with push queue
 const std = @import("std");
 const kernel = @import("bindings/kernel.zig");
 const thread_safe = @import("thread_safe.zig");
@@ -32,6 +33,8 @@ var wait_lenght: std.atomic.Value(usize) = .init(0);
 
 var threads_wait_count: thread_safe.SegmentedSparseVector(WaitCounter, std.math.maxInt(WaitCounter)) = .init;
 var futex_wakers_wait_count: thread_safe.AddressMap(WaitCounter, std.math.maxInt(WaitCounter)) = .init;
+
+var experiment_has_error: std.atomic.Value(bool) = .init(true);
 
 const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
 var probes = [filters.len]FProbe{
@@ -113,20 +116,48 @@ fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaq
 
     const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
 
-    // TODO: in rare cases this could grow the map; same as the .? so we will need to handle that better.
-    threads_wait_count.put(allocator, @intCast(kernel.current_task.tid()), futex_wakers_wait_count.get(data.futex_hande).?) catch {};
-
     kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
+
+    const waker_wait_counter = futex_wakers_wait_count.get(data.futex_hande) orelse {
+        @branchHint(.cold);
+        experiment_has_error.store(true, .monotonic);
+        std.log.err("futexWaitEnd found waker_wait_count empty", .{});
+        return;
+    };
+
+    threads_wait_count.put(allocator, @intCast(kernel.current_task.tid()), waker_wait_counter) catch {};
 }
 
 fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     if (not_histrumented()) return 1;
 
-    const this_thread_wait_count = threads_wait_count.get(@intCast(kernel.current_task.tid())).?;
+    const tid: usize = @intCast(kernel.current_task.tid());
+    const wait_len = wait_lenght.load(.monotonic);
 
-    futex_wakers_wait_count.put(allocator, regs.getArgument(0), this_thread_wait_count) catch return 1; //TODO: should signal error;
+    var credit: WaitCounter = 0;
+    var thread_wait_count: ?WaitCounter = threads_wait_count.get(tid);
+    while (thread_wait_count == null and credit <= 10) {
+        // We may win the race condition against the thread
+        // creation in that case let's wait a bit and retry
+        // Since we wait, we create some wait credit that we
+        // can subtract later.
+        @branchHint(.cold);
+        kernel.time.delay.us(wait_len);
+        credit += 1;
+        thread_wait_count = threads_wait_count.get(tid);
+    }
 
-    const wait_debit = wait_counter.load(.monotonic) - this_thread_wait_count;
+    const this_thread_wait_counter = if (thread_wait_count) |twc| twc else {
+        @branchHint(.cold);
+        experiment_has_error.store(true, .monotonic);
+        // TODO: maybe we sould't print from the probe and should use a print error function
+        std.log.err("futexWake we could't not recover from race condition, maybe never assigned?", .{});
+        return 1;
+    };
+
+    futex_wakers_wait_count.put(allocator, regs.getArgument(0), this_thread_wait_counter) catch return 1; //TODO: should signal error;
+
+    const wait_debit = wait_counter.load(.monotonic) - this_thread_wait_counter;
     kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
 
     return 0;
