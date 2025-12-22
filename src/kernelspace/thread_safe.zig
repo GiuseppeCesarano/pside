@@ -172,7 +172,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             allocator.free(this.keys_with_metadata);
         }
 
-        pub fn get(this: *@This(), key: Key) ?Value {
+        pub fn getPtr(this: *@This(), key: Key) ?*std.atomic.Value(Value) {
             const hashed_key = hash(key);
 
             this.ref_gate.increment();
@@ -192,7 +192,11 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             if (value_index == null) return null;
 
             // We may load between key write and value write
-            const v = this.values[value_index.?].load(.monotonic);
+            return &this.values[value_index.?];
+        }
+
+        pub fn get(this: *@This(), key: Key) ?Value {
+            const v = if (this.getPtr(key)) |ptr| ptr.load(.monotonic) else return null;
             return if (v != empty_value) v else null;
         }
 

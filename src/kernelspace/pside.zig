@@ -1,7 +1,7 @@
 const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("bindings/kernel.zig");
-const causal_logic = @import("causal_logic.zig");
+const causal = @import("causal.zig");
 
 const name = "pside";
 const native_endian = @import("builtin").target.cpu.arch.endian();
@@ -18,14 +18,14 @@ var chardev: kernel.CharDevice = undefined;
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, null, &writeCallBack);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-    causal_logic.init() catch return 1;
+    causal.engine.init() catch return 1;
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
     chardev.remove();
-    causal_logic.deinit();
+    causal.engine.deinit();
 }
 
 fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_len: usize, offset: *i64) callconv(.c) isize {
@@ -63,5 +63,5 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
 fn setPidForFilter(reader: *std.Io.Reader) !void {
     const pid = try reader.takeInt(std.os.linux.pid_t, native_endian);
-    causal_logic.start(pid);
+    causal.engine.start(pid);
 }
