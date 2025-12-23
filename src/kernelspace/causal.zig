@@ -153,3 +153,29 @@ const engine = struct {
         return 0;
     }
 };
+
+pub const Error = error{};
+
+const ErrorQueue = struct {
+    errors: [16]Error = @splat(undefined),
+    index: std.atomic.Value(u8) = .init(0),
+
+    pub fn signalError(this: *@This(), err: Error) void {
+        @branchHint(.cold);
+        const index = this.index.fetchAdd(1, .monotonic);
+        if (this.errors.len > index) this.errors[index] = err;
+    }
+
+    pub fn getOccurred(this: @This()) ?[]Error {
+        const index = @min(this.index.load(.monotonic), this.errors.len);
+        return if (index != 0) this.errors[0..index] else null;
+    }
+
+    pub fn someWhereLost(this: @This()) bool {
+        return this.index.load(.monotonic) > this.errors.len;
+    }
+
+    pub fn clear(this: *@This()) void {
+        this.index.store(0, .monotonic);
+    }
+};
