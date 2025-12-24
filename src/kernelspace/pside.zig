@@ -63,5 +63,5 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
 
 fn setPidForFilter(reader: *std.Io.Reader) !void {
     const pid = try reader.takeInt(std.os.linux.pid_t, native_endian);
-    causal.engine.start(pid);
+    causal.engine.profilePid(pid);
 }

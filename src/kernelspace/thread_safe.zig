@@ -335,8 +335,7 @@ test "SparseVector: concurrent growth and access" {
     var allocator_status = std.heap.ThreadSafeAllocator{ .child_allocator = std.testing.allocator };
     const allocator = allocator_status.allocator();
 
-    const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize));
-    var vec = Vector.init;
+    const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize)); var vec = Vector.init;
     defer vec.deinit(allocator);
 
     const thread_count = 4;
