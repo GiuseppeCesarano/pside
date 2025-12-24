@@ -25,7 +25,7 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     child.start_suspended = true;
     try child.spawn();
 
-    try module.setPidForFilter(child.id);
+    try module.startProfilerOnPid(child.id);
 
     _ = std.posix.waitpid(child.id, std.os.linux.W.UNTRACED);
     try std.posix.kill(child.id, .CONT);

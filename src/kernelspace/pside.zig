@@ -54,7 +54,7 @@ fn writeCallBack(_: *anyopaque, userspace_buffer: [*]const u8, userspace_buffer_
     std.log.debug("recived: {s}\tbytes: {}", .{ @tagName(recived_command), userspace_buffer_len });
 
     switch (recived_command) {
-        .set_pid_for_filter => setPidForFilter(&reader) catch |err| std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)}),
+        .start_profiler_on_pid => setPidForFilter(&reader) catch |err| std.log.warn("Reading pid went wrong: {s}", .{@errorName(err)}),
         else => std.log.err("unsupported command: {s}.", .{@tagName(recived_command)}),
     }
 

@@ -95,43 +95,8 @@ pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
     };
 }
 
-pub fn setPidForFilter(this: *@This(), pid: std.os.linux.pid_t) !void {
-    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(communications.Commands.set_pid_for_filter), native_endianess);
+pub fn startProfilerOnPid(this: *@This(), pid: std.os.linux.pid_t) !void {
+    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(communications.Commands.start_profiler_on_pid), native_endianess);
     _ = try this.chardev_writer.interface.writeInt(std.os.linux.pid_t, pid, native_endianess);
-    try this.chardev_writer.interface.flush();
-}
-
-pub fn sendProbe(this: *@This(), comptime kind: communications.Commands, path: []const u8, offset: usize) !void {
-    switch (kind) {
-        .send_probe_benchmark => {},
-        else => @compileError("Please provide a command which loads an uprobe."),
-    }
-
-    const total_len = path.len + @sizeOf(communications.Commands.Tag) + @sizeOf(@TypeOf(offset)) + 1;
-    // This would excede the buffer and couse the writer to call
-    // the syscall two times which would result in the kenel
-    // module to treat those as two separated commands.
-    if (total_len > this.buffer.len) return error.NoEnoughSpace;
-
-    _ = try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(kind), native_endianess);
-    _ = try this.chardev_writer.interface.writeInt(usize, offset, native_endianess);
-    _ = try this.chardev_writer.interface.write(path);
-    _ = try this.chardev_writer.interface.writeInt(u8, 0, native_endianess);
-
-    try this.chardev_writer.interface.flush();
-}
-
-pub fn registerSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.register_sent_probes), native_endianess);
-    try this.chardev_writer.interface.flush();
-}
-
-pub fn unregisterSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.unregister_sent_probes), native_endianess);
-    try this.chardev_writer.interface.flush();
-}
-
-pub fn clearSentProbes(this: *@This()) !void {
-    try this.chardev_writer.interface.writeInt(communications.Commands.Tag, @intFromEnum(communications.Commands.clear_sent_probes), native_endianess);
     try this.chardev_writer.interface.flush();
 }
