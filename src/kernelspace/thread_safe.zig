@@ -206,7 +206,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
         }
 
         pub fn put(this: *@This(), allocator: std.mem.Allocator, key: Key, value: Value) !void {
-            while (this.capacity.fetchSub(1, .monotonic) <= 1) try this.grow(allocator);
+            while (this.capacity.fetchSub(1, .monotonic) <= 1) try this.growExponential(allocator);
 
             const hashed_key = hash(key);
 
@@ -236,11 +236,13 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             }
         }
 
-        pub fn grow(this: *@This(), allocator: std.mem.Allocator) !void {
+        pub fn growExponential(this: *@This(), allocator: std.mem.Allocator) !void {
             @branchHint(.unlikely);
 
             this.ref_gate.increment();
-            const new_len = @max(this.keys_with_metadata.len * 2, 256);
+            const len = this.keys_with_metadata.len;
+            std.debug.assert(@popCount(len) <= 1);
+            const new_len = @max(len << 1, 256);
             this.ref_gate.decrement();
 
             const new_keys_with_metadata = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);

@@ -109,7 +109,7 @@ pub const engine = struct {
         };
 
         pub fn init() !void {
-            try futex_wakers_wait_count.grow(allocator);
+            try futex_wakers_wait_count.growExponential(allocator);
             for (fprobes[0..], filters) |*probe, filter| {
                 try probe.register(filter, null);
             }
