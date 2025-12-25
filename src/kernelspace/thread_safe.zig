@@ -6,7 +6,7 @@ const RefGate = struct {
 
     reference: std.atomic.Value(usize) = .init(0),
 
-    pub fn increment(this: *@This()) void {
+    pub inline fn increment(this: *@This()) void {
         const ref = this.reference.fetchAdd(1, .acquire);
         std.debug.assert(ref & lock_bit != lock_bit - 1);
         if (ref & lock_bit != 0) {
@@ -20,21 +20,24 @@ const RefGate = struct {
         }
     }
 
-    pub fn decrement(this: *@This()) void {
+    pub inline fn decrement(this: *@This()) void {
         std.debug.assert(this.reference.fetchSub(1, .release) != 0);
     }
 
-    pub fn close(this: *@This()) void {
-        while (this.reference.fetchOr(lock_bit, .monotonic) & lock_bit != 0) {
-            std.atomic.spinLoopHint();
+    pub inline fn close(this: *@This()) void {
+        while (this.reference.fetchOr(lock_bit, .acquire) & lock_bit != 0) {
+            @branchHint(.cold);
+            while (this.reference.load(.monotonic) & lock_bit != 0) std.atomic.spinLoopHint();
         }
+    }
 
+    pub inline fn waitAllReferenceDecrement(this: *@This()) void {
         while ((this.reference.load(.acquire) & references_mask) != 0) {
             std.atomic.spinLoopHint();
         }
     }
 
-    pub fn open(this: *@This()) void {
+    pub inline fn open(this: *@This()) void {
         std.debug.assert(this.reference.fetchAnd(references_mask, .release) & lock_bit != 0);
     }
 };
@@ -105,6 +108,8 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
                 allocator.free(new_blocks);
                 return;
             }
+
+            this.ref_gate.waitAllReferenceDecrement();
 
             @memcpy(new_blocks[0..this.blocks.len], blocks);
             this.blocks = new_blocks;
@@ -257,6 +262,8 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
                 return;
             }
 
+            this.ref_gate.waitAllReferenceDecrement();
+
             this.capacity.store(@intCast(new_len - old_keys_with_metadata.len), .monotonic);
 
             this.keys_with_metadata = new_keys_with_metadata;
@@ -335,7 +342,8 @@ test "SparseVector: concurrent growth and access" {
     var allocator_status = std.heap.ThreadSafeAllocator{ .child_allocator = std.testing.allocator };
     const allocator = allocator_status.allocator();
 
-    const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize)); var vec = Vector.init;
+    const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize));
+    var vec = Vector.init;
     defer vec.deinit(allocator);
 
     const thread_count = 4;
