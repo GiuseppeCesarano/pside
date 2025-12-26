@@ -84,6 +84,12 @@ typedef ssize_t (*write_fn)(struct file *file, const char __user *buf,
 int c_chardev_register(struct chardev *, const char *, read_fn, write_fn);
 void c_chardev_unregister(struct chardev *);
 
+/* File */
+
+struct file *c_filp_open(const char *, int, umode_t);
+ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
+ssize_t c_kernel_read(struct file *, void *, size_t, loff_t *);
+
 /* Implementations */
 
 /* Logging */
@@ -204,4 +210,19 @@ void c_chardev_unregister(struct chardev *d) {
   class_destroy(d->class);
   cdev_del(&d->cdev);
   unregister_chrdev_region(d->dev, 1);
+}
+
+/* File */
+
+struct file *c_filp_open(const char *path, int permissions, umode_t mode) {
+  return filp_open(path, permissions, mode);
+}
+
+ssize_t c_kernel_write(struct file *fd, const void *buff, size_t len,
+                       loff_t *off) {
+  return kernel_write(fd, buff, len, off);
+}
+
+ssize_t c_kernel_read(struct file *fd, void *buff, size_t len, loff_t *off) {
+  return kernel_read(fd, buff, len, off);
 }

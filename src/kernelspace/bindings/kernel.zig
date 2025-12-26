@@ -372,6 +372,24 @@ pub const CharDevice = struct {
     }
 };
 
+pub const File = *opaque {
+    extern fn c_filp_open([*:0]const u8, c_int, c_ushort) *@This();
+    pub fn open(path: [*:0]const u8) *@This() {
+        // TODO: fix parameters
+        c_filp_open(path, 0, 0);
+    }
+
+    extern fn c_kernel_write(*@This(), *const anyopaque, usize, *usize) isize;
+    pub fn write(this: *@This(), buff: []const u8, offset: *usize) isize {
+        return c_kernel_write(this, @ptrCast(buff.ptr), buff.len, offset);
+    }
+
+    extern fn c_kernel_read(*@This(), *anyopaque, usize, *usize) isize;
+    pub fn read(this: *@This(), buff: []u8, offset: *usize) isize {
+        return c_kernel_read(this, @ptrCast(buff.ptr), buff.len, offset);
+    }
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);
