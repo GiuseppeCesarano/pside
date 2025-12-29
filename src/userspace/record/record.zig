@@ -23,14 +23,14 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     var module = try future_module.await(io);
     var child: std.process.Child = .init(user_program.buffer, allocator);
     child.start_suspended = true;
-    try child.spawn();
+    try child.spawn(io);
 
     try module.startProfilerOnPid(child.id);
 
     _ = std.posix.waitpid(child.id, std.os.linux.W.UNTRACED);
     try std.posix.kill(child.id, .CONT);
 
-    _ = try child.wait();
+    _ = try child.wait(io);
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {

@@ -6,12 +6,12 @@ const name = "pside";
 
 file: std.Io.File,
 chardev: std.Io.File,
-chardev_writer: std.fs.File.Writer, // TODO: when implemented switch to std.Io.File.Writer
+chardev_writer: std.Io.File.Writer,
 chardev_reader: std.Io.File.Reader,
 buffer: []u8,
 
 pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
-    const path = try resolveModulePath(allocator);
+    const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
     // Allocate enough buffer for the reader to allow
@@ -34,8 +34,8 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
         0,
     );
 
-    rt.chardev = try std.Io.File.openAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
-    rt.chardev_writer = std.fs.File.adaptFromNewApi(rt.chardev).writerStreaming(rt.buffer); // switch to new api
+    rt.chardev = try std.Io.Dir.openFileAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
+    rt.chardev_writer = rt.chardev.writer(io, rt.buffer);
     rt.chardev_reader = rt.chardev.reader(io, &.{});
 
     return switch (std.posix.errno(load_res)) {
@@ -58,8 +58,8 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     };
 }
 
-fn resolveModulePath(allocator: std.mem.Allocator) ![]const u8 {
-    const bin_path = try std.fs.selfExeDirPathAlloc(allocator);
+fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const bin_path = try std.process.executableDirPathAlloc(io, allocator);
     defer allocator.free(bin_path);
 
     const base_path = std.fs.path.dirname(bin_path) orelse "";

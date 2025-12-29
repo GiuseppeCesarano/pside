@@ -17,7 +17,7 @@ pub fn main() !void {
         _ = debug_allocator_contex.deinit();
     };
 
-    var threaded_io_context = std.Io.Threaded.init(allocator);
+    var threaded_io_context = std.Io.Threaded.init(allocator, .{});
     const io = threaded_io_context.io();
     defer threaded_io_context.deinit();
 

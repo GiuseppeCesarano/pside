@@ -57,7 +57,7 @@ fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: s
 
     while (path_it.next()) |current_path| {
         const dir = std.Io.Dir.cwd().openDir(io, current_path, .{}) catch continue;
-        if (dir.statPath(io, binary_path, .{})) |_| {
+        if (dir.statFile(io, binary_path, .{})) |_| {
             return std.mem.concat(allocator, u8, &.{ current_path, "/", binary_path });
         } else |_| {}
     }
