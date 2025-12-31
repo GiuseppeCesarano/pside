@@ -19,12 +19,12 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     const user_program: UserProgram = try .initFromParsedOptions(parsed_options, allocator, io);
     defer user_program.deinit(allocator);
 
-    // TODO: Drop permissions to userspace using SUDO_USER
-    var module = try future_module.await(io);
     var child: std.process.Child = .init(user_program.buffer, allocator);
     child.start_suspended = true;
     try child.spawn(io);
 
+    // TODO: Drop permissions to userspace using SUDO_USER
+    var module = try future_module.await(io);
     try module.startProfilerOnPid(child.id);
 
     _ = std.posix.waitpid(child.id, std.os.linux.W.UNTRACED);
