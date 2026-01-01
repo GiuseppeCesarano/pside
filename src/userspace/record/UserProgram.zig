@@ -1,6 +1,8 @@
 const std = @import("std");
 
-buffer: [][]const u8,
+path: [*:0]const u8,
+args: [*:null]const ?[*:0]const u8,
+// TODO: enviroment_map: [*:null]const ?[*:0]const u8,
 
 pub fn initFromParsedOptions(parsed: anytype, allocator: std.mem.Allocator, io: std.Io) !@This() {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
@@ -11,44 +13,52 @@ pub fn initFromParsedOptions(parsed: anytype, allocator: std.mem.Allocator, io: 
 
     if (parsed.positional_arguments) |args| {
         var it = args;
+        std.debug.assert(it.count() != 0);
+
         if (it.count() == 1) return try initFromString(it.next().?, allocator, io);
 
-        const buffer = try allocator.alloc([]const u8, it.count());
-        errdefer allocator.free(buffer);
+        const args_slice = try allocator.allocSentinel(?[*:0]const u8, it.count() - 1, null);
+        errdefer allocator.free(args_slice);
 
-        buffer[0] = try expandBinaryPath(it.next().?, allocator, io);
-        copyToBuffer(buffer, &it);
+        const path = try expandBinaryPath(it.next().?, allocator, io);
 
-        return .{ .buffer = buffer };
+        for (args_slice[0..]) |*arg| {
+            const new_arg = try allocator.dupeZ(u8, it.next().?);
+            errdefer allocator.free(new_arg);
+
+            arg.* = @ptrCast(new_arg);
+        }
+
+        return .{ .path = path, .args = @ptrCast(args_slice.ptr) };
     }
 
     return error.UnspecifiedCommand;
 }
 
 pub fn initFromString(string: []const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
-    const buffer = try allocator.alloc([]const u8, std.mem.countScalar(u8, string, ' ') + 1);
-    errdefer allocator.free(buffer);
+    const argc = std.mem.countScalar(u8, string, ' ');
+
+    const args_slice = try allocator.allocSentinel(?[*:0]const u8, argc, null);
+    errdefer allocator.free(args_slice);
 
     var it = std.mem.splitScalar(u8, string, ' ');
 
-    buffer[0] = try expandBinaryPath(it.next().?, allocator, io);
-    copyToBuffer(buffer, &it);
+    const path = try expandBinaryPath(it.next().?, allocator, io);
 
-    return .{ .buffer = buffer };
-}
+    for (args_slice[0..]) |*arg| {
+        const new_arg = try allocator.dupeZ(u8, it.next().?);
+        errdefer allocator.free(new_arg);
 
-fn copyToBuffer(buffer: [][]const u8, it: anytype) void {
-    for (buffer[1..]) |*str| {
-        str.* = it.next().?;
+        arg.* = @ptrCast(new_arg);
     }
+
+    return .{ .path = path, .args = @ptrCast(args_slice.ptr) };
 }
 
-fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
     if (std.mem.findScalar(u8, binary_path, '/') != null) {
-        //Allocate and copy so we don't need special logic in deinit.
-        const copy = try allocator.alloc(u8, binary_path.len);
-        @memcpy(copy, binary_path);
-        return copy;
+        const copy = try allocator.dupeZ(u8, binary_path);
+        return @ptrCast(copy.ptr);
     }
 
     const path_env = try std.process.getEnvVarOwned(allocator, "PATH");
@@ -58,7 +68,8 @@ fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: s
     while (path_it.next()) |current_path| {
         const dir = std.Io.Dir.cwd().openDir(io, current_path, .{}) catch continue;
         if (dir.statFile(io, binary_path, .{})) |_| {
-            return std.mem.concat(allocator, u8, &.{ current_path, "/", binary_path });
+            const path = try std.mem.concatWithSentinel(allocator, u8, &.{ current_path, "/", binary_path }, 0);
+            return @ptrCast(path.ptr);
         } else |_| {}
     }
 
@@ -66,6 +77,10 @@ fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: s
 }
 
 pub fn deinit(this: @This(), allocator: std.mem.Allocator) void {
-    allocator.free(this.buffer[0]);
-    allocator.free(this.buffer);
+    allocator.free(std.mem.span(this.path));
+    const args_slice = std.mem.span(this.args);
+    for (args_slice) |arg| {
+        if (arg) |a| allocator.free(std.mem.span(a));
+    }
+    allocator.free(args_slice);
 }

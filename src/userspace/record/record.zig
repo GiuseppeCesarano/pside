@@ -2,6 +2,7 @@ const std = @import("std");
 const cli = @import("cli");
 const PsideKernelModule = @import("PsideKernelModule.zig");
 const UserProgram = @import("UserProgram.zig");
+const Tracee = @import("Tracee.zig");
 
 pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !void {
     const parsed_options = options.parse(struct {
@@ -19,18 +20,13 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     const user_program: UserProgram = try .initFromParsedOptions(parsed_options, allocator, io);
     defer user_program.deinit(allocator);
 
-    var child: std.process.Child = .init(user_program.buffer, allocator);
-    child.start_suspended = true;
-    try child.spawn(io);
+    const tracee: Tracee = try .spawn(user_program);
 
-    // TODO: Drop permissions to userspace using SUDO_USER
     var module = try future_module.await(io);
-    try module.startProfilerOnPid(child.id);
+    try module.startProfilerOnPid(tracee.pid);
+    try tracee.start();
 
-    _ = std.posix.waitpid(child.id, std.os.linux.W.UNTRACED);
-    try std.posix.kill(child.id, .CONT);
-
-    _ = try child.wait(io);
+    std.log.info("Usage: {any}", .{tracee.wait()});
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
