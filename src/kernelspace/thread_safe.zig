@@ -146,7 +146,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
     };
 }
 
-/// This will thorow away top three bits of the key.
+/// This will thorow away top two bits of the key.
 pub fn AddressMap(Value: type, empty_value: Value) type {
     return struct {
         const Key = usize;
@@ -194,10 +194,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
                 if (entry.collided != 1) break :search null;
             } else null;
 
-            if (value_index == null) return null;
-
-            // We may load between key write and value write
-            return &this.values[value_index.?];
+            return if (value_index) |index| &this.values[index] else null;
         }
 
         pub fn get(this: *@This(), key: Key) ?Value {
