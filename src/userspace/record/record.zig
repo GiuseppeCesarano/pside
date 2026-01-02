@@ -13,9 +13,9 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
     var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ allocator, io });
-    defer if (future_module.cancel(io)) |module| module.unload(allocator, io) catch {} else |_| {
+    defer if (future_module.cancel(io)) |module| module.unload(allocator, io) catch {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
-    };
+    } else |_| {};
 
     comptime if (@import("builtin").output_mode != .Exe)
         @compileError("pside record needs environ which is setted up in zig exe start up code.");
@@ -27,9 +27,10 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
 
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);
+
     try tracee.start();
 
-    std.log.info("Usage: {any}", .{tracee.wait()});
+    _ = tracee.wait();
 }
 
 fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
