@@ -5,7 +5,7 @@ const UserProgram = @import("UserProgram.zig");
 
 pid: linux.pid_t,
 
-const SpawnError = error{ ChildDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID };
+const SpawnError = error{ ChildDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
 
 pub fn spawn(tracee_exe: UserProgram) !@This() {
     const child_pid = try posix.fork();
@@ -32,17 +32,14 @@ pub fn spawn(tracee_exe: UserProgram) !@This() {
 fn childStart(tracee_exe: UserProgram) !void {
     const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
     const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
+    if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
     try posix.setgid(gid);
     try posix.setuid(uid);
 
     try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
     try posix.raise(.STOP);
 
-    comptime if (@import("builtin").output_mode != .Exe)
-        @compileError("childStart needs environ which is setted up in zig start up code.");
-
-    // TODO: eviron
-    return posix.execveZ(tracee_exe.path, tracee_exe.args, &.{});
+    return posix.execveZ(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map);
 }
 
 pub fn start(this: @This()) !void {

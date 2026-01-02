@@ -2,46 +2,37 @@ const std = @import("std");
 
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
-// TODO: enviroment_map: [*:null]const ?[*:0]const u8,
+enviroment_map: [*:null]const ?[*:0]const u8,
 
-pub fn initFromParsedOptions(parsed: anytype, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initFromParsedOptions(parsed: anytype, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
         if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
 
-        return try initFromString(parsed.flags.c, allocator, io);
+        return try initFromString(parsed.flags.c, environ, allocator, io);
     }
 
     if (parsed.positional_arguments) |args| {
-        var it = args;
-        std.debug.assert(it.count() != 0);
-
-        if (it.count() == 1) return try initFromString(it.next().?, allocator, io);
-
-        const args_slice = try allocator.allocSentinel(?[*:0]const u8, it.count() - 1, null);
-        errdefer allocator.free(args_slice);
-
-        const path = try expandBinaryPath(it.next().?, allocator, io);
-
-        for (args_slice[0..]) |*arg| {
-            const new_arg = try allocator.dupeZ(u8, it.next().?);
-            errdefer allocator.free(new_arg);
-
-            arg.* = @ptrCast(new_arg);
+        std.debug.assert(args.count() != 0);
+        if (args.count() == 1) {
+            var it = args;
+            return try initFromString(it.next().?, environ, allocator, io);
         }
 
-        return .{ .path = path, .args = @ptrCast(args_slice.ptr) };
+        return initWithIterator(args, args.count() - 1, environ, allocator, io);
     }
 
     return error.UnspecifiedCommand;
 }
 
-pub fn initFromString(string: []const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
-    const argc = std.mem.countScalar(u8, string, ' ');
+pub fn initFromString(string: []const u8, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+    return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' '), environ, allocator, io);
+}
+
+pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+    var it = iterator;
 
     const args_slice = try allocator.allocSentinel(?[*:0]const u8, argc, null);
     errdefer allocator.free(args_slice);
-
-    var it = std.mem.splitScalar(u8, string, ' ');
 
     const path = try expandBinaryPath(it.next().?, allocator, io);
 
@@ -52,7 +43,7 @@ pub fn initFromString(string: []const u8, allocator: std.mem.Allocator, io: std.
         arg.* = @ptrCast(new_arg);
     }
 
-    return .{ .path = path, .args = @ptrCast(args_slice.ptr) };
+    return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ };
 }
 
 fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {

@@ -17,7 +17,10 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     };
 
-    const user_program: UserProgram = try .initFromParsedOptions(parsed_options, allocator, io);
+    comptime if (@import("builtin").output_mode != .Exe)
+        @compileError("pside record needs environ which is setted up in zig exe start up code.");
+
+    const user_program: UserProgram = try .initFromParsedOptions(parsed_options, @ptrCast(std.os.environ.ptr), allocator, io);
     defer user_program.deinit(allocator);
 
     const tracee: Tracee = try .spawn(user_program);
