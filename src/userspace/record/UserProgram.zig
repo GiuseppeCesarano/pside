@@ -3,6 +3,7 @@ const std = @import("std");
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
 enviroment_map: [*:null]const ?[*:0]const u8,
+is_sudo: bool,
 
 pub fn initFromParsedOptions(parsed: anytype, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
@@ -31,10 +32,17 @@ pub fn initFromString(string: []const u8, environ: [*:null]const ?[*:0]const u8,
 pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
     var it = iterator;
 
-    const args_slice = try allocator.allocSentinel(?[*:0]const u8, argc, null);
-    errdefer allocator.free(args_slice);
+    var first = it.next().?;
+    const is_sudo = isSudo(first);
+    const sudo_offset: usize = if (!is_sudo) 0 else offset: {
+        first = it.next().?;
+        break :offset 1;
+    };
 
-    const path = try expandBinaryPath(it.next().?, allocator, io);
+    const path = try expandBinaryPath(first, allocator, io);
+
+    const args_slice = try allocator.allocSentinel(?[*:0]const u8, argc - sudo_offset, null);
+    errdefer allocator.free(args_slice);
 
     for (args_slice[0..]) |*arg| {
         const new_arg = try allocator.dupeZ(u8, it.next().?);
@@ -43,7 +51,12 @@ pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?
         arg.* = @ptrCast(new_arg);
     }
 
-    return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ };
+    return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ, .is_sudo = is_sudo };
+}
+
+fn isSudo(path: []const u8) bool {
+    const start = if (std.mem.findScalarLast(u8, path, '/')) |last_slash| last_slash + 1 else 0;
+    return std.mem.eql(u8, path[start..], "sudo");
 }
 
 fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {

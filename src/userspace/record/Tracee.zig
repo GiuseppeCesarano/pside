@@ -30,11 +30,13 @@ pub fn spawn(tracee_exe: UserProgram) !@This() {
 }
 
 fn childStart(tracee_exe: UserProgram) !void {
-    const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
-    const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
-    if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
-    try posix.setgid(gid);
-    try posix.setuid(uid);
+    if (!tracee_exe.is_sudo) {
+        const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
+        const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
+        if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
+        try posix.setgid(gid);
+        try posix.setuid(uid);
+    }
 
     try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
     try posix.raise(.STOP);
