@@ -23,13 +23,14 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     const user_program: UserProgram = try .initFromParsedOptions(parsed_options, @ptrCast(std.os.environ.ptr), allocator, io);
     defer user_program.deinit(allocator);
 
-    const tracee: Tracee = try .spawn(user_program);
+    const tracee: Tracee = try .spawn(user_program, io);
 
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);
 
-    try tracee.start();
+    _ = try tracee.syscall(.getpid, .{});
 
+    try tracee.start();
     _ = tracee.wait();
 }
 
