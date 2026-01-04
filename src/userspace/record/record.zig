@@ -28,7 +28,8 @@ pub fn record(options: cli.Options, allocator: std.mem.Allocator, io: std.Io) !v
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);
 
-    _ = try tracee.syscall(.getpid, .{});
+    std.log.info("Remote getpid returns: {}", .{try tracee.syscall(.getpid, .{})});
+    std.log.info("Remote time returns: {}", .{try tracee.syscall(.time, .{0})});
 
     try tracee.start();
     _ = tracee.wait();

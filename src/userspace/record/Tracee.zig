@@ -2,10 +2,194 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const UserProgram = @import("UserProgram.zig");
-const builtin = @import("builtin");
-const arch = builtin.cpu.arch;
+const arch = @import("builtin").cpu.arch;
 
 const SpawnError = error{ ChildDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
+
+pid: linux.pid_t,
+elf_entrypoint: usize,
+old_entry_ins: usize,
+
+pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
+    const child_pid = try posix.fork();
+    if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
+    try ptrace.waitFor(child_pid, .stop);
+
+    try ptrace.setOptions(child_pid, &.{ linux.PTRACE.O.EXITKILL, linux.PTRACE.O.TRACEEXEC });
+    try ptrace.cont(child_pid);
+    try ptrace.waitFor(child_pid, .exec);
+
+    const elf_entrypoint = try elfEntrypoint(child_pid, io);
+    const old_ins = try ptrace.peek(.text, child_pid, elf_entrypoint);
+    try ptrace.poke(.text, child_pid, elf_entrypoint, interrupt_bytes);
+
+    try ptrace.cont(child_pid);
+    try ptrace.waitTrapUntillIpReaches(child_pid, elf_entrypoint);
+
+    return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
+}
+
+fn childStart(tracee_exe: UserProgram) !void {
+    if (!tracee_exe.is_sudo) {
+        const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
+        const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
+        if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
+        try posix.setgid(gid);
+        try posix.setuid(uid);
+    }
+
+    try ptrace.traceMe();
+    try posix.raise(.STOP);
+
+    return posix.execveZ(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map);
+}
+
+fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
+    const max_pid_chars = comptime std.math.log10(@as(usize, std.math.maxInt(linux.pid_t)));
+    const fmt = "/proc/{}/auxv";
+
+    var buff: [fmt.len - 2 + max_pid_chars]u8 = undefined;
+    const auxv_path = std.fmt.bufPrint(&buff, fmt, .{child_pid}) catch unreachable;
+
+    const auxv = try std.Io.Dir.openFileAbsolute(io, auxv_path, .{});
+    defer auxv.close(io);
+    var reader = auxv.reader(io, &buff);
+
+    while (try reader.interface.takeInt(usize, arch.endian()) != std.elf.AT_ENTRY) {
+        if (try reader.interface.discardShort(@sizeOf(usize)) < @sizeOf(usize)) return std.Io.Reader.Error.EndOfStream;
+    }
+
+    return try reader.interface.takeInt(usize, arch.endian());
+}
+
+pub fn start(this: @This()) !void {
+    try ptrace.poke(.text, this.pid, this.elf_entrypoint, this.old_entry_ins);
+    try ptrace.cont(this.pid);
+}
+
+pub fn wait(this: @This()) posix.rusage {
+    var ru: posix.rusage = undefined;
+    _ = posix.wait4(this.pid, 0, &ru);
+
+    return ru;
+}
+
+pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
+    const regs: UserRegs = try ptrace.getRegs(this.pid);
+
+    const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
+    const ip = machine_word_alignment.backward(regs.ip());
+
+    const old_ins = try ptrace.peek(.text, this.pid, ip);
+
+    try ptrace.poke(.text, this.pid, ip, syscall_bytes);
+    var tmp_regs = regs;
+    tmp_regs.setIp(ip);
+    tmp_regs.prep_syscall(syscall_id, args);
+    try ptrace.setRegs(this.pid, tmp_regs);
+    try ptrace.singleStep(this.pid);
+
+    try ptrace.waitTrapUntillIpReaches(this.pid, ip + 1);
+
+    const ret = (try ptrace.getRegs(this.pid)).ret();
+
+    tmp_regs = regs;
+    tmp_regs.setIp(ip);
+    try ptrace.setRegs(this.pid, tmp_regs);
+    try ptrace.poke(.text, this.pid, ip, old_ins);
+
+    return ret;
+}
+
+const ptrace = struct {
+    pub const Location = enum { text, data, user };
+
+    fn traceMe() !void {
+        try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
+    }
+
+    fn setOptions(pid: linux.pid_t, comptime options: []const comptime_int) !void {
+        comptime var options_val: usize = 0;
+        comptime for (options) |o| {
+            options_val |= o;
+        };
+
+        try posix.ptrace(linux.PTRACE.SETOPTIONS, pid, 0, options_val);
+    }
+
+    fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) !void {
+        while (true) {
+            const status = posix.waitpid(pid, 0).status;
+
+            if (linux.W.IFEXITED(status)) return error.ChildExited;
+            if (linux.W.IFSIGNALED(status)) return error.ChildKilled;
+
+            if (linux.W.IFSTOPPED(status)) {
+                const sig = linux.W.STOPSIG(status);
+                const event = status >> 16;
+
+                switch (target) {
+                    .exec => if (sig == @intFromEnum(linux.SIG.TRAP) and event == linux.PTRACE.EVENT.EXEC) return,
+                    .trap => if (sig == @intFromEnum(linux.SIG.TRAP) and event == 0) return,
+                    .stop => if (sig == @intFromEnum(linux.SIG.STOP) and event == 0) return,
+                }
+
+                const signal_to_forward: u32 = if (sig == @intFromEnum(linux.SIG.TRAP) or sig == @intFromEnum(linux.SIG.STOP)) 0 else sig;
+
+                try posix.ptrace(linux.PTRACE.CONT, pid, 0, signal_to_forward);
+            }
+        }
+    }
+
+    fn waitTrapUntillIpReaches(pid: linux.pid_t, addr: usize) !void {
+        try waitFor(pid, .trap);
+        while ((try getRegs(pid)).ip() < addr) {
+            try waitFor(pid, .trap);
+        }
+    }
+
+    fn cont(pid: linux.pid_t) !void {
+        try posix.ptrace(linux.PTRACE.CONT, pid, 0, 0);
+    }
+
+    fn singleStep(pid: linux.pid_t) !void {
+        try posix.ptrace(linux.PTRACE.SINGLESTEP, pid, 0, 0);
+    }
+
+    fn getRegs(pid: linux.pid_t) !UserRegs {
+        var regs: UserRegs = undefined;
+        try posix.ptrace(linux.PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+        return regs;
+    }
+
+    fn setRegs(pid: linux.pid_t, regs: UserRegs) !void {
+        try posix.ptrace(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+    }
+
+    fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: usize) !void {
+        const command = comptime switch (location) {
+            .text => linux.PTRACE.POKETEXT,
+            .data => linux.PTRACE.POKEDATA,
+            .user => linux.PTRACE.POKEUSER,
+        };
+
+        try posix.ptrace(command, pid, addr, data);
+    }
+
+    fn peek(comptime location: Location, pid: linux.pid_t, addr: usize) !usize {
+        const command = comptime switch (location) {
+            .text => linux.PTRACE.PEEKTEXT,
+            .data => linux.PTRACE.PEEKDATA,
+            .user => linux.PTRACE.PEEKUSER,
+        };
+
+        var data: usize = undefined;
+        try posix.ptrace(command, pid, addr, @intFromPtr(&data));
+
+        return data;
+    }
+};
+
 const UserRegs = switch (arch) {
     .x86_64 => extern struct {
         r15: c_ulong,
@@ -79,127 +263,3 @@ const interrupt_bytes = switch (arch) {
     .x86, .x86_16, .x86_64 => @as(usize, 0xcc),
     else => @compileError("interrupt unsupported for current arch"),
 };
-
-pid: linux.pid_t,
-elf_entrypoint: usize,
-old_entry_ins: usize,
-
-pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
-    const child_pid = try posix.fork();
-    if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
-
-    var child_status = posix.waitpid(child_pid, 0).status;
-
-    if (!linux.W.IFSTOPPED(child_status) or linux.W.STOPSIG(child_status) != @intFromEnum(linux.SIG.STOP))
-        return SpawnError.ChildDead;
-
-    try posix.ptrace(linux.PTRACE.SETOPTIONS, child_pid, 0, linux.PTRACE.O.EXITKILL | linux.PTRACE.O.TRACEEXEC);
-    try posix.ptrace(linux.PTRACE.CONT, child_pid, 0, 0);
-
-    child_status = posix.waitpid(child_pid, 0).status;
-
-    if (!linux.W.IFSTOPPED(child_status) or
-        linux.W.STOPSIG(child_status) != @intFromEnum(linux.SIG.TRAP) or
-        (child_status >> 16) != linux.PTRACE.EVENT.EXEC)
-        return SpawnError.UnexpectedSignal;
-
-    const elf_entrypoint = try elfEntrypoint(child_pid, io);
-    const old_ins = oi: {
-        var ins: usize = undefined;
-        try posix.ptrace(linux.PTRACE.PEEKTEXT, child_pid, elf_entrypoint, @intFromPtr(&ins));
-        break :oi ins;
-    };
-
-    try posix.ptrace(linux.PTRACE.POKETEXT, child_pid, elf_entrypoint, interrupt_bytes);
-    try posix.ptrace(linux.PTRACE.CONT, child_pid, 0, 0);
-    _ = posix.waitpid(child_pid, 0);
-
-    return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
-}
-
-fn childStart(tracee_exe: UserProgram) !void {
-    if (!tracee_exe.is_sudo) {
-        const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
-        const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
-        if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
-        try posix.setgid(gid);
-        try posix.setuid(uid);
-    }
-
-    try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
-    try posix.raise(.STOP);
-
-    return posix.execveZ(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map);
-}
-
-fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
-    const max_pid_chard = comptime std.math.log10(@as(usize, std.math.maxInt(linux.pid_t)));
-    const fmt = "/proc/{}/auxv";
-
-    var buff: [fmt.len - 2 + max_pid_chard]u8 = undefined;
-    const auxv_path = std.fmt.bufPrint(&buff, fmt, .{child_pid}) catch unreachable;
-
-    const auxv = try std.Io.Dir.openFileAbsolute(io, auxv_path, .{});
-    defer auxv.close(io);
-    var reader = auxv.reader(io, &buff);
-
-    while (try reader.interface.takeInt(usize, builtin.cpu.arch.endian()) != std.elf.AT_ENTRY) {
-        if (try reader.interface.discardShort(@sizeOf(usize)) < @sizeOf(usize)) return std.Io.Reader.Error.EndOfStream;
-    }
-
-    return try reader.interface.takeInt(usize, builtin.cpu.arch.endian());
-}
-
-pub fn start(this: @This()) !void {
-    try posix.ptrace(linux.PTRACE.POKETEXT, this.pid, this.elf_entrypoint, this.old_entry_ins);
-    try posix.ptrace(linux.PTRACE.CONT, this.pid, 0, 0);
-}
-
-pub fn wait(this: @This()) posix.rusage {
-    var ru: posix.rusage = undefined;
-    _ = posix.wait4(this.pid, 0, &ru);
-
-    return ru;
-}
-
-pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
-    var regs: UserRegs = undefined;
-    try posix.ptrace(linux.PTRACE.GETREGS, this.pid, 0, @intFromPtr(&regs));
-
-    const machine_ward_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
-    const ip = machine_ward_alignment.backward(regs.ip());
-
-    const old_ins = i: {
-        var ins: usize = undefined;
-        try posix.ptrace(linux.PTRACE.PEEKTEXT, this.pid, ip, @intFromPtr(&ins));
-        break :i ins;
-    };
-
-    try posix.ptrace(linux.PTRACE.POKETEXT, this.pid, ip, syscall_bytes);
-    const syscall_regs = sr: {
-        var s_regs = regs;
-        s_regs.setIp(ip);
-        s_regs.prep_syscall(syscall_id, args);
-        break :sr s_regs;
-    };
-    try posix.ptrace(linux.PTRACE.SETREGS, this.pid, 0, @intFromPtr(&syscall_regs));
-    try posix.ptrace(linux.PTRACE.SINGLESTEP, this.pid, 0, 0);
-
-    _ = posix.waitpid(this.pid, 0);
-
-    const ret_regs = rr: {
-        var r: UserRegs = undefined;
-        try posix.ptrace(linux.PTRACE.GETREGS, this.pid, 0, @intFromPtr(&r));
-        break :rr r;
-    };
-
-    const restore_regs = rr: {
-        var r = regs;
-        r.rip = ip;
-        break :rr r;
-    };
-    try posix.ptrace(linux.PTRACE.SETREGS, this.pid, 0, @intFromPtr(&restore_regs));
-    try posix.ptrace(linux.PTRACE.POKETEXT, this.pid, ip, old_ins);
-
-    return ret_regs.rax;
-}
