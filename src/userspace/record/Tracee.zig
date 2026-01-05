@@ -4,7 +4,7 @@ const posix = std.posix;
 const UserProgram = @import("UserProgram.zig");
 const arch = @import("builtin").cpu.arch;
 
-const SpawnError = error{ ChildDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
+const SpawnError = error{ ChildDead, ParentDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
 
 pid: linux.pid_t,
 elf_entrypoint: usize,
@@ -15,7 +15,7 @@ pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
     try ptrace.waitFor(child_pid, .stop);
 
-    try ptrace.setOptions(child_pid, &.{ linux.PTRACE.O.EXITKILL, linux.PTRACE.O.TRACEEXEC });
+    try ptrace.setOptions(child_pid, &.{linux.PTRACE.O.TRACEEXEC});
     try ptrace.cont(child_pid);
     try ptrace.waitFor(child_pid, .exec);
 
@@ -30,6 +30,9 @@ pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
 }
 
 fn childStart(tracee_exe: UserProgram) !void {
+    _ = try posix.prctl(linux.PR.SET_PDEATHSIG, .{@as(usize, @intFromEnum(linux.SIG.KILL))});
+    if (posix.getppid() == 1) return SpawnError.ParentDead;
+
     if (!tracee_exe.is_sudo) {
         const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
         const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
@@ -64,7 +67,7 @@ fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 
 pub fn start(this: @This()) !void {
     try ptrace.poke(.text, this.pid, this.elf_entrypoint, this.old_entry_ins);
-    try ptrace.cont(this.pid);
+    try ptrace.detach(this.pid);
 }
 
 pub fn wait(this: @This()) posix.rusage {
@@ -106,6 +109,10 @@ const ptrace = struct {
 
     fn traceMe() !void {
         try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
+    }
+
+    fn detach(pid: linux.pid_t) !void {
+        try posix.ptrace(linux.PTRACE.DETACH, pid, 0, 0);
     }
 
     fn setOptions(pid: linux.pid_t, comptime options: []const comptime_int) !void {
