@@ -20,7 +20,7 @@ pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
     try ptrace.waitFor(child_pid, .exec);
 
     const elf_entrypoint = try elfEntrypoint(child_pid, io);
-    const old_ins = try ptrace.peek(.text, child_pid, elf_entrypoint);
+    const old_ins = try ptrace.peekWord(.text, child_pid, elf_entrypoint);
     try ptrace.poke(.text, child_pid, elf_entrypoint, interrupt_bytes);
 
     try ptrace.cont(child_pid);
@@ -66,7 +66,7 @@ fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 }
 
 pub fn start(this: @This()) !void {
-    try ptrace.poke(.text, this.pid, this.elf_entrypoint, this.old_entry_ins);
+    try ptrace.poke(.text, this.pid, this.elf_entrypoint, std.mem.asBytes(&this.old_entry_ins));
     try ptrace.detach(this.pid);
 }
 
@@ -83,7 +83,7 @@ pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
     const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
     const ip = machine_word_alignment.backward(regs.ip());
 
-    const old_ins = try ptrace.peek(.text, this.pid, ip);
+    const old_ins = try ptrace.peekWord(.text, this.pid, ip);
 
     try ptrace.poke(.text, this.pid, ip, syscall_bytes);
     var tmp_regs = regs;
@@ -99,7 +99,7 @@ pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
     tmp_regs = regs;
     tmp_regs.setIp(ip);
     try ptrace.setRegs(this.pid, tmp_regs);
-    try ptrace.poke(.text, this.pid, ip, old_ins);
+    try ptrace.poke(.text, this.pid, ip, std.mem.asBytes(&old_ins));
 
     return ret;
 }
@@ -173,17 +173,43 @@ const ptrace = struct {
         try posix.ptrace(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
     }
 
-    fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: usize) !void {
+    fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) !void {
+        std.debug.assert(addr % @sizeOf(usize) == 0);
+
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,
             .data => linux.PTRACE.POKEDATA,
             .user => linux.PTRACE.POKEUSER,
         };
 
-        try posix.ptrace(command, pid, addr, data);
+        var reader: std.Io.Reader = .fixed(data);
+
+        var i: usize = addr;
+        while (reader.peekArray(@sizeOf(usize))) |bytes| : (i += @sizeOf(usize)) {
+            try posix.ptrace(command, pid, i, std.mem.bytesAsValue(usize, bytes).*);
+            reader.toss(@sizeOf(usize));
+        } else |err| switch (err) {
+            std.Io.Reader.Error.EndOfStream => {
+                const len = reader.bufferedLen();
+                if (len == 0) return;
+
+                var bytes: usize = 0;
+                const bytes_slice = std.mem.asBytes(&bytes);
+                const read = reader.readSliceShort(bytes_slice[0..len]) catch unreachable;
+                std.debug.assert(read == len);
+
+                const old = try peekWord(location, pid, i);
+                @memcpy(bytes_slice[len..], std.mem.asBytes(&old)[len..]);
+
+                try posix.ptrace(command, pid, i, bytes);
+            },
+            else => unreachable,
+        }
     }
 
-    fn peek(comptime location: Location, pid: linux.pid_t, addr: usize) !usize {
+    fn peekWord(comptime location: Location, pid: linux.pid_t, addr: usize) !usize {
+        std.debug.assert(addr % @sizeOf(usize) == 0);
+
         const command = comptime switch (location) {
             .text => linux.PTRACE.PEEKTEXT,
             .data => linux.PTRACE.PEEKDATA,
@@ -261,12 +287,12 @@ const UserRegs = switch (arch) {
     else => @compileError("UserRegs unsupported for current arch"),
 };
 
-const syscall_bytes = switch (arch) {
-    .x86, .x86_16, .x86_64 => @as(usize, 0x50f),
+const syscall_bytes: []const u8 = switch (arch) {
+    .x86, .x86_16, .x86_64 => &.{ 0x0f, 0x05 },
     else => @compileError("syscall unsupported for current arch"),
 };
 
-const interrupt_bytes = switch (arch) {
-    .x86, .x86_16, .x86_64 => @as(usize, 0xcc),
+const interrupt_bytes: []const u8 = switch (arch) {
+    .x86, .x86_16, .x86_64 => &.{0xcc},
     else => @compileError("interrupt unsupported for current arch"),
 };
