@@ -26,29 +26,37 @@ pub fn initFromParsedOptions(parsed: anytype, environ: [*:null]const ?[*:0]const
 }
 
 pub fn initFromString(string: []const u8, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
-    return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' '), environ, allocator, io);
+    return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' ') + 1, environ, allocator, io);
 }
 
 pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
     var it = iterator;
 
-    var first = it.next().?;
-    const is_sudo = isSudo(first);
-    const sudo_offset: usize = if (!is_sudo) 0 else offset: {
-        first = it.next().?;
-        break :offset 1;
-    };
+    var first_token = it.next().?;
+    const is_sudo = isSudo(first_token);
 
-    const path = try expandBinaryPath(first, allocator, io);
+    if (is_sudo) {
+        first_token = it.next().?;
+    }
 
-    const args_slice = try allocator.allocSentinel(?[*:0]const u8, argc - sudo_offset, null);
+    const path = try expandBinaryPath(first_token, allocator, io);
+
+    const path_span = std.mem.span(path);
+    const name = std.fs.path.basename(path_span);
+
+    const final_argc = if (is_sudo) argc - 1 else argc;
+    const args_slice = try allocator.allocSentinel(?[*:0]const u8, final_argc, null);
     errdefer allocator.free(args_slice);
 
-    for (args_slice[0..]) |*arg| {
-        const new_arg = try allocator.dupeZ(u8, it.next().?);
-        errdefer allocator.free(new_arg);
+    const allocated_name = try allocator.dupeZ(u8, name);
+    args_slice[0] = @ptrCast(allocated_name);
 
-        arg.* = @ptrCast(new_arg);
+    var i: usize = 1;
+    while (i < final_argc) : (i += 1) {
+        if (it.next()) |next_arg| {
+            const allocated_arg = try allocator.dupeZ(u8, next_arg);
+            args_slice[i] = @ptrCast(allocated_arg);
+        }
     }
 
     return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ, .is_sudo = is_sudo };
