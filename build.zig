@@ -164,6 +164,7 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", b.fmt("" ++
+        "KCFLAGS += -march=native -O2 -flto\n" ++
         "obj-m += pside.o\n" ++
         "pside-objs := bindings.o {s}\n" ++
         "{s}" ++ // Debug definition for bindings
