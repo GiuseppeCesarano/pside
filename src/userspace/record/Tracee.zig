@@ -34,8 +34,9 @@ fn childStart(tracee_exe: UserProgram) !void {
     if (posix.getppid() == 1) return SpawnError.ParentDead;
 
     if (!tracee_exe.is_sudo) {
-        const gid = try std.fmt.parseInt(u32, posix.getenv("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
-        const uid = try std.fmt.parseInt(u32, posix.getenv("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
+        const env = tracee_exe.enviroment_map;
+        const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
+        const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
         if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
         try posix.setgid(gid);
         try posix.setuid(uid);
@@ -44,7 +45,7 @@ fn childStart(tracee_exe: UserProgram) !void {
     try ptrace.traceMe();
     try posix.raise(.STOP);
 
-    return posix.execveZ(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map);
+    _ = linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.ptr);
 }
 
 fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
@@ -70,11 +71,11 @@ pub fn start(this: @This()) !void {
     try ptrace.detach(this.pid);
 }
 
-pub fn wait(this: @This()) posix.rusage {
-    var ru: posix.rusage = undefined;
-    _ = posix.wait4(this.pid, 0, &ru);
+pub fn wait(this: @This()) !u32 {
+    var status: u32 = undefined;
+    if (posix.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
 
-    return ru;
+    return status;
 }
 
 pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
@@ -126,7 +127,8 @@ const ptrace = struct {
 
     fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) !void {
         while (true) {
-            const status = posix.waitpid(pid, 0).status;
+            var status: u32 = undefined;
+            if (posix.errno(linux.waitpid(pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
 
             if (linux.W.IFEXITED(status)) return error.ChildExited;
             if (linux.W.IFSIGNALED(status)) return error.ChildKilled;

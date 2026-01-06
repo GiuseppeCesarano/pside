@@ -1,3 +1,5 @@
+//TODO: swap for https://codeberg.org/ziglang/zig/issues/30677
+
 const std = @import("std");
 
 fn OptionsImpl(ItType: type) type {
@@ -116,6 +118,7 @@ fn OptionsImpl(ItType: type) type {
                 parse_errors: ?Iterator,
             };
         }
+
         args: ItType,
 
         pub fn parse(this: @This(), FlagsSchema: type) Parsed(FlagsSchema) {
@@ -182,7 +185,7 @@ fn OptionsImpl(ItType: type) type {
     };
 }
 
-pub const Options = OptionsImpl(std.process.ArgIterator);
+pub const Options = OptionsImpl(std.process.Args.Iterator);
 
 pub fn execute(
     args_it: anytype,

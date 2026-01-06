@@ -1,11 +1,12 @@
+// TODO: check if we can use the new std.process.Init api to cut this file down
 const std = @import("std");
 
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
-enviroment_map: [*:null]const ?[*:0]const u8,
+enviroment_map: std.process.Environ,
 is_sudo: bool,
 
-pub fn initFromParsedOptions(parsed: anytype, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
         if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
 
@@ -25,11 +26,11 @@ pub fn initFromParsedOptions(parsed: anytype, environ: [*:null]const ?[*:0]const
     return error.UnspecifiedCommand;
 }
 
-pub fn initFromString(string: []const u8, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
     return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' ') + 1, environ, allocator, io);
 }
 
-pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?[*:0]const u8, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
     var it = iterator;
 
     var first_token = it.next().?;
@@ -39,7 +40,7 @@ pub fn initWithIterator(iterator: anytype, argc: usize, environ: [*:null]const ?
         first_token = it.next().?;
     }
 
-    const path = try expandBinaryPath(first_token, allocator, io);
+    const path = try expandBinaryPath(first_token, environ, allocator, io);
 
     const path_span = std.mem.span(path);
     const name = std.fs.path.basename(path_span);
@@ -67,14 +68,13 @@ fn isSudo(path: []const u8) bool {
     return std.mem.eql(u8, path[start..], "sudo");
 }
 
-fn expandBinaryPath(binary_path: []const u8, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
+fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
     if (std.mem.findScalar(u8, binary_path, '/') != null) {
         const copy = try allocator.dupeZ(u8, binary_path);
         return @ptrCast(copy.ptr);
     }
 
-    const path_env = try std.process.getEnvVarOwned(allocator, "PATH");
-    defer allocator.free(path_env);
+    const path_env = environ.getPosix("PATH") orelse return error.NoPath;
     var path_it = std.mem.tokenizeScalar(u8, path_env, ':');
 
     while (path_it.next()) |current_path| {
