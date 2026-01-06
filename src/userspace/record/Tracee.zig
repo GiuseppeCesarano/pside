@@ -276,6 +276,7 @@ const UserRegs = switch (arch) {
                 @offsetOf(@This(), "r8"),
                 @offsetOf(@This(), "r9"),
             };
+            std.debug.assert(args.len <= fields.len);
             const len = @min(args.len, fields.len);
 
             this.rax = @intFromEnum(syscall_id);
