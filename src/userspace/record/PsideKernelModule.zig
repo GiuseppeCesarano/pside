@@ -6,25 +6,14 @@ const name = "pside";
 
 file: std.Io.File,
 chardev: std.Io.File,
-chardev_writer: std.Io.File.Writer,
-chardev_reader: std.Io.File.Reader,
-buffer: []u8,
 
 pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
-    // Allocate enough buffer for the reader to allow
-    // sending all possible commands with a single syscall.
-    const buffer = try allocator.alloc(u8, std.atomic.cache_line * 2);
-    errdefer allocator.free(buffer);
-
     var rt: @This() = .{
         .file = try std.Io.Dir.cwd().openFile(io, path, .{}),
         .chardev = undefined,
-        .chardev_writer = undefined,
-        .chardev_reader = undefined,
-        .buffer = buffer,
     };
 
     const load_res = std.os.linux.syscall3(
@@ -35,8 +24,6 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     );
 
     rt.chardev = try std.Io.Dir.openFileAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
-    rt.chardev_writer = rt.chardev.writer(io, rt.buffer);
-    rt.chardev_reader = rt.chardev.reader(io, &.{});
 
     return switch (std.posix.errno(load_res)) {
         .SUCCESS => rt,
@@ -69,9 +56,7 @@ fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     return try std.mem.concat(allocator, u8, &.{ base_path, "/lib/modules/", release[0..release_end], "/extra/" ++ name ++ ".ko" });
 }
 
-pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
-    allocator.free(this.buffer);
-
+pub fn unload(this: @This(), io: std.Io) !void {
     this.chardev.close(io);
     defer this.file.close(io);
 
@@ -96,7 +81,16 @@ pub fn unload(this: @This(), allocator: std.mem.Allocator, io: std.Io) !void {
 }
 
 pub fn startProfilerOnPid(this: *@This(), pid: std.os.linux.pid_t) !void {
-    _ = try this.chardev_writer.interface.writeInt(u8, @intFromEnum(communications.Commands.start_profiler_on_pid), native_endianess);
-    _ = try this.chardev_writer.interface.writeInt(std.os.linux.pid_t, pid, native_endianess);
-    try this.chardev_writer.interface.flush();
+    const data = communications.Data{ .pid = pid };
+
+    const rc = std.os.linux.ioctl(
+        this.chardev.handle,
+        @intFromEnum(communications.Commands.start_profiler_on_pid),
+        @intFromPtr(&data),
+    );
+    const e = std.posix.errno(rc);
+    switch (e) {
+        .SUCCESS => {},
+        else => std.log.err("{s}", .{@tagName(e)}),
+    }
 }

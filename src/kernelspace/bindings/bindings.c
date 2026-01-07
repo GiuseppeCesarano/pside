@@ -4,7 +4,10 @@
 #include <linux/fprobe.h>
 #include <linux/fs.h>
 #include <linux/ftrace_regs.h>
+#include <linux/io.h>
 #include <linux/ktime.h>
+#include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
@@ -69,20 +72,20 @@ int c_ftrace_regs_query_register_offset(const char *);
 unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *);
 
 /* Chardev */
+
 struct chardev {
-  struct cdev cdev;
-  struct file_operations fops;
   dev_t dev;
+  struct cdev cdev;
   struct class *class;
   struct device *device;
+  struct file_operations fops;
+  void *shared_buffer;
 };
 
-typedef ssize_t (*read_fn)(struct file *file, char __user *buf, size_t count,
-                           loff_t *offset);
-typedef ssize_t (*write_fn)(struct file *file, const char __user *buf,
-                            size_t count, loff_t *offset);
-int c_chardev_register(struct chardev *, const char *, read_fn, write_fn);
+typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
+int c_chardev_register(struct chardev *, const char *, ioctl_fn);
 void c_chardev_unregister(struct chardev *);
+void *c_get_shared_buffer(struct chardev *);
 
 /* File */
 
@@ -188,19 +191,62 @@ unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *regs) {
 }
 
 /* Chardev */
-int c_chardev_register(struct chardev *d, const char *name, read_fn rd_fn,
-                       write_fn wr_fn) {
-  alloc_chrdev_region(&d->dev, 0, 1, name);
+
+static int internal_open(struct inode *inode, struct file *filp) {
+  filp->private_data = container_of(inode->i_cdev, struct chardev, cdev);
+  return 0;
+}
+
+static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
+  struct chardev *d = filp->private_data;
+
+  unsigned long pfn = virt_to_phys(d->shared_buffer) >> PAGE_SHIFT;
+  unsigned long size = vma->vm_end - vma->vm_start;
+
+  if (remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
+    return -EAGAIN;
+  }
+  return 0;
+}
+
+int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
+  d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
+  if (!d->shared_buffer)
+    return -ENOMEM;
+
+  if (alloc_chrdev_region(&d->dev, 0, 1, name) < 0) {
+    free_page((unsigned long)d->shared_buffer);
+    return -1;
+  }
 
   d->fops.owner = THIS_MODULE;
-  d->fops.read = rd_fn;
-  d->fops.write = wr_fn;
+  d->fops.open = internal_open;
+  d->fops.mmap = internal_mmap;
+  d->fops.unlocked_ioctl = callback;
 
   cdev_init(&d->cdev, &d->fops);
-  cdev_add(&d->cdev, d->dev, 1);
+  if (cdev_add(&d->cdev, d->dev, 1) < 0) {
+    unregister_chrdev_region(d->dev, 1);
+    free_page((unsigned long)d->shared_buffer);
+    return -1;
+  }
 
   d->class = class_create(name);
+  if (IS_ERR(d->class)) {
+    cdev_del(&d->cdev);
+    unregister_chrdev_region(d->dev, 1);
+    free_page((unsigned long)d->shared_buffer);
+    return -1;
+  }
+
   d->device = device_create(d->class, NULL, d->dev, NULL, name);
+  if (IS_ERR(d->device)) {
+    class_destroy(d->class);
+    cdev_del(&d->cdev);
+    unregister_chrdev_region(d->dev, 1);
+    free_page((unsigned long)d->shared_buffer);
+    return -1;
+  }
 
   return 0;
 }
@@ -210,7 +256,14 @@ void c_chardev_unregister(struct chardev *d) {
   class_destroy(d->class);
   cdev_del(&d->cdev);
   unregister_chrdev_region(d->dev, 1);
+
+  if (d->shared_buffer) {
+    free_page((unsigned long)d->shared_buffer);
+    d->shared_buffer = NULL;
+  }
 }
+
+void *c_get_shared_buffer(struct chardev *d) { return d->shared_buffer; }
 
 /* File */
 

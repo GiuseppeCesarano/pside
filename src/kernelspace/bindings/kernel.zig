@@ -356,19 +356,23 @@ pub const probe = struct {
     };
 };
 
-pub const CharDevice = struct {
-    _: [400]u8 = undefined,
-    pub const ReadHandler = ?*const fn (*anyopaque, [*]u8, usize, *i64) callconv(.c) isize;
-    pub const WriteHandler = ?*const fn (*anyopaque, [*]const u8, usize, *i64) callconv(.c) isize;
+pub const CharDevice = extern struct {
+    _: [512]u8 = undefined,
+    pub const IoctlHandler = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
 
-    extern fn c_chardev_register(*@This(), [*:0]const u8, ReadHandler, WriteHandler) c_int;
-    pub fn create(this: *@This(), file_name: [:0]const u8, read_handler: ReadHandler, write_handler: WriteHandler) void {
-        _ = c_chardev_register(this, file_name.ptr, read_handler, write_handler);
+    extern fn c_chardev_register(*@This(), [*:0]const u8, IoctlHandler) c_int;
+    pub fn create(this: *@This(), file_name: [:0]const u8, handler: IoctlHandler) !void {
+        if (c_chardev_register(this, file_name.ptr, handler) != 0) return error.CouldNotRegisterChardev;
     }
 
     extern fn c_chardev_unregister(*@This()) void;
     pub fn remove(this: *@This()) void {
         c_chardev_unregister(this);
+    }
+
+    extern fn c_get_shared_buffer(*@This()) *[std.heap.page_size_min]u8;
+    pub fn shared_buffer(this: *@This()) *[std.heap.page_size_min]u8 {
+        return c_get_shared_buffer(this);
     }
 };
 

@@ -16,7 +16,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
     var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ allocator, io });
-    defer if (future_module.cancel(io)) |module| module.unload(allocator, io) catch {
+    defer if (future_module.cancel(io)) |module| module.unload(io) catch {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     } else |_| {};
 

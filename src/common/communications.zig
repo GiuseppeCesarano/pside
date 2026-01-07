@@ -1,13 +1,14 @@
 const std = @import("std");
 
-pub const Commands = enum(u8) {
+const iow = std.os.linux.IOCTL.IOW;
+
+pub const Commands = enum(c_uint) {
     pub const Tag = @typeInfo(@This()).@"enum".tag_type;
 
-    start_profiler_on_pid, // followed by std.os.linux.pid_t
+    start_profiler_on_pid = iow('k', 1, Data),
     _,
 };
 
-pub const Responses = error{
-    Ok,
+pub const Data = union {
+    pid: std.os.linux.pid_t,
 };
-pub const ResponsesAsInt = std.meta.Int(.unsigned, @bitSizeOf(Responses));
