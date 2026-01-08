@@ -2,14 +2,15 @@ const std = @import("std");
 const native_endianess = @import("builtin").target.cpu.arch.endian();
 const communications = @import("communications");
 
-const name = "pside";
+pub const name = "pside";
+pub const chardev_path: [:0]const u8 = "/dev/" ++ name;
 
-pub const CharDevOwner = struct { uid: u32, gid: u32 };
+pub const ChardevOwner = struct { uid: u32, gid: u32 };
 
 file: std.Io.File,
 chardev: std.Io.File,
 
-pub fn loadFromDefaultPath(chardev_owner: ?CharDevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn loadFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
@@ -25,7 +26,7 @@ pub fn loadFromDefaultPath(chardev_owner: ?CharDevOwner, allocator: std.mem.Allo
         0,
     );
 
-    rt.chardev = try std.Io.Dir.openFileAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
+    rt.chardev = try std.Io.Dir.openFileAbsolute(io, chardev_path, .{ .mode = .read_write });
     if (chardev_owner) |owner| {
         try rt.chardev.setOwner(io, owner.uid, owner.gid);
         try rt.chardev.setPermissions(io, .fromMode(0o644));

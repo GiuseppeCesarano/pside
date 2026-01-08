@@ -21,7 +21,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse break :blk null, 10);
         const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse break :blk null, 10);
 
-        break :blk PsideKernelModule.CharDevOwner{ .uid = uid, .gid = gid };
+        break :blk PsideKernelModule.ChardevOwner{ .uid = uid, .gid = gid };
     };
 
     var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ chardev_owner, allocator, io });
@@ -39,6 +39,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
 
     std.log.info("Remote getpid returns: {}", .{try tracee.syscall(.getpid, .{})});
     std.log.info("Remote time returns: {}", .{try tracee.syscall(.time, .{0})});
+
+    try tracee.patchProgressPoint("");
 
     try tracee.start();
     _ = try tracee.wait();

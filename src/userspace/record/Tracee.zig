@@ -2,6 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const UserProgram = @import("UserProgram.zig");
+
+const chardev_path = @import("PsideKernelModule.zig").chardev_path;
 const arch = @import("builtin").cpu.arch;
 
 const SpawnError = error{ ChildDead, ParentDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
@@ -78,7 +80,138 @@ pub fn wait(this: @This()) !u32 {
     return status;
 }
 
-pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !c_ulong {
+pub fn patchProgressPoint(this: @This(), name: []const u8) !void {
+    _ = name;
+
+    const code_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.EXEC | linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+
+    // We use the code_page to temporally store the path on the child memory
+    const path = chardev_path.ptr[0 .. chardev_path.len + 1]; // Include the null terminator
+    try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), path);
+
+    const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);
+    const chardev_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .SHARED }, chardev_fd, 0);
+
+    _ = chardev_page;
+
+    // var regs = try ptrace.getRegs(this.pid);
+
+    // const patch_ip = std.mem.alignBackward(usize, regs.ip(), 8);
+
+    // const return_addr = patch_ip + 12;
+
+    // var payload_bytes = [_]u8{
+    //     // Part A: The Atomic Write
+    //     0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <chardev_ptr>
+    //     0x48, 0xc7, 0x00, 0x45, 0x00, 0x00, 0x00, // movq [rax], 69
+
+    //     0x48, 0xb8,            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <return_addr>
+    //     0xff, 0xe0, // jmp rax
+    // };
+
+    // @memcpy(payload_bytes[2..10], std.mem.asBytes(&chardev_page.ptr));
+    // @memcpy(payload_bytes[19..27], std.mem.asBytes(&return_addr));
+
+    // const payload_addr = std.mem.alignForward(usize, @intFromPtr(code_page.ptr) + 64, 8);
+    // try ptrace.poke(.data, this.pid, payload_addr, &payload_bytes);
+
+    // var trampoline = [_]u8{
+    //     0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <payload_addr>
+    //     0xff, 0xe0, // jmp rax
+    //     0x90, 0x90,
+    //     0x90, 0x90, // Padding
+    // };
+    // @memcpy(trampoline[2..10], std.mem.asBytes(&payload_addr));
+
+    // try ptrace.poke(.text, this.pid, patch_ip, &trampoline);
+
+    // regs.setIp(patch_ip);
+    // try ptrace.setRegs(this.pid, regs);
+}
+
+pub fn open(
+    this: @This(),
+    file_path: *anyopaque,
+    flags: posix.O,
+    perm: posix.mode_t,
+) !posix.fd_t {
+    while (true) {
+        const rc = try this.syscall(
+            .open,
+            .{ @as(u64, @intFromPtr(file_path)), @as(u32, @bitCast(flags)), perm },
+        );
+
+        const OE = posix.OpenError;
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+
+            .INVAL => return OE.BadPathName,
+            .ACCES => return OE.AccessDenied,
+            .FBIG => return OE.FileTooBig,
+            .OVERFLOW => return OE.FileTooBig,
+            .ISDIR => return OE.IsDir,
+            .LOOP => return OE.SymLinkLoop,
+            .MFILE => return OE.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => return OE.NameTooLong,
+            .NFILE => return OE.SystemFdQuotaExceeded,
+            .NODEV => return OE.NoDevice,
+            .NOENT => return OE.FileNotFound,
+            .SRCH => return OE.FileNotFound,
+            .NOMEM => return OE.SystemResources,
+            .NOSPC => return OE.NoSpaceLeft,
+            .NOTDIR => return OE.NotDir,
+            .PERM => return OE.PermissionDenied,
+            .EXIST => return OE.PathAlreadyExists,
+            .BUSY => return OE.DeviceBusy,
+            .ILSEQ => return OE.BadPathName,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
+}
+
+fn mmap(
+    this: @This(),
+    ptr: ?[*]align(std.heap.page_size_min) u8,
+    length: usize,
+    prot: u32,
+    flags: linux.MAP,
+    fd: linux.fd_t,
+    offset: u64,
+) ![]align(std.heap.page_size_min) u8 {
+    const addr: usize = @intFromPtr(ptr);
+    const rc = try this.syscall(.mmap, .{
+        addr,
+        length,
+        prot,
+        @as(u32, @bitCast(flags)),
+        @as(usize, @bitCast(@as(isize, fd))),
+        @as(u64, @bitCast(offset)) / std.heap.pageSize(),
+    });
+
+    const err = posix.errno(rc);
+    if (err == .SUCCESS) return @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(rc))[0..length];
+
+    const MME = posix.MMapError;
+    switch (err) {
+        .SUCCESS => unreachable,
+        .TXTBSY => return MME.AccessDenied,
+        .ACCES => return MME.AccessDenied,
+        .PERM => return MME.PermissionDenied,
+        .AGAIN => return MME.LockedMemoryLimitExceeded,
+        .BADF => unreachable,
+        .OVERFLOW => unreachable,
+        .NODEV => return MME.MemoryMappingNotSupported,
+        .INVAL => unreachable,
+        .MFILE => return MME.ProcessFdQuotaExceeded,
+        .NFILE => return MME.SystemFdQuotaExceeded,
+        .NOMEM => return MME.OutOfMemory,
+        .EXIST => return MME.MappingAlreadyExists,
+        else => return posix.unexpectedErrno(err),
+    }
+}
+
+pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !usize {
     const regs: UserRegs = try ptrace.getRegs(this.pid);
 
     const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
@@ -176,7 +309,7 @@ const ptrace = struct {
     }
 
     fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) !void {
-        std.debug.assert(addr % @sizeOf(usize) == 0);
+        std.debug.assert(addr % @sizeOf(usize) == 0); //TODO: support writes starting on a pointer not aligned
 
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,
@@ -281,7 +414,7 @@ const UserRegs = switch (arch) {
 
             this.rax = @intFromEnum(syscall_id);
             inline for (args, fields[0..len]) |arg, field| {
-                const field_ptr: *c_long = @ptrFromInt(@as(usize, @intFromPtr(this)) + field);
+                const field_ptr: *usize = @ptrFromInt(@as(usize, @intFromPtr(this)) + field);
                 field_ptr.* = arg;
             }
         }
@@ -299,3 +432,5 @@ const interrupt_bytes: []const u8 = switch (arch) {
     .x86, .x86_16, .x86_64 => &.{0xcc},
     else => @compileError("interrupt unsupported for current arch"),
 };
+
+// const increment_atomic_bytes
