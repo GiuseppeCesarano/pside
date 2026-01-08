@@ -4,10 +4,12 @@ const communications = @import("communications");
 
 const name = "pside";
 
+pub const CharDevOwner = struct { uid: u32, gid: u32 };
+
 file: std.Io.File,
 chardev: std.Io.File,
 
-pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn loadFromDefaultPath(chardev_owner: ?CharDevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
@@ -24,6 +26,10 @@ pub fn loadFromDefaultPath(allocator: std.mem.Allocator, io: std.Io) !@This() {
     );
 
     rt.chardev = try std.Io.Dir.openFileAbsolute(io, "/dev/" ++ name, .{ .mode = .read_write });
+    if (chardev_owner) |owner| {
+        try rt.chardev.setOwner(io, owner.uid, owner.gid);
+        try rt.chardev.setPermissions(io, .fromMode(0o644));
+    }
 
     return switch (std.posix.errno(load_res)) {
         .SUCCESS => rt,

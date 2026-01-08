@@ -15,7 +15,16 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
-    var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ allocator, io });
+    const chardev_owner = blk: {
+        const env = init.minimal.environ;
+
+        const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse break :blk null, 10);
+        const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse break :blk null, 10);
+
+        break :blk PsideKernelModule.CharDevOwner{ .uid = uid, .gid = gid };
+    };
+
+    var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ chardev_owner, allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     } else |_| {};
