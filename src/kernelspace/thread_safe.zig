@@ -62,10 +62,11 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 
         pub fn get(this: *@This(), at: usize) ?Value {
             const block_index = @divFloor(at, block_len);
-            if (block_index >= this.blocks.len) return null;
 
             this.ref_gate.increment();
             defer this.ref_gate.decrement();
+
+            if (block_index >= this.blocks.len) return null;
 
             const block = this.blocks[block_index].load(.acquire) orelse return null;
             const ret = block[at % block_len].load(.monotonic);
