@@ -4,8 +4,13 @@ const posix = std.posix;
 const UserProgram = @import("UserProgram.zig");
 
 const chardev_path = @import("PsideKernelModule.zig").chardev_path;
-const arch = @import("builtin").cpu.arch;
+const arch_specific = switch (@import("builtin").cpu.arch) {
+    .x86_64 => @import("tracee/x86_64.zig"),
 
+    else => @compileError("Only x86_64 supported right now"),
+};
+
+const UserRegs = arch_specific.UserRegs;
 const SpawnError = error{ ChildDead, ParentDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
 
 pid: linux.pid_t,
@@ -23,7 +28,7 @@ pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
 
     const elf_entrypoint = try elfEntrypoint(child_pid, io);
     const old_ins = try ptrace.peekWord(.text, child_pid, elf_entrypoint);
-    try ptrace.poke(.text, child_pid, elf_entrypoint, interrupt_bytes);
+    try ptrace.poke(.text, child_pid, elf_entrypoint, arch_specific.interrupt);
 
     try ptrace.cont(child_pid);
     try ptrace.waitTrapUntillIpReaches(child_pid, elf_entrypoint);
@@ -61,11 +66,11 @@ fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     defer auxv.close(io);
     var reader = auxv.reader(io, &buff);
 
-    while (try reader.interface.takeInt(usize, arch.endian()) != std.elf.AT_ENTRY) {
+    while (try reader.interface.takeInt(usize, .native) != std.elf.AT_ENTRY) {
         if (try reader.interface.discardShort(@sizeOf(usize)) < @sizeOf(usize)) return std.Io.Reader.Error.EndOfStream;
     }
 
-    return try reader.interface.takeInt(usize, arch.endian());
+    return try reader.interface.takeInt(usize, .native);
 }
 
 pub fn start(this: @This()) !void {
@@ -85,7 +90,7 @@ pub fn wait(this: @This()) !u32 {
 }
 
 pub fn patchProgressPoint(this: @This(), addr: usize) !void {
-    const final_addr = addr;
+    const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.EXEC | linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
     // We use the code_page to temporally store the path on the child memory
@@ -95,27 +100,11 @@ pub fn patchProgressPoint(this: @This(), addr: usize) !void {
     const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);
     const chardev_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .SHARED }, chardev_fd, 0);
 
-    var payload_bytes = [_]u8{
-        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ptr>
-        0x48, 0xc7, 0x00, 0x45, 0x00, 0x00, 0x00, //  movq [rax], 69
-        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ret>
-        0xff, 0xe0, // jmp rax
-    };
-
-    const return_addr = final_addr + 12;
-    @memcpy(payload_bytes[2..10], std.mem.asBytes(&chardev_page.ptr));
-    @memcpy(payload_bytes[19..27], std.mem.asBytes(&return_addr));
-
-    const payload_addr = std.mem.alignForward(usize, @intFromPtr(code_page.ptr) + 64, 8);
-    try ptrace.poke(.data, this.pid, payload_addr, &payload_bytes);
-
-    var trampoline = [_]u8{
-        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <payload_addr>
-        0xff, 0xe0, // jmp rax
-    };
-    @memcpy(trampoline[2..10], std.mem.asBytes(&payload_addr));
-
+    const trampoline = arch_specific.trampoline.get(@intFromPtr(code_page.ptr));
     try ptrace.poke(.text, this.pid, final_addr, &trampoline);
+
+    const payload = arch_specific.payload.get(@intFromPtr(chardev_page.ptr), final_addr + arch_specific.trampoline.len);
+    try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), &payload);
 }
 
 pub fn open(
@@ -205,7 +194,7 @@ pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !usize {
     const ip = saved_regs.ip();
     const old_ins = try ptrace.peekWord(.text, this.pid, ip);
 
-    try ptrace.poke(.text, this.pid, ip, syscall_bytes);
+    try ptrace.poke(.text, this.pid, ip, arch_specific.syscall);
 
     var tmp_regs = saved_regs;
     tmp_regs.prep_syscall(syscall_id, args);
@@ -359,80 +348,3 @@ const ptrace = struct {
         return std.mem.bytesToValue(usize, std.mem.asBytes(&data)[diff .. diff + @sizeOf(usize)]);
     }
 };
-
-const UserRegs = switch (arch) {
-    .x86_64 => extern struct {
-        r15: c_ulong,
-        r14: c_ulong,
-        r13: c_ulong,
-        r12: c_ulong,
-        rbp: c_ulong,
-        rbx: c_ulong,
-        r11: c_ulong,
-        r10: c_ulong,
-        r9: c_ulong,
-        r8: c_ulong,
-        rax: c_ulong,
-        rcx: c_ulong,
-        rdx: c_ulong,
-        rsi: c_ulong,
-        rdi: c_ulong,
-        orig_rax: c_ulong,
-        rip: c_ulong,
-        cs: c_ulong,
-        eflags: c_ulong,
-        rsp: c_ulong,
-        ss: c_ulong,
-        fs_base: c_ulong,
-        gs_base: c_ulong,
-        ds: c_ulong,
-        es: c_ulong,
-        fs: c_ulong,
-        gs: c_ulong,
-
-        pub fn ip(this: @This()) c_ulong {
-            return this.rip;
-        }
-
-        pub fn setIp(this: *@This(), new_ip: c_ulong) void {
-            this.rip = new_ip;
-        }
-
-        pub fn ret(this: @This()) c_ulong {
-            return this.rax;
-        }
-
-        pub fn prep_syscall(this: *@This(), syscall_id: linux.SYS, args: anytype) void {
-            const fields = [_]usize{
-                @offsetOf(@This(), "rdi"),
-                @offsetOf(@This(), "rsi"),
-                @offsetOf(@This(), "rdx"),
-                @offsetOf(@This(), "r10"),
-                @offsetOf(@This(), "r8"),
-                @offsetOf(@This(), "r9"),
-            };
-            std.debug.assert(args.len <= fields.len);
-            const len = @min(args.len, fields.len);
-
-            this.rax = @intFromEnum(syscall_id);
-            inline for (args, fields[0..len]) |arg, field| {
-                const field_ptr: *usize = @ptrFromInt(@as(usize, @intFromPtr(this)) + field);
-                field_ptr.* = arg;
-            }
-        }
-    },
-
-    else => @compileError("UserRegs unsupported for current arch"),
-};
-
-const syscall_bytes: []const u8 = switch (arch) {
-    .x86, .x86_16, .x86_64 => &.{ 0x0f, 0x05 },
-    else => @compileError("syscall unsupported for current arch"),
-};
-
-const interrupt_bytes: []const u8 = switch (arch) {
-    .x86, .x86_16, .x86_64 => &.{0xcc},
-    else => @compileError("interrupt unsupported for current arch"),
-};
-
-// const increment_atomic_bytes
