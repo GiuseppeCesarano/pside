@@ -10,7 +10,7 @@ pub const ChardevOwner = struct { uid: u32, gid: u32 };
 file: std.Io.File,
 chardev: std.Io.File,
 
-pub fn loadFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 

@@ -1,9 +1,9 @@
 const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
-const UserProgram = @import("UserProgram.zig");
+const Program = @import("Program.zig");
 
-const chardev_path = @import("PsideKernelModule.zig").chardev_path;
+const chardev_path = @import("KernelInterface.zig").chardev_path;
 const arch_specific = switch (@import("builtin").cpu.arch) {
     .x86_64 => @import("tracee/x86_64.zig"),
 
@@ -17,7 +17,7 @@ pid: linux.pid_t,
 elf_entrypoint: usize,
 old_entry_ins: usize,
 
-pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
+pub fn spawn(tracee_exe: Program, io: std.Io) !@This() {
     const child_pid = try posix.fork();
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
     try ptrace.waitFor(child_pid, .stop);
@@ -36,7 +36,7 @@ pub fn spawn(tracee_exe: UserProgram, io: std.Io) !@This() {
     return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
 }
 
-fn childStart(tracee_exe: UserProgram) !void {
+fn childStart(tracee_exe: Program) !void {
     _ = try posix.prctl(linux.PR.SET_PDEATHSIG, .{@as(usize, @intFromEnum(linux.SIG.KILL))});
     if (posix.getppid() == 1) return SpawnError.ParentDead;
 

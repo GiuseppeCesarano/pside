@@ -1,7 +1,7 @@
 const std = @import("std");
 const communications = @import("communications");
-const kernel = @import("bindings/kernel.zig");
-const causal = @import("causal.zig");
+const kernel = @import("kernel");
+const causal_engine = @import("causal/engine.zig");
 
 const name = "pside";
 const native_endian = @import("builtin").target.cpu.arch.endian();
@@ -19,7 +19,7 @@ var chardev: kernel.CharDevice = undefined;
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, ioctlHandler) catch return 1;
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-    causal.engine.init() catch return 1;
+    causal_engine.init() catch return 1;
 
     return 0;
 }
@@ -28,7 +28,7 @@ export fn cleanup_module() linksection(".exit.text") void {
     const atomic: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
     std.log.info("atomic value: {}", .{atomic.load(.monotonic)});
     chardev.remove();
-    causal.engine.deinit();
+    causal_engine.deinit();
 }
 
 fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_long {
@@ -40,7 +40,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
     const cmd = @as(communications.Commands, @enumFromInt(command));
 
     switch (cmd) {
-        .start_profiler_on_pid => causal.engine.profilePid(data.pid),
+        .start_profiler_on_pid => causal_engine.profilePid(data.pid),
         else => return code(.INVAL),
     }
 

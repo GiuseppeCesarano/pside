@@ -1,7 +1,7 @@
 const std = @import("std");
 const cli = @import("cli");
-const PsideKernelModule = @import("PsideKernelModule.zig");
-const UserProgram = @import("UserProgram.zig");
+const KernelInterface = @import("KernelInterface.zig");
+const Program = @import("Program.zig");
 const Tracee = @import("Tracee.zig");
 const elf_section_parser = @import("elf_section_parser.zig");
 
@@ -22,15 +22,15 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse break :blk null, 10);
         const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse break :blk null, 10);
 
-        break :blk PsideKernelModule.ChardevOwner{ .uid = uid, .gid = gid };
+        break :blk KernelInterface.ChardevOwner{ .uid = uid, .gid = gid };
     };
 
-    var future_module = io.async(PsideKernelModule.loadFromDefaultPath, .{ chardev_owner, allocator, io });
+    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ chardev_owner, allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     } else |_| {};
 
-    const user_program: UserProgram = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
+    const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
     defer user_program.deinit(allocator);
 
     const tracee: Tracee = try .spawn(user_program, io);

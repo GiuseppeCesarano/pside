@@ -1,8 +1,8 @@
 const std = @import("std");
-const UserProgram = @import("UserProgram.zig");
+const Program = @import("Program.zig");
 const elf = std.elf;
 
-pub fn getPatchAddr(user_program: UserProgram, allocator: std.mem.Allocator, io: std.Io) !usize {
+pub fn getPatchAddr(user_program: Program, allocator: std.mem.Allocator, io: std.Io) !usize {
     const path = std.mem.span(user_program.path);
     var file = try if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{})

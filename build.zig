@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
         .whitelist = &.{
             .{
                 .os_tag = .linux,
-                .cpu_arch = .x86_64, // bindings.c is specific to x86_64, waiting for translate-c to support kernel modules for arm/riscv
+                .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
             },
         },
     });
@@ -13,13 +13,20 @@ pub fn build(b: *std.Build) void {
 
     const check = b.step("check", "Check for compilation errors");
 
-    const communications_mod = b.addModule("cli", .{
+    const communications_mod = b.addModule("communications", .{
         .root_source_file = b.path("src/common/communications.zig"),
         .target = target,
         .optimize = optimize,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{communications_mod}, check));
+    const bindings_mod = b.addModule("kernel_bidings", .{
+        .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{ communications_mod, bindings_mod }, check));
 
     const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
         " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -34,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
     const record_mod = b.addModule("record", .{
         .root_source_file = b.path("src/userspace/record/record.zig"),
         .target = target,
@@ -77,33 +85,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
-    const kernel_bindings_test_only_mod = b.addModule("kbtom", .{
-        .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    const bindings_tests = b.addTest(.{ .root_module = bindings_mod });
+    const run_bindings_tests = b.addRunArtifact(bindings_tests);
 
-    const kbto_tests = b.addTest(.{
-        .root_module = kernel_bindings_test_only_mod,
-    });
-    const run_kbto_tests = b.addRunArtifact(kbto_tests);
-
-    const thread_safe_test_only_mod = b.addModule("tftom", .{
+    const thread_safe_tests = b.addTest(.{ .root_module = b.addModule("thread_safe", .{
         .root_source_file = b.path("src/kernelspace/thread_safe.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = true,
-    });
-    const thread_safe_tests = b.addTest(.{
-        .root_module = thread_safe_test_only_mod,
-    });
-    const run_tfto_tests = b.addRunArtifact(thread_safe_tests);
+    }) });
+    const run_thread_safe_tests = b.addRunArtifact(thread_safe_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_cli_tests.step);
-    test_step.dependOn(&run_kbto_tests.step);
-    test_step.dependOn(&run_tfto_tests.step);
+    test_step.dependOn(&run_bindings_tests.step);
+    test_step.dependOn(&run_thread_safe_tests.step);
 }
 
 fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module, check_step: *std.Build.Step) *std.Build.Step.Compile {
@@ -126,7 +122,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
         .name = "pside_zig",
         .use_llvm = true,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernelspace/pside.zig"),
+            .root_source_file = b.path("src/kernelspace/main.zig"),
             .target = kernel_target,
             .optimize = optimize,
             .link_libc = false,
@@ -144,6 +140,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .no_builtin = true,
             .imports = &.{
                 .{ .name = "communications", .module = deps[0] },
+                .{ .name = "kernel", .module = deps[1] },
             },
         }),
     };
@@ -160,13 +157,13 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/bindings.c"), "bindings.c");
+    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
     _ = write_files.add("Makefile", b.fmt("" ++
         "KCFLAGS += -march=native -O2 -flto\n" ++
         "obj-m += pside.o\n" ++
-        "pside-objs := bindings.o {s}\n" ++
+        "pside-objs := kernel.o {s}\n" ++
         "{s}" ++ // Debug definition for bindings
         "\n" ++
         "PWD := $(CURDIR)\n" ++
