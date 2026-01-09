@@ -6,7 +6,7 @@ pub const interrupt: []const u8 = &.{0xcc}; // int3
 pub const payload = struct {
     const bytes = [_]u8{
         0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ptr>
-        0x48, 0xc7, 0x00, 0x45, 0x00, 0x00, 0x00, //  movq [rax], 69
+        0xf0, 0x48, 0xff, 0x00, // lock incq <ptr>
         0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ret>
         0xff, 0xe0, // jmp rax
     };
@@ -17,7 +17,7 @@ pub const payload = struct {
         var b = bytes;
 
         @memcpy(b[2..10], std.mem.asBytes(&inc_addr));
-        @memcpy(b[19..27], std.mem.asBytes(&ret_addr));
+        @memcpy(b[16..24], std.mem.asBytes(&ret_addr));
 
         return b;
     }
