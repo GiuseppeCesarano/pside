@@ -15,7 +15,7 @@ The source code files in this folder (`kernelspace/`) are dual-licensed under:
 
 Notes:
 ------
-- This dual license applies **only to the source files in this folder**.  
+- This dual license applies **only to the source files in this folder and it's subfolders**.  
 - For the purposes of kernel module symbol access, this module declares  
   itself as `"GPL"` in `.modinfo`.  
 - You may choose either license when redistributing or modifying the source  
