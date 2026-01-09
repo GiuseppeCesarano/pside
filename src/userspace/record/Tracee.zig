@@ -69,6 +69,10 @@ fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 }
 
 pub fn start(this: @This()) !void {
+    var regs = try ptrace.getRegs(this.pid);
+    regs.setIp(this.elf_entrypoint);
+    try ptrace.setRegs(this.pid, regs);
+
     try ptrace.poke(.text, this.pid, this.elf_entrypoint, std.mem.asBytes(&this.old_entry_ins));
     try ptrace.detach(this.pid);
 }
@@ -212,27 +216,23 @@ fn mmap(
 }
 
 pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !usize {
-    const regs: UserRegs = try ptrace.getRegs(this.pid);
-
-    const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
-    const ip = machine_word_alignment.backward(regs.ip());
-
+    const saved_regs = try ptrace.getRegs(this.pid);
+    const ip = saved_regs.ip();
     const old_ins = try ptrace.peekWord(.text, this.pid, ip);
 
     try ptrace.poke(.text, this.pid, ip, syscall_bytes);
-    var tmp_regs = regs;
-    tmp_regs.setIp(ip);
+
+    var tmp_regs = saved_regs;
     tmp_regs.prep_syscall(syscall_id, args);
     try ptrace.setRegs(this.pid, tmp_regs);
-    try ptrace.singleStep(this.pid);
 
+    try ptrace.singleStep(this.pid);
     try ptrace.waitTrapUntillIpReaches(this.pid, ip + 1);
 
-    const ret = (try ptrace.getRegs(this.pid)).ret();
+    const final_regs = try ptrace.getRegs(this.pid);
+    const ret = final_regs.ret();
 
-    tmp_regs = regs;
-    tmp_regs.setIp(ip);
-    try ptrace.setRegs(this.pid, tmp_regs);
+    try ptrace.setRegs(this.pid, saved_regs);
     try ptrace.poke(.text, this.pid, ip, std.mem.asBytes(&old_ins));
 
     return ret;
@@ -240,6 +240,7 @@ pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !usize {
 
 const ptrace = struct {
     pub const Location = enum { text, data, user };
+    const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
 
     fn traceMe() !void {
         try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
@@ -309,8 +310,6 @@ const ptrace = struct {
     }
 
     fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) !void {
-        std.debug.assert(addr % @sizeOf(usize) == 0); //TODO: support writes starting on a pointer not aligned
-
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,
             .data => linux.PTRACE.POKEDATA,
@@ -318,43 +317,61 @@ const ptrace = struct {
         };
 
         var reader: std.Io.Reader = .fixed(data);
-
         var i: usize = addr;
+
+        if (!machine_word_alignment.check(i)) {
+            const aligned_addr = machine_word_alignment.backward(i);
+            const offset = i - aligned_addr;
+
+            const space_left_in_word = @sizeOf(usize) - offset;
+            const copy_len = @min(space_left_in_word, data.len);
+
+            var word = try peekWord(location, pid, aligned_addr);
+            @memcpy(std.mem.asBytes(&word)[offset .. offset + copy_len], data[0..copy_len]);
+
+            try posix.ptrace(command, pid, aligned_addr, word);
+
+            i += copy_len;
+            reader.toss(copy_len);
+        }
+
         while (reader.peekArray(@sizeOf(usize))) |bytes| : (i += @sizeOf(usize)) {
-            try posix.ptrace(command, pid, i, std.mem.bytesAsValue(usize, bytes).*);
+            try posix.ptrace(command, pid, i, std.mem.bytesToValue(usize, bytes));
             reader.toss(@sizeOf(usize));
         } else |err| switch (err) {
             std.Io.Reader.Error.EndOfStream => {
                 const len = reader.bufferedLen();
                 if (len == 0) return;
 
-                var bytes: usize = 0;
-                const bytes_slice = std.mem.asBytes(&bytes);
-                const read = reader.readSliceShort(bytes_slice[0..len]) catch unreachable;
+                var bytes: [@sizeOf(usize)]u8 = undefined;
+                const read = reader.readSliceShort(bytes[0..len]) catch unreachable;
                 std.debug.assert(read == len);
 
                 const old = try peekWord(location, pid, i);
-                @memcpy(bytes_slice[len..], std.mem.asBytes(&old)[len..]);
+                @memcpy(bytes[len..], std.mem.asBytes(&old)[len..]);
 
-                try posix.ptrace(command, pid, i, bytes);
+                try posix.ptrace(command, pid, i, std.mem.bytesToValue(usize, &bytes));
             },
             else => unreachable,
         }
     }
 
     fn peekWord(comptime location: Location, pid: linux.pid_t, addr: usize) !usize {
-        std.debug.assert(addr % @sizeOf(usize) == 0);
-
         const command = comptime switch (location) {
             .text => linux.PTRACE.PEEKTEXT,
             .data => linux.PTRACE.PEEKDATA,
             .user => linux.PTRACE.PEEKUSER,
         };
 
-        var data: usize = undefined;
-        try posix.ptrace(command, pid, addr, @intFromPtr(&data));
+        const previus_aligned = machine_word_alignment.backward(addr);
 
-        return data;
+        var data: [2]usize = undefined;
+
+        try posix.ptrace(command, pid, previus_aligned, @intFromPtr(&data[0]));
+        try posix.ptrace(command, pid, previus_aligned + @sizeOf(usize), @intFromPtr(&data[1]));
+
+        const diff = addr - previus_aligned;
+        return std.mem.bytesToValue(usize, std.mem.asBytes(&data)[diff .. diff + @sizeOf(usize)]);
     }
 };
 
