@@ -84,9 +84,8 @@ pub fn wait(this: @This()) !u32 {
     return status;
 }
 
-pub fn patchProgressPoint(this: @This(), name: []const u8) !void {
-    _ = name;
-
+pub fn patchProgressPoint(this: @This(), addr: usize) !void {
+    const final_addr = addr;
     const code_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.EXEC | linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
     // We use the code_page to temporally store the path on the child memory
@@ -96,41 +95,27 @@ pub fn patchProgressPoint(this: @This(), name: []const u8) !void {
     const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);
     const chardev_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .SHARED }, chardev_fd, 0);
 
-    _ = chardev_page;
+    var payload_bytes = [_]u8{
+        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ptr>
+        0x48, 0xc7, 0x00, 0x45, 0x00, 0x00, 0x00, //  movq [rax], 69
+        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <ret>
+        0xff, 0xe0, // jmp rax
+    };
 
-    // var regs = try ptrace.getRegs(this.pid);
+    const return_addr = final_addr + 12;
+    @memcpy(payload_bytes[2..10], std.mem.asBytes(&chardev_page.ptr));
+    @memcpy(payload_bytes[19..27], std.mem.asBytes(&return_addr));
 
-    // const patch_ip = std.mem.alignBackward(usize, regs.ip(), 8);
+    const payload_addr = std.mem.alignForward(usize, @intFromPtr(code_page.ptr) + 64, 8);
+    try ptrace.poke(.data, this.pid, payload_addr, &payload_bytes);
 
-    // const return_addr = patch_ip + 12;
+    var trampoline = [_]u8{
+        0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <payload_addr>
+        0xff, 0xe0, // jmp rax
+    };
+    @memcpy(trampoline[2..10], std.mem.asBytes(&payload_addr));
 
-    // var payload_bytes = [_]u8{
-    //     // Part A: The Atomic Write
-    //     0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <chardev_ptr>
-    //     0x48, 0xc7, 0x00, 0x45, 0x00, 0x00, 0x00, // movq [rax], 69
-
-    //     0x48, 0xb8,            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <return_addr>
-    //     0xff, 0xe0, // jmp rax
-    // };
-
-    // @memcpy(payload_bytes[2..10], std.mem.asBytes(&chardev_page.ptr));
-    // @memcpy(payload_bytes[19..27], std.mem.asBytes(&return_addr));
-
-    // const payload_addr = std.mem.alignForward(usize, @intFromPtr(code_page.ptr) + 64, 8);
-    // try ptrace.poke(.data, this.pid, payload_addr, &payload_bytes);
-
-    // var trampoline = [_]u8{
-    //     0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // movabs rax, <payload_addr>
-    //     0xff, 0xe0, // jmp rax
-    //     0x90, 0x90,
-    //     0x90, 0x90, // Padding
-    // };
-    // @memcpy(trampoline[2..10], std.mem.asBytes(&payload_addr));
-
-    // try ptrace.poke(.text, this.pid, patch_ip, &trampoline);
-
-    // regs.setIp(patch_ip);
-    // try ptrace.setRegs(this.pid, regs);
+    try ptrace.poke(.text, this.pid, final_addr, &trampoline);
 }
 
 pub fn open(

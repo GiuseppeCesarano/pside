@@ -25,6 +25,8 @@ export fn init_module() linksection(".init.text") c_int {
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
+    const atomic: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
+    std.log.debug("atomic value: {}", .{atomic.load(.monotonic)});
     chardev.remove();
     causal.engine.deinit();
 }
