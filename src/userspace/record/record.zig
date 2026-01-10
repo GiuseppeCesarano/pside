@@ -29,6 +29,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     } else |_| {};
 
     const tracee: Tracee = try .spawn(user_program, io);
+    errdefer tracee.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);

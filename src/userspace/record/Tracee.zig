@@ -82,6 +82,10 @@ pub fn start(this: @This()) !void {
     try ptrace.detach(this.pid);
 }
 
+pub fn kill(this: @This()) !void {
+    try posix.kill(this.pid, .KILL);
+}
+
 pub fn wait(this: @This()) !u32 {
     var status: u32 = undefined;
     if (posix.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
