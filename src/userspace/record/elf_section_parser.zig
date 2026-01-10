@@ -10,7 +10,7 @@ pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.
         std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
-    var buffer: [128]u8 = undefined;
+    var buffer: [255]u8 = undefined;
     var reader = file.reader(io, &buffer);
     const header = try std.elf.Header.read(&reader.interface);
 
