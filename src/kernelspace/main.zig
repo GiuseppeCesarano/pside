@@ -4,9 +4,6 @@ const kernel = @import("kernel");
 const causal_engine = @import("causal/engine.zig");
 
 const name = "pside";
-const native_endian = @import("builtin").target.cpu.arch.endian();
-const allocator = kernel.heap.allocator;
-const linux = std.os.linux;
 
 export const license linksection(".modinfo") = "license=GPL".*;
 
@@ -47,6 +44,6 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
     return code(.SUCCESS);
 }
 
-fn code(return_code: linux.E) c_long {
+fn code(return_code: std.os.linux.E) c_long {
     return -@as(c_long, @intCast(@intFromEnum(return_code)));
 }
