@@ -17,32 +17,23 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
-    const chardev_owner = blk: {
-        const env = init.minimal.environ;
+    const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
+    defer user_program.deinit(allocator);
 
-        const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse break :blk null, 10);
-        const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse break :blk null, 10);
+    var future_patch_address = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
+    defer _ = future_patch_address.cancel(io) catch {};
 
-        break :blk KernelInterface.ChardevOwner{ .uid = uid, .gid = gid };
-    };
-
-    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ chardev_owner, allocator, io });
+    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ try getChardevOwner(init.minimal.environ), allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch {
         std.log.warn("Could not remove the kernel module, please try manually with:\n\n\tsudo rmmod pside\n", .{});
     } else |_| {};
-
-    const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
-    defer user_program.deinit(allocator);
 
     const tracee: Tracee = try .spawn(user_program, io);
 
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);
 
-    std.log.info("Remote getpid returns: {}", .{try tracee.syscall(.getpid, .{})});
-    std.log.info("Remote time returns: {}", .{try tracee.syscall(.time, .{0})});
-
-    try tracee.patchProgressPoint(try elf_section_parser.getPatchAddr(user_program, parsed_options.flags.p, allocator, io));
+    try tracee.patchProgressPoint(try future_patch_address.await(io));
 
     try tracee.start();
     _ = try tracee.wait();
@@ -58,4 +49,11 @@ fn validateOptions(optinal_errors: ?cli.Options.Iterator, comptime msg: []const 
 
         return error.InvalidOption;
     }
+}
+
+fn getChardevOwner(env: std.process.Environ) !?KernelInterface.ChardevOwner {
+    const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return null, 10);
+    const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return null, 10);
+
+    return .{ .uid = uid, .gid = gid };
 }
