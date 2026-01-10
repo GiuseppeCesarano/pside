@@ -2,7 +2,7 @@ const std = @import("std");
 const Program = @import("Program.zig");
 const elf = std.elf;
 
-pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) !usize {
+pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) !std.ArrayList(usize) {
     const path = std.mem.span(user_program.path);
     var file = try if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{})
@@ -18,7 +18,7 @@ pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.
     defer allocator.free(strtab);
 
     const pside_shdr = try getSectionByName(header, &reader, ".pside_throughput", strtab) orelse return error.NoPsideSection;
-    return try findCorrectProgressPoint(pside_shdr, &reader, header.endian, name) -% header.entry;
+    return try findCorrectProgressPoint(header, pside_shdr, &reader, name, allocator);
 }
 
 fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem.Allocator) ![]const u8 {
@@ -47,17 +47,23 @@ fn getSectionByName(header: elf.Header, reader: *std.Io.File.Reader, target_name
     } else null;
 }
 
-fn findCorrectProgressPoint(shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, endian: std.builtin.Endian, name: []const u8) !usize {
+fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, name: []const u8, allocator: std.mem.Allocator) !std.ArrayList(usize) {
     try reader.seekTo(shdr.sh_offset);
-    var addr = try reader.interface.takeInt(u64, endian);
-    var read_name = try reader.interface.takeSentinel(0);
-    var i: usize = shdr.sh_offset + @sizeOf(u64) + read_name.len;
 
-    return if (name.len == 0)
-        addr
-    else blk: while (i < shdr.sh_offset + shdr.sh_size) : (i += @sizeOf(u64) + read_name.len) {
-        if (std.mem.eql(u8, read_name, name)) break :blk addr;
-        addr = try reader.interface.takeInt(u64, endian);
+    var addr = try reader.interface.takeInt(u64, header.endian);
+    var read_name = try reader.interface.takeSentinel(0);
+
+    const selected_name = if (name.len != 0) name else read_name;
+
+    var addresses: std.ArrayList(usize) = try .initCapacity(allocator, 16);
+    errdefer addresses.deinit(allocator);
+
+    var i: usize = shdr.sh_offset + @sizeOf(u64) + read_name.len;
+    while (i < shdr.sh_offset + shdr.sh_size) : (i += @sizeOf(u64) + read_name.len) {
+        if (std.mem.eql(u8, read_name, selected_name)) try addresses.append(allocator, addr -% header.entry);
+        addr = try reader.interface.takeInt(u64, header.endian);
         read_name = try reader.interface.takeSentinel(0);
-    } else break :blk error.NoPointWithSuchName;
+    }
+
+    return if (addresses.items.len != 0) addresses else error.NoProgressPointsWithSuchName;
 }

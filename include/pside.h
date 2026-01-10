@@ -8,7 +8,6 @@
       ".byte 0x0f, 0x1f, 0x40, 0x00\n\t"                                       \
                                                                                \
       ".pushsection .pside_throughput, \"R\", @progbits\n\t"                   \
-      ".align 8\n\t"                                                           \
       ".quad 1b\n\t"                                                           \
       ".asciz \"" name "\"\n\t"                                                \
       ".popsection\n\t" ::                                                     \

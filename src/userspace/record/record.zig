@@ -20,8 +20,11 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
     defer user_program.deinit(allocator);
 
-    var future_patch_address = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
-    defer _ = future_patch_address.cancel(io) catch {};
+    var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
+    defer if (future_patch_addresses.cancel(io)) |addresses| {
+        var a = addresses;
+        a.deinit(allocator);
+    } else |_| {};
 
     var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ try getChardevOwner(init.minimal.environ), allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch {
@@ -34,7 +37,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     var module = try future_module.await(io);
     try module.startProfilerOnPid(tracee.pid);
 
-    try tracee.patchProgressPoint(try future_patch_address.await(io));
+    var patch_addresses = try future_patch_addresses.await(io);
+    for (patch_addresses.items) |addresses| try tracee.patchProgressPoint(addresses);
 
     try tracee.start();
     _ = try tracee.wait();
