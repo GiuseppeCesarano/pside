@@ -8,6 +8,7 @@ const elf_section_parser = @import("elf_section_parser.zig");
 pub fn record(options: cli.Options, init: std.process.Init) !void {
     const parsed_options = options.parse(struct {
         c: []const u8 = "",
+        p: []const u8 = "",
     });
 
     const io = init.io;
@@ -41,7 +42,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     std.log.info("Remote getpid returns: {}", .{try tracee.syscall(.getpid, .{})});
     std.log.info("Remote time returns: {}", .{try tracee.syscall(.time, .{0})});
 
-    try tracee.patchProgressPoint(try elf_section_parser.getPatchAddr(user_program, allocator, io));
+    try tracee.patchProgressPoint(try elf_section_parser.getPatchAddr(user_program, parsed_options.flags.p, allocator, io));
 
     try tracee.start();
     _ = try tracee.wait();

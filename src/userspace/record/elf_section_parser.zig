@@ -2,7 +2,7 @@ const std = @import("std");
 const Program = @import("Program.zig");
 const elf = std.elf;
 
-pub fn getPatchAddr(user_program: Program, allocator: std.mem.Allocator, io: std.Io) !usize {
+pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) !usize {
     const path = std.mem.span(user_program.path);
     var file = try if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{})
@@ -18,11 +18,7 @@ pub fn getPatchAddr(user_program: Program, allocator: std.mem.Allocator, io: std
     defer allocator.free(strtab);
 
     const pside_shdr = try getSectionByName(header, &reader, ".pside_throughput", strtab) orelse return error.NoPsideSection;
-
-    try reader.seekTo(pside_shdr.sh_offset);
-    const raw_target_addr = try reader.interface.takeInt(u64, header.endian);
-
-    return raw_target_addr -% header.entry;
+    return try findCorrectProgressPoint(pside_shdr, &reader, header.endian, name) -% header.entry;
 }
 
 fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem.Allocator) ![]const u8 {
@@ -49,4 +45,19 @@ fn getSectionByName(header: elf.Header, reader: *std.Io.File.Reader, target_name
         const current_name = std.mem.sliceTo(strtab[sh.sh_name..], 0);
         if (std.mem.eql(u8, target_name, current_name)) break :blk sh;
     } else null;
+}
+
+fn findCorrectProgressPoint(shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, endian: std.builtin.Endian, name: []const u8) !usize {
+    try reader.seekTo(shdr.sh_offset);
+    var addr = try reader.interface.takeInt(u64, endian);
+    var read_name = try reader.interface.takeSentinel(0);
+    var i: usize = shdr.sh_offset + @sizeOf(u64) + read_name.len;
+
+    return if (name.len == 0)
+        addr
+    else blk: while (i < shdr.sh_offset + shdr.sh_size) : (i += @sizeOf(u64) + read_name.len) {
+        if (std.mem.eql(u8, read_name, name)) break :blk addr;
+        addr = try reader.interface.takeInt(u64, endian);
+        read_name = try reader.interface.takeSentinel(0);
+    } else break :blk error.NoPointWithSuchName;
 }
