@@ -1,4 +1,3 @@
-// TODO: check if we can use the new std.process.Init api to cut this file down
 const std = @import("std");
 
 path: [*:0]const u8,
@@ -70,6 +69,7 @@ fn isSudo(path: []const u8) bool {
 
 fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
     if (std.mem.findScalar(u8, binary_path, '/') != null) {
+        _ = try std.Io.Dir.cwd().statFile(io, binary_path, .{});
         const copy = try allocator.dupeZ(u8, binary_path);
         return @ptrCast(copy.ptr);
     }
@@ -77,15 +77,13 @@ fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, alloc
     const path_env = environ.getPosix("PATH") orelse return error.NoPath;
     var path_it = std.mem.tokenizeScalar(u8, path_env, ':');
 
-    while (path_it.next()) |current_path| {
-        const dir = std.Io.Dir.cwd().openDir(io, current_path, .{}) catch continue;
+    return file: while (path_it.next()) |current_path| {
+        const dir = std.Io.Dir.openDirAbsolute(io, current_path, .{}) catch continue;
         if (dir.statFile(io, binary_path, .{})) |_| {
             const path = try std.mem.concatWithSentinel(allocator, u8, &.{ current_path, "/", binary_path }, 0);
-            return @ptrCast(path.ptr);
+            break :file @ptrCast(path.ptr);
         } else |_| {}
-    }
-
-    return error.notFoundInPath;
+    } else break :file error.notFoundInPath;
 }
 
 pub fn deinit(this: @This(), allocator: std.mem.Allocator) void {
