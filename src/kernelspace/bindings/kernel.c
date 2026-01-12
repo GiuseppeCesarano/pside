@@ -9,6 +9,7 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/namei.h>
+#include <linux/perf_event.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
 #include <linux/sched.h>
@@ -92,6 +93,15 @@ void *c_get_shared_buffer(struct chardev *);
 struct file *c_filp_open(const char *, int, umode_t);
 ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
 ssize_t c_kernel_read(struct file *, void *, size_t, loff_t *);
+
+/* Perf */
+struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
+                                                      int, pid_t,
+                                                      perf_overflow_handler_t,
+                                                      void *);
+void c_perf_event_enable(struct perf_event *);
+void c_perf_event_disable(struct perf_event *);
+int c_perf_event_release_kernel(struct perf_event *);
 
 /* Implementations */
 
@@ -278,4 +288,40 @@ ssize_t c_kernel_write(struct file *fd, const void *buff, size_t len,
 
 ssize_t c_kernel_read(struct file *fd, void *buff, size_t len, loff_t *off) {
   return kernel_read(fd, buff, len, off);
+}
+
+/* Perf */
+struct perf_event *
+c_perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
+                                   pid_t pid, perf_overflow_handler_t callback,
+                                   void *context) {
+  struct task_struct *task;
+  struct pid *pid_struct;
+
+  pid_struct = find_get_pid(pid);
+  if (!pid_struct)
+    return ERR_PTR(-ESRCH);
+
+  task = get_pid_task(pid_struct, PIDTYPE_PID);
+  put_pid(pid_struct);
+
+  if (!task)
+    return ERR_PTR(-ESRCH);
+
+  struct perf_event *event =
+      perf_event_create_kernel_counter(attr, cpu, task, callback, context);
+
+  put_task_struct(task);
+
+  return event;
+}
+
+void c_perf_event_enable(struct perf_event *event) { perf_event_enable(event); }
+void c_perf_event_disable(struct perf_event *event) {
+  // perf_event_disable_inatomic(event);
+  perf_event_disable(event);
+}
+
+int c_perf_event_release_kernel(struct perf_event *event) {
+  return perf_event_release_kernel(event);
 }

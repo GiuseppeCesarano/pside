@@ -2,6 +2,7 @@
 // for translate-c in zig
 
 const std = @import("std");
+const linux = std.os.linux;
 const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
 
 // We test the custom allocator replacing kernel calls with malloc and free
@@ -171,13 +172,13 @@ pub const time = struct {
 };
 
 pub const current_task = struct {
-    extern fn c_tid() std.os.linux.pid_t;
-    pub fn tid() std.os.linux.pid_t {
+    extern fn c_tid() linux.pid_t;
+    pub fn tid() linux.pid_t {
         return c_tid();
     }
 
-    extern fn c_pid() std.os.linux.pid_t;
-    pub fn pid() std.os.linux.pid_t {
+    extern fn c_pid() linux.pid_t;
+    pub fn pid() linux.pid_t {
         return c_pid();
     }
 };
@@ -198,7 +199,7 @@ pub const Path = extern struct {
     pub fn init(path: [:0]const u8) OpenError!@This() {
         var err: i32 = undefined;
         const ret = c_kern_path(path.ptr, &err);
-        return switch (std.os.linux.errno(@intCast(err))) {
+        return switch (linux.errno(@intCast(err))) {
             .SUCCESS => ret,
 
             .NOENT => OpenError.NoEntity,
@@ -267,7 +268,7 @@ pub const probe = struct {
 
     pub fn checkRegistration(val: anytype) RegistrationError!@TypeOf(val) {
         const casted: u64 = if (@typeInfo(@TypeOf(val)) == .pointer) @intFromPtr(val) else @intCast(@abs(val));
-        return switch (std.os.linux.errno(casted)) {
+        return switch (linux.errno(casted)) {
             .SUCCESS => val,
 
             .NOENT => RegistrationError.NoEntity,
@@ -391,6 +392,53 @@ pub const File = *opaque {
     extern fn c_kernel_read(*@This(), *anyopaque, usize, *usize) isize;
     pub fn read(this: *@This(), buff: []u8, offset: *usize) isize {
         return c_kernel_read(this, @ptrCast(buff.ptr), buff.len, offset);
+    }
+};
+
+pub const PerfEvent = opaque {
+    const PerfOverflowHandler = void;
+
+    pub const InitErrors = error{
+        InvalidConfiguration,
+        TaskNotFound,
+        CpuOffline,
+        HardwareBusy,
+        NotSupported,
+        OutOfMemory,
+        HardwareNotFound,
+        InvalidAttributeSize,
+    } || error{Unexpected};
+
+    extern fn c_perf_event_create_kernel_counter(linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, *anyopaque) *@This();
+    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, context: *anyopaque) InitErrors!*@This() {
+        const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, context);
+        return switch (linux.errno(rc)) {
+            .SUCCESS => rc,
+            .INVAL => InitErrors.InvalidConfiguration,
+            .SRCH => InitErrors.TaskNotFound,
+            .NODEV => InitErrors.CpuOffline,
+            .BUSY => InitErrors.HardwareBusy,
+            .OPNOTSUPP => InitErrors.NotSupported,
+            .NOMEM => InitErrors.OutOfMemory,
+            .NOENT => InitErrors.HardwareNotFound,
+            .@"2BIG" => InitErrors.InvalidAttributeSize,
+            else => InitErrors.Unexpected,
+        };
+    }
+
+    extern fn c_perf_event_enable(*@This()) void;
+    pub fn enable(this: *@This()) void {
+        c_perf_event_enable(this);
+    }
+
+    extern fn c_perf_event_disable(*@This()) void;
+    pub fn disable(this: *@This()) void {
+        c_perf_event_disable(this);
+    }
+
+    extern fn c_perf_event_release_kernel() c_int;
+    pub fn deint(this: *@This()) void {
+        _ = c_perf_event_release_kernel(this);
     }
 };
 
