@@ -1,6 +1,7 @@
 const std = @import("std");
 const native_endianess = @import("builtin").target.cpu.arch.endian();
 const communications = @import("communications");
+const linux = std.os.linux;
 
 pub const name = "pside";
 pub const chardev_path: [:0]const u8 = "/dev/" ++ name;
@@ -19,7 +20,7 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.me
         .chardev = undefined,
     };
 
-    const load_res = std.os.linux.syscall3(
+    const load_res = linux.syscall3(
         .finit_module,
         @intCast(rt.file.handle),
         @intFromPtr(""),
@@ -32,7 +33,7 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.me
         try rt.chardev.setPermissions(io, .fromMode(0o644));
     }
 
-    return switch (std.posix.errno(load_res)) {
+    return switch (linux.errno(load_res)) {
         .SUCCESS => rt,
 
         .BADMSG => error.SignatureMisformatted,
@@ -57,7 +58,9 @@ fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     defer allocator.free(bin_path);
 
     const base_path = std.fs.path.dirname(bin_path) orelse "";
-    const release = std.posix.uname().release;
+    var uts: std.os.linux.utsname = undefined;
+    _ = std.os.linux.uname(&uts);
+    const release = uts.release;
     const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
 
     return try std.mem.concat(allocator, u8, &.{ base_path, "/lib/modules/", release[0..release_end], "/extra/" ++ name ++ ".ko" });
@@ -67,13 +70,13 @@ pub fn unload(this: @This(), io: std.Io) !void {
     this.chardev.close(io);
     defer this.file.close(io);
 
-    const remove_res = std.os.linux.syscall2(
+    const remove_res = linux.syscall2(
         .delete_module,
         @intFromPtr(name.ptr),
         0,
     );
 
-    return switch (std.posix.errno(remove_res)) {
+    return switch (linux.errno(remove_res)) {
         .SUCCESS => {},
 
         .AGAIN => error.FdOpen,
@@ -87,15 +90,15 @@ pub fn unload(this: @This(), io: std.Io) !void {
     };
 }
 
-pub fn startProfilerOnPid(this: *@This(), pid: std.os.linux.pid_t) !void {
+pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t) !void {
     const data = communications.Data{ .pid = pid };
 
-    const rc = std.os.linux.ioctl(
+    const rc = linux.ioctl(
         this.chardev.handle,
         @intFromEnum(communications.Commands.start_profiler_on_pid),
         @intFromPtr(&data),
     );
-    const e = std.posix.errno(rc);
+    const e = linux.errno(rc);
     switch (e) {
         .SUCCESS => {},
         else => std.log.err("{s}", .{@tagName(e)}),

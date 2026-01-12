@@ -197,7 +197,9 @@ fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Bu
 
     const source = kernel_module_files.getDirectory().join(b.allocator, "pside.ko") catch @panic("OOM");
     const dest = brk: {
-        const release = std.posix.uname().release;
+        var uts: std.os.linux.utsname = undefined;
+        _ = std.os.linux.uname(&uts);
+        const release = uts.release;
         const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
         break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", release[0..release_end], "/extra/pside.ko" }) catch @panic("OOM");
     };

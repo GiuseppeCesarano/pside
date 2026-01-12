@@ -1,6 +1,5 @@
 const std = @import("std");
 const linux = std.os.linux;
-const posix = std.posix;
 const Program = @import("Program.zig");
 
 const chardev_path = @import("KernelInterface.zig").chardev_path;
@@ -18,7 +17,14 @@ elf_entrypoint: usize,
 old_entry_ins: usize,
 
 pub fn spawn(tracee_exe: Program, io: std.Io) !@This() {
-    const child_pid = try posix.fork();
+    const rc = linux.fork();
+    const child_pid: linux.pid_t = switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .AGAIN => return error.SystemResources,
+        .NOMEM => return error.SystemResources,
+        else => return error.Unexpected,
+    };
+
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
     try ptrace.waitFor(child_pid, .stop);
 
@@ -37,22 +43,81 @@ pub fn spawn(tracee_exe: Program, io: std.Io) !@This() {
 }
 
 fn childStart(tracee_exe: Program) !void {
-    _ = try posix.prctl(linux.PR.SET_PDEATHSIG, .{@as(usize, @intFromEnum(linux.SIG.KILL))});
-    if (posix.getppid() == 1) return SpawnError.ParentDead;
+    switch (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0))) {
+        .SUCCESS => {},
+        .ACCES => return error.AccessDenied,
+        .BADF => return error.InvalidFileDescriptor,
+        .FAULT => return error.InvalidAddress,
+        .INVAL => unreachable,
+        .NODEV, .NXIO => return error.UnsupportedFeature,
+        .OPNOTSUPP => return error.OperationUnsupported,
+        .PERM, .BUSY => return error.PermissionDenied,
+        .RANGE => unreachable,
+        else => return error.Unexpected,
+    }
+
+    if (linux.getppid() == 1) return SpawnError.ParentDead;
 
     if (!tracee_exe.is_sudo) {
         const env = tracee_exe.enviroment_map;
         const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
         const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
-        if (std.posix.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
-        try posix.setgid(gid);
-        try posix.setuid(uid);
+
+        if (linux.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
+
+        switch (linux.errno(linux.setgid(gid))) {
+            .SUCCESS => {},
+            .AGAIN => return error.ResourceLimitReached,
+            .INVAL => return error.InvalidUserId,
+            .PERM => return error.PermissionDenied,
+            else => return error.Unexpected,
+        }
+
+        switch (linux.errno(linux.setuid(uid))) {
+            .SUCCESS => {},
+            .INVAL => return error.InvalidUserId,
+            .PERM => return error.PermissionDenied,
+            else => return error.Unexpected,
+        }
     }
 
     try ptrace.traceMe();
-    try posix.raise(.STOP);
+    try raise(.STOP);
 
-    _ = linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.ptr);
+    switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.ptr))) {
+        .SUCCESS => unreachable,
+        .FAULT => unreachable,
+        .@"2BIG" => return error.SystemResources,
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NAMETOOLONG => return error.NameTooLong,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOMEM => return error.SystemResources,
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .INVAL => return error.InvalidExe,
+        .NOEXEC => return error.InvalidExe,
+        .IO => return error.FileSystem,
+        .LOOP => return error.FileSystem,
+        .ISDIR => return error.IsDir,
+        .NOENT => return error.FileNotFound,
+        .NOTDIR => return error.NotDir,
+        .TXTBSY => return error.FileBusy,
+        .LIBBAD => return error.InvalidExe,
+        else => return error.Unexpected,
+    }
+}
+
+fn raise(sig: linux.SIG) !void {
+    const filled = linux.sigfillset();
+    var orig: linux.sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &filled, &orig);
+    const rc = linux.tkill(linux.gettid(), sig);
+    _ = linux.sigprocmask(linux.SIG.SETMASK, &orig, null);
+
+    return switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        else => error.Unexpected,
+    };
 }
 
 fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
@@ -83,26 +148,32 @@ pub fn start(this: @This()) !void {
 }
 
 pub fn kill(this: @This()) !void {
-    try posix.kill(this.pid, .KILL);
+    return switch (linux.errno(linux.kill(this.pid, .KILL))) {
+        .SUCCESS => {},
+        .INVAL => unreachable,
+        .PERM => error.PermissionDenied,
+        .SRCH => error.ProcessNotFound,
+        else => error.Unexpected,
+    };
 }
 
 pub fn wait(this: @This()) !u32 {
     var status: u32 = undefined;
-    if (posix.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
+    if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
 
     return status;
 }
 
 pub fn patchProgressPoint(this: @This(), addr: usize) !void {
     const final_addr = addr +% this.elf_entrypoint;
-    const code_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.EXEC | linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
     // We use the code_page to temporally store the path on the child memory
     const path = chardev_path.ptr[0 .. chardev_path.len + 1]; // Include the null terminator
     try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), path);
 
     const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);
-    const chardev_page = try this.mmap(null, std.heap.pageSize(), linux.PROT.READ | linux.PROT.WRITE, .{ .TYPE = .SHARED }, chardev_fd, 0);
+    const chardev_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .READ = true, .WRITE = true }), .{ .TYPE = .SHARED }, chardev_fd, 0);
 
     const trampoline = arch_specific.trampoline.get(@intFromPtr(code_page.ptr));
     try ptrace.poke(.text, this.pid, final_addr, &trampoline);
@@ -114,41 +185,40 @@ pub fn patchProgressPoint(this: @This(), addr: usize) !void {
 pub fn open(
     this: @This(),
     file_path: *anyopaque,
-    flags: posix.O,
-    perm: posix.mode_t,
-) !posix.fd_t {
+    flags: linux.O,
+    perm: linux.mode_t,
+) !linux.fd_t {
     while (true) {
         const rc = try this.syscall(
             .open,
             .{ @as(u64, @intFromPtr(file_path)), @as(u32, @bitCast(flags)), perm },
         );
 
-        const OE = posix.OpenError;
-        switch (posix.errno(rc)) {
-            .SUCCESS => return @intCast(rc),
+        return switch (linux.errno(rc)) {
+            .SUCCESS => @intCast(rc),
             .INTR => continue,
 
-            .INVAL => return OE.BadPathName,
-            .ACCES => return OE.AccessDenied,
-            .FBIG => return OE.FileTooBig,
-            .OVERFLOW => return OE.FileTooBig,
-            .ISDIR => return OE.IsDir,
-            .LOOP => return OE.SymLinkLoop,
-            .MFILE => return OE.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => return OE.NameTooLong,
-            .NFILE => return OE.SystemFdQuotaExceeded,
-            .NODEV => return OE.NoDevice,
-            .NOENT => return OE.FileNotFound,
-            .SRCH => return OE.FileNotFound,
-            .NOMEM => return OE.SystemResources,
-            .NOSPC => return OE.NoSpaceLeft,
-            .NOTDIR => return OE.NotDir,
-            .PERM => return OE.PermissionDenied,
-            .EXIST => return OE.PathAlreadyExists,
-            .BUSY => return OE.DeviceBusy,
-            .ILSEQ => return OE.BadPathName,
-            else => |err| return posix.unexpectedErrno(err),
-        }
+            .INVAL => error.BadPathName,
+            .ACCES => error.AccessDenied,
+            .FBIG => error.FileTooBig,
+            .OVERFLOW => error.FileTooBig,
+            .ISDIR => error.IsDir,
+            .LOOP => error.SymLinkLoop,
+            .MFILE => error.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => error.NameTooLong,
+            .NFILE => error.SystemFdQuotaExceeded,
+            .NODEV => error.NoDevice,
+            .NOENT => error.FileNotFound,
+            .SRCH => error.FileNotFound,
+            .NOMEM => error.SystemResources,
+            .NOSPC => error.NoSpaceLeft,
+            .NOTDIR => error.NotDir,
+            .PERM => error.PermissionDenied,
+            .EXIST => error.PathAlreadyExists,
+            .BUSY => error.DeviceBusy,
+            .ILSEQ => error.BadPathName,
+            else => error.Unexpected,
+        };
     }
 }
 
@@ -171,25 +241,24 @@ fn mmap(
         @as(u64, @bitCast(offset)) / std.heap.pageSize(),
     });
 
-    const err = posix.errno(rc);
+    const err = linux.errno(rc);
     if (err == .SUCCESS) return @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(rc))[0..length];
 
-    const MME = posix.MMapError;
     switch (err) {
         .SUCCESS => unreachable,
-        .TXTBSY => return MME.AccessDenied,
-        .ACCES => return MME.AccessDenied,
-        .PERM => return MME.PermissionDenied,
-        .AGAIN => return MME.LockedMemoryLimitExceeded,
+        .TXTBSY => return error.AccessDenied,
+        .ACCES => return error.AccessDenied,
+        .PERM => return error.PermissionDenied,
+        .AGAIN => return error.LockedMemoryLimitExceeded,
         .BADF => unreachable,
         .OVERFLOW => unreachable,
-        .NODEV => return MME.MemoryMappingNotSupported,
+        .NODEV => return error.MemoryMappingNotSupported,
         .INVAL => unreachable,
-        .MFILE => return MME.ProcessFdQuotaExceeded,
-        .NFILE => return MME.SystemFdQuotaExceeded,
-        .NOMEM => return MME.OutOfMemory,
-        .EXIST => return MME.MappingAlreadyExists,
-        else => return posix.unexpectedErrno(err),
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NOMEM => return error.OutOfMemory,
+        .EXIST => return error.MappingAlreadyExists,
+        else => return error.Unexpected,
     }
 }
 
@@ -220,12 +289,36 @@ const ptrace = struct {
     pub const Location = enum { text, data, user };
     const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
 
+    pub const PtraceError = error{
+        DeadLock,
+        DeviceBusy,
+        InputOutput,
+        NameTooLong,
+        OperationUnsupported,
+        OutOfMemory,
+        ProcessNotFound,
+        PermissionDenied,
+    } || error{Unexpected};
+
+    fn ptraceSysCall(request: u32, pid: linux.pid_t, addr: usize, data: usize) PtraceError!void {
+        return switch (linux.errno(linux.ptrace(request, pid, addr, data, 0))) {
+            .SUCCESS => {},
+            .SRCH => PtraceError.ProcessNotFound,
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .IO => PtraceError.InputOutput,
+            .PERM => PtraceError.PermissionDenied,
+            .BUSY => PtraceError.DeviceBusy,
+            else => error.Unexpected,
+        };
+    }
+
     fn traceMe() !void {
-        try posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0);
+        try ptraceSysCall(linux.PTRACE.TRACEME, 0, 0, 0);
     }
 
     fn detach(pid: linux.pid_t) !void {
-        try posix.ptrace(linux.PTRACE.DETACH, pid, 0, 0);
+        try ptraceSysCall(linux.PTRACE.DETACH, pid, 0, 0);
     }
 
     fn setOptions(pid: linux.pid_t, comptime options: []const comptime_int) !void {
@@ -234,13 +327,13 @@ const ptrace = struct {
             options_val |= o;
         };
 
-        try posix.ptrace(linux.PTRACE.SETOPTIONS, pid, 0, options_val);
+        try ptraceSysCall(linux.PTRACE.SETOPTIONS, pid, 0, options_val);
     }
 
     fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) !void {
         while (true) {
             var status: u32 = undefined;
-            if (posix.errno(linux.waitpid(pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
+            if (linux.errno(linux.waitpid(pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
 
             if (linux.W.IFEXITED(status)) return error.ChildExited;
             if (linux.W.IFSIGNALED(status)) return error.ChildKilled;
@@ -257,7 +350,7 @@ const ptrace = struct {
 
                 const signal_to_forward: u32 = if (sig == @intFromEnum(linux.SIG.TRAP) or sig == @intFromEnum(linux.SIG.STOP)) 0 else sig;
 
-                try posix.ptrace(linux.PTRACE.CONT, pid, 0, signal_to_forward);
+                try ptraceSysCall(linux.PTRACE.CONT, pid, 0, signal_to_forward);
             }
         }
     }
@@ -270,21 +363,21 @@ const ptrace = struct {
     }
 
     fn cont(pid: linux.pid_t) !void {
-        try posix.ptrace(linux.PTRACE.CONT, pid, 0, 0);
+        try ptraceSysCall(linux.PTRACE.CONT, pid, 0, 0);
     }
 
     fn singleStep(pid: linux.pid_t) !void {
-        try posix.ptrace(linux.PTRACE.SINGLESTEP, pid, 0, 0);
+        try ptraceSysCall(linux.PTRACE.SINGLESTEP, pid, 0, 0);
     }
 
     fn getRegs(pid: linux.pid_t) !UserRegs {
         var regs: UserRegs = undefined;
-        try posix.ptrace(linux.PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
+        try ptraceSysCall(linux.PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
         return regs;
     }
 
     fn setRegs(pid: linux.pid_t, regs: UserRegs) !void {
-        try posix.ptrace(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
+        try ptraceSysCall(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
     }
 
     fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) !void {
@@ -307,14 +400,14 @@ const ptrace = struct {
             var word = try peekWord(location, pid, aligned_addr);
             @memcpy(std.mem.asBytes(&word)[offset .. offset + copy_len], data[0..copy_len]);
 
-            try posix.ptrace(command, pid, aligned_addr, word);
+            try ptraceSysCall(command, pid, aligned_addr, word);
 
             i += copy_len;
             reader.toss(copy_len);
         }
 
         while (reader.peekArray(@sizeOf(usize))) |bytes| : (i += @sizeOf(usize)) {
-            try posix.ptrace(command, pid, i, std.mem.bytesToValue(usize, bytes));
+            try ptraceSysCall(command, pid, i, std.mem.bytesToValue(usize, bytes));
             reader.toss(@sizeOf(usize));
         } else |err| switch (err) {
             std.Io.Reader.Error.EndOfStream => {
@@ -328,7 +421,7 @@ const ptrace = struct {
                 const old = try peekWord(location, pid, i);
                 @memcpy(bytes[len..], std.mem.asBytes(&old)[len..]);
 
-                try posix.ptrace(command, pid, i, std.mem.bytesToValue(usize, &bytes));
+                try ptraceSysCall(command, pid, i, std.mem.bytesToValue(usize, &bytes));
             },
             else => unreachable,
         }
@@ -345,8 +438,8 @@ const ptrace = struct {
 
         var data: [2]usize = undefined;
 
-        try posix.ptrace(command, pid, previus_aligned, @intFromPtr(&data[0]));
-        try posix.ptrace(command, pid, previus_aligned + @sizeOf(usize), @intFromPtr(&data[1]));
+        try ptraceSysCall(command, pid, previus_aligned, @intFromPtr(&data[0]));
+        try ptraceSysCall(command, pid, previus_aligned + @sizeOf(usize), @intFromPtr(&data[1]));
 
         const diff = addr - previus_aligned;
         return std.mem.bytesToValue(usize, std.mem.asBytes(&data)[diff .. diff + @sizeOf(usize)]);
