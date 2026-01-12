@@ -4,6 +4,69 @@
 const std = @import("std");
 const linux = std.os.linux;
 const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
+const arch = @import("builtin").cpu.arch;
+
+//TODO: keep an eye on the std lib; they may implement that.
+pub const PtRegs = switch (arch) {
+    .x86_64 => extern struct {
+        r15: u64,
+        r14: u64,
+        r13: u64,
+        r12: u64,
+        bp: u64,
+        bx: u64,
+
+        r11: u64,
+        r10: u64,
+        r9: u64,
+        r8: u64,
+        ax: u64,
+        cx: u64,
+        dx: u64,
+        si: u64,
+        di: u64,
+
+        orig_ax: u64,
+        ip: u64,
+
+        c: extern union {
+            s: u16,
+            sx: u64,
+            fred_cs: packed struct(u64) {
+                cs: u16,
+                sl: u2,
+                wfe: bool,
+                padding0: u45,
+            },
+        },
+
+        flags: u64,
+        sp: u64,
+
+        s: extern union {
+            s: u16,
+            sx: u64,
+            fred_ss: packed struct(u64) {
+                ss: u16,
+                sti: bool,
+                swevent: bool,
+                nmi: bool,
+                pad0: u13,
+                vector: u8,
+                pad1: u8,
+                type: u4,
+                pad2: u4,
+                enclave: bool,
+                lm: bool,
+                nested: bool,
+                pad3: u1,
+                insnlen: u4,
+            },
+        },
+    },
+
+    else => @compileError("Unsupported arch"),
+};
 
 // We test the custom allocator replacing kernel calls with malloc and free
 const c = if (!is_target_kernel) @cImport({
@@ -222,7 +285,6 @@ pub const Path = extern struct {
 };
 
 pub const probe = struct {
-    pub const PtRegs = anyopaque;
     pub const FtraceRegs = opaque {
         extern fn c_ftrace_regs_get_instruction_pointer(*@This()) c_ulong;
         pub fn getInstructionPointer(this: *@This()) c_ulong {
@@ -396,7 +458,136 @@ pub const File = *opaque {
 };
 
 pub const PerfEvent = opaque {
-    const PerfOverflowHandler = void;
+    const CallchainEntry = extern struct {
+        nr: u64,
+        ip: [*]u64,
+    };
+
+    const RawRecord = extern struct {
+        const Frag = packed struct {
+            pub const CopyF = *const fn (*anyopaque, *const anyopaque, usize, usize) usize;
+
+            next: *Frag,
+            copy: CopyF,
+            data: *anyopaque,
+            size: u32,
+        };
+
+        frag: Frag,
+        size: u32,
+    };
+
+    const BranchStack = extern struct {
+        const Entry = extern struct {
+            from: u64,
+            to: u64,
+            info: packed struct {
+                mispred: bool,
+                predicted: bool,
+                in_tx: bool,
+                abort: bool,
+                cycles: u16,
+                type: u4,
+                spec: u2,
+                new_type: u4,
+                priv: u3,
+                reserved: u31,
+            },
+        };
+
+        nr: u64,
+        hw_idx: u64,
+        entries: [*]Entry,
+    };
+
+    const SampleWeight = switch (arch.endian()) {
+        .little => packed struct(u64) {
+            var1_dw: u32,
+            var2_w: u16,
+            var3_w: u16,
+        },
+
+        .big => packed struct(u64) {
+            var3_w: u16,
+            var2_w: u16,
+            var1_dw: u32,
+        },
+    };
+
+    const MemDataSrc = switch (arch.endian()) {
+        .little => packed struct(u64) {
+            mem_op: u5,
+            mem_lvl: u14,
+            mem_snoop: u5,
+            mem_lock: u2,
+            mem_dtlb: u7,
+            mem_lvl_num: u4,
+            mem_remote: u1,
+            mem_snoopx: u2,
+            mem_blk: u3,
+            mem_hops: u3,
+            mem_rsvd: u18,
+        },
+
+        .big => packed struct(u64) {
+            mem_rsvd: u18,
+            mem_hops: u3,
+            mem_blk: u3,
+            mem_snoopx: u2,
+            mem_remote: u1,
+            mem_lvl_num: u4,
+            mem_dtlb: u7,
+            mem_lock: u2,
+            mem_snoop: u5,
+            mem_lvl: u14,
+            mem_op: u5,
+        },
+    };
+
+    const Regs = extern struct {
+        abi: u64,
+        regs: *PtRegs,
+    };
+
+    const SampleData align(std.atomic.cache_line) = extern struct {
+        sample_flags: u64,
+        period: u64,
+        dyn_size: u64,
+
+        type: u64,
+        tid_entry: extern struct {
+            pid: u32,
+            tid: u32,
+        },
+        time: u64,
+        id: u64,
+        cpu_entry: extern struct {
+            cpu: u32,
+            reserved: u32,
+        },
+
+        ip: u64,
+        callchain: *CallchainEntry,
+        raw: *RawRecord,
+        br_stack: *BranchStack,
+        br_stack_cntr: *u64,
+        weight: SampleWeight,
+        data_src: MemDataSrc,
+        txn: u64,
+
+        regs_user: Regs,
+        regs_intr: Regs,
+        stack_user_size: u64,
+
+        stream_id: u64,
+        cgroup: u64,
+        addr: u64,
+        phys_addr: u64,
+        data_page_size: u64,
+        code_page_size: u64,
+        aux_size: u64,
+    };
+    const PerfOverflowHandler = *const fn (*@This(), *anyopaque, *PtRegs) callconv(.c) void;
 
     pub const InitErrors = error{
         InvalidConfiguration,
@@ -409,11 +600,11 @@ pub const PerfEvent = opaque {
         InvalidAttributeSize,
     } || error{Unexpected};
 
-    extern fn c_perf_event_create_kernel_counter(linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, *anyopaque) *@This();
-    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, context: *anyopaque) InitErrors!*@This() {
+    extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
+    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, context: ?*anyopaque) InitErrors!*@This() {
         const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, context);
         return switch (linux.errno(rc)) {
-            .SUCCESS => rc,
+            .SUCCESS => @ptrFromInt(rc),
             .INVAL => InitErrors.InvalidConfiguration,
             .SRCH => InitErrors.TaskNotFound,
             .NODEV => InitErrors.CpuOffline,
@@ -436,7 +627,7 @@ pub const PerfEvent = opaque {
         c_perf_event_disable(this);
     }
 
-    extern fn c_perf_event_release_kernel() c_int;
+    extern fn c_perf_event_release_kernel(*@This()) c_int;
     pub fn deint(this: *@This()) void {
         _ = c_perf_event_release_kernel(this);
     }
