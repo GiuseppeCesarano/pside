@@ -160,19 +160,22 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
     _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
     _ = write_files.add(cmd_name, "");
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
-    _ = write_files.add("Makefile", b.fmt("" ++
-        "KCFLAGS += -march=native -O2 -flto\n" ++
-        "obj-m += pside.o\n" ++
-        "pside-objs := kernel.o {s}\n" ++
-        "{s}" ++ // Debug definition for bindings
-        "\n" ++
-        "PWD := $(CURDIR)\n" ++
-        "\n" ++
-        "all:\n" ++
-        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules\n" ++
-        "\n" ++
-        "clean:\n" ++
-        "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n", .{ zig_kernel_obj.out_filename, if (is_debug) "CFLAGS_bindings.o := -DDEBUG\n" else "" }));
+    _ = write_files.add("Makefile", b.fmt(
+        \\KCFLAGS += -march=native -O2 -flto
+        \\obj-m += pside.o
+        \\pside-objs := kernel.o {s}
+        \\{s}
+        \\
+        \\PWD := $(CURDIR)
+        \\
+        \\all:
+    ++ "\n\t" ++
+        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+        \\ 
+        \\clean:
+    ++ "\n\t" ++
+        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
+    , .{ zig_kernel_obj.out_filename, if (is_debug) "CFLAGS_bindings.o := -DDEBUG" else "" }));
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 

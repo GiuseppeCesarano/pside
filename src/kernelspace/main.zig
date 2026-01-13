@@ -22,8 +22,11 @@ export fn init_module() linksection(".init.text") c_int {
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    const atomic: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
-    std.log.info("atomic value: {}", .{atomic.load(.monotonic)});
+    const Atomic = std.atomic.Value(usize);
+    const atomics: *[8]Atomic = @alignCast(std.mem.bytesAsValue([8]Atomic, chardev.shared_buffer()[0 .. @sizeOf(Atomic) * 9]));
+    for (atomics) |*value| {
+        std.log.info("{}", .{value.load(.monotonic)});
+    }
     chardev.remove();
     causal_engine.deinit();
 }
@@ -34,9 +37,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
     const copied = kernel.mem.copyBytesFromUser(std.mem.asBytes(&data), std.mem.asBytes(in));
     if (copied.len != @sizeOf(communications.Data)) return code(.FAULT);
 
-    const cmd = @as(communications.Commands, @enumFromInt(command));
-
-    switch (cmd) {
+    switch (@as(communications.Commands, @enumFromInt(command))) {
         .start_profiler_on_pid => causal_engine.profilePid(data.pid),
         else => return code(.INVAL),
     }

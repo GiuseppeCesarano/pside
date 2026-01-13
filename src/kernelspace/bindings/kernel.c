@@ -318,7 +318,6 @@ c_perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
 
 void c_perf_event_enable(struct perf_event *event) { perf_event_enable(event); }
 void c_perf_event_disable(struct perf_event *event) {
-  // perf_event_disable_inatomic(event);
   perf_event_disable(event);
 }
 
