@@ -60,18 +60,41 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 
         pub const init = @This(){ .blocks = &.{}, .ref_gate = .{} };
 
+        pub fn unsafeGetPtr(this: *@This(), block_index: usize, item_index: usize) ?*ValueAtomic {
+            if (block_index >= this.blocks.len) return null;
+
+            const block = this.blocks[block_index].load(.acquire) orelse return null;
+            return &block[item_index];
+        }
+
         pub fn get(this: *@This(), at: usize) ?Value {
-            const block_index = @divFloor(at, block_len);
+            const indexes = getBlockAndItemIndex(at);
 
             this.ref_gate.increment();
             defer this.ref_gate.decrement();
 
-            if (block_index >= this.blocks.len) return null;
+            const nullable_ptr = this.unsafeGetPtr(indexes[0], indexes[1]);
+            return if (nullable_ptr) |ptr| v: {
+                const value = ptr.load(.monotonic);
+                break :v if (value != empty_value) value else null;
+            } else null;
+        }
 
-            const block = this.blocks[block_index].load(.acquire) orelse return null;
-            const ret = block[at % block_len].load(.monotonic);
+        pub fn increment(this: *@This(), at: usize) ?Value {
+            const indexes = getBlockAndItemIndex(at);
 
-            return if (ret != empty_value) ret else null;
+            this.ref_gate.increment();
+            defer this.ref_gate.decrement();
+
+            const nullable_ptr = this.unsafeGetPtr(indexes[0], indexes[1]);
+            return if (nullable_ptr) |ptr| v: {
+                var value = ptr.load(.monotonic);
+                if (value == empty_value) break :v null;
+                while (ptr.cmpxchgWeak(value, value + 1, .monotonic, .monotonic)) |new_val| : (value = new_val) {
+                    if (value == empty_value) break :v null;
+                }
+                break :v value + 1;
+            } else null;
         }
 
         pub fn put(this: *@This(), allocator: std.mem.Allocator, at: usize, value: Value) !void {
@@ -88,6 +111,10 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 
             const block = this.blocks[block_index].load(.acquire) orelse try this.createBlockUnsafe(allocator, block_index);
             block[at % block_len].store(value, .monotonic);
+        }
+
+        fn getBlockAndItemIndex(at: usize) struct { usize, usize } {
+            return .{ @divFloor(at, block_len), at % block_len };
         }
 
         fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {

@@ -13,26 +13,113 @@ const std = @import("std");
 const kernel = @import("kernel");
 const thread_safe = @import("thread_safe.zig");
 
-const FProbe = kernel.probe.F;
-const FtraceRegs = kernel.probe.FtraceRegs;
 const Pid = std.os.linux.pid_t;
 const Tid = Pid;
 const FutexHandle = usize;
-const WaitCounter = usize;
+const ProgressPoint = usize;
+
+const FProbe = kernel.probe.F;
+const FtraceRegs = kernel.probe.FtraceRegs;
 
 const allocator = kernel.heap.atomic_allocator;
 
+const ThreadProgressMap = thread_safe.SegmentedSparseVector(ProgressPoint, std.math.maxInt(ProgressPoint));
+const ProgressTransferMap = thread_safe.AddressMap(ProgressPoint, std.math.maxInt(ProgressPoint));
+
+const WaitProbeCtx = struct {
+    lag_debit: ProgressPoint,
+    futex_handle: FutexHandle,
+};
+
+pub const state = struct {
+    var instrumented_pid = std.atomic.Value(Pid).init(0);
+    var delay_per_point_us = std.atomic.Value(usize).init(0);
+
+    var lead_progress = std.atomic.Value(ProgressPoint).init(0);
+    var thread_points: ThreadProgressMap = .init;
+    var transfer_map: ProgressTransferMap = .init;
+
+    var profiler: *kernel.PerfEvent = undefined;
+    var line_selector: *kernel.PerfEvent = undefined;
+    var selected_line: usize = 0;
+};
+
+const ProbeDef = struct {
+    filter: [:0]const u8,
+    pre: ?*const fn (*FProbe, c_ulong, c_ulong, *FtraceRegs, ?*anyopaque) callconv(.c) c_int = null,
+    post: ?*const fn (*FProbe, c_ulong, c_ulong, *FtraceRegs, ?*anyopaque) callconv(.c) void = null,
+    data_size: usize = 0,
+};
+
+const probes_list = [_]ProbeDef{
+    .{ .filter = "kernel_clone", .post = clone },
+    .{ .filter = "futex_wait", .pre = futexWaitStart, .post = futexWaitEnd, .data_size = @sizeOf(WaitProbeCtx) },
+    .{ .filter = "futex_wake", .pre = futexWake },
+    .{ .filter = "do_exit", .pre = exit },
+};
+
+var fprobes: [probes_list.len]FProbe = undefined;
+
 pub fn init() !void {
-    try probes.init();
+    try state.transfer_map.growExponential(allocator);
+
+    inline for (probes_list, 0..) |def, i| {
+        fprobes[i] = .{
+            .callbacks = .{ .pre_handler = def.pre, .post_handler = def.post },
+            .entry_data_size = @intCast(def.data_size),
+        };
+        try fprobes[i].register(def.filter, null);
+    }
 }
 
 pub fn deinit() void {
-    probes.deinit();
+    for (&fprobes) |*probe| probe.unregister();
+
+    state.transfer_map.deinit(allocator);
+    state.thread_points.deinit(allocator);
+
+    state.line_selector.deinit();
+    state.profiler.deinit();
+
+    std.log.info("Global virtual clock at exit: {}", .{state.lead_progress.load(.monotonic)});
 }
 
 pub fn profilePid(pid: Pid) void {
-    probes.profilePid(pid);
-    profileLoop();
+    state.thread_points.put(allocator, @intCast(pid), 0) catch {};
+    state.instrumented_pid.store(pid, .release);
+
+    var attr = std.os.linux.perf_event_attr{
+        .type = .SOFTWARE,
+        .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
+        .sample_period_or_freq = 200 * std.time.ns_per_us,
+        .wakeup_events_or_watermark = 1,
+        .flags = .{
+            .disabled = true,
+            .inherit = true,
+            .exclude_host = true,
+            .exclude_guest = true,
+            .exclude_hv = true,
+            .exclude_idle = true,
+            .exclude_kernel = true,
+        },
+    };
+    state.line_selector = kernel.PerfEvent.init(&attr, -1, pid, line_selector_cb, &state.selected_line) catch return;
+    state.line_selector.enable();
+
+    attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
+    state.profiler = kernel.PerfEvent.init(&attr, -1, pid, profiler_cb, &state.selected_line) catch return;
+    state.profiler.enable();
+}
+
+fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+    state.line_selector.disable();
+    const ptr: *usize = if (event.context()) |ctx| @ptrCast(@alignCast(ctx)) else return;
+    ptr.* = regs.ip;
+}
+
+fn profiler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+    const ptr: *const usize = if (event.context()) |ctx| @ptrCast(@alignCast(ctx)) else return;
+    if (ptr.* == regs.ip) increment();
 }
 
 fn profileLoop() void {
@@ -52,148 +139,70 @@ fn profileLoop() void {
     //     cooldown()
 }
 
-const probes = struct {
-    const ThreadWaitCounterMap = thread_safe.SegmentedSparseVector(WaitCounter, std.math.maxInt(WaitCounter));
-    const FutexWakerWaitCountMap = thread_safe.AddressMap(WaitCounter, std.math.maxInt(WaitCounter));
+fn increment() void {
+    if (state.thread_points.increment(@intCast(kernel.current_task.tid()))) |counter| {
+        _ = state.lead_progress.fetchMax(counter, .monotonic);
+    }
+}
 
-    const WaitProbeData = struct {
-        wait_debit: WaitCounter,
-        futex_hande: FutexHandle,
+fn notInstrumented() bool {
+    return kernel.current_task.pid() != state.instrumented_pid.load(.monotonic);
+}
+
+fn clone(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) void {
+    if (notInstrumented()) return;
+
+    const parent_wait_count = state.thread_points.get(@intCast(kernel.current_task.tid())).?;
+    state.thread_points.put(allocator, @intCast(regs.getReturnValue()), parent_wait_count) catch {};
+}
+
+fn futexWaitStart(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
+    if (notInstrumented()) return 1; // returning 1 will cancel futexWaitEnd call
+
+    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
+
+    data.lag_debit = state.lead_progress.load(.monotonic) - state.thread_points.get(@intCast(kernel.current_task.tid())).?;
+    data.futex_handle = regs.getArgument(0); // We save the handle since it gets clobbered
+
+    return 0;
+}
+
+fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
+    if (regs.getReturnValue() != 0) return; // Not woke by other threads.
+
+    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
+
+    kernel.time.delay.us(data.lag_debit * state.delay_per_point_us.load(.monotonic));
+
+    const waker_wait_counter = state.transfer_map.get(data.futex_handle) orelse {
+        @branchHint(.cold);
+        //TODO: signal error
+        return;
     };
 
-    fn ErrorQueue(Error: type) type {
-        if (@typeInfo(Error) != .error_set) @compileError("ErrorQueue only supports error sets");
-        return struct {
-            errors: [16]Error,
-            index: std.atomic.Value(u8),
+    state.thread_points.put(allocator, @intCast(kernel.current_task.tid()), waker_wait_counter) catch {};
+}
 
-            pub const init = @This(){ .errors = @splat(undefined), .index = .init(0) };
+fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
+    if (notInstrumented()) return 1;
 
-            pub fn signalError(this: *@This(), err: Error) void {
-                @branchHint(.cold);
-                const index = this.index.fetchAdd(1, .monotonic);
-                if (this.errors.len > index) this.errors[index] = err;
-            }
+    const tid: usize = @intCast(kernel.current_task.tid());
 
-            pub fn getOccurred(this: @This()) ?[]Error {
-                const index = @min(this.index.load(.monotonic), this.errors.len);
-                return if (index != 0) this.errors[0..index] else null;
-            }
+    const this_thread_wait_counter = state.thread_points.get(tid).?;
+    state.transfer_map.put(allocator, regs.getArgument(0), this_thread_wait_counter) catch return 1; //TODO: should signal error;
 
-            pub fn someWhereLost(this: @This()) bool {
-                return this.index.load(.monotonic) > this.errors.len;
-            }
+    const wait_debit = state.lead_progress.load(.monotonic) - this_thread_wait_counter;
+    kernel.time.delay.us(wait_debit * state.delay_per_point_us.load(.monotonic));
 
-            pub fn clear(this: *@This()) void {
-                this.index.store(0, .monotonic);
-            }
-        };
-    }
+    return 0;
+}
 
-    const Errors = error{};
+fn exit(_: *FProbe, _: c_ulong, _: c_ulong, _: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
+    if (notInstrumented()) return 1;
+    const this_thread_wait_count = state.thread_points.get(@intCast(kernel.current_task.tid())).?;
 
-    var histrumented_pid: std.atomic.Value(Pid) = .init(0);
-    var wait_lenght: std.atomic.Value(usize) = .init(0);
+    const wait_debit = state.lead_progress.load(.monotonic) - this_thread_wait_count;
+    kernel.time.delay.us(wait_debit * state.delay_per_point_us.load(.monotonic));
 
-    var global_wait_counter: std.atomic.Value(WaitCounter) = .init(0);
-    var threads_wait_count: ThreadWaitCounterMap = .init;
-    var futex_wakers_wait_count: FutexWakerWaitCountMap = .init;
-
-    const filters = [_][:0]const u8{ "kernel_clone", "futex_wait", "futex_wake", "do_exit" };
-    var fprobes = [filters.len]FProbe{
-        .{ .callbacks = .{ .post_handler = &clone } },
-        .{ .callbacks = .{ .pre_handler = &futexWaitStart, .post_handler = &futexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeData) },
-        .{ .callbacks = .{ .pre_handler = &futexWake } },
-        .{ .callbacks = .{ .pre_handler = &exit } },
-    };
-
-    pub fn init() !void {
-        try futex_wakers_wait_count.growExponential(allocator);
-        for (fprobes[0..], filters) |*probe, filter| {
-            try probe.register(filter, null);
-        }
-    }
-
-    pub fn deinit() void {
-        threads_wait_count.deinit(allocator);
-        futex_wakers_wait_count.deinit(allocator);
-
-        for (fprobes[0..]) |*probe| {
-            probe.unregister();
-        }
-    }
-
-    pub fn profilePid(pid: Pid) void {
-        threads_wait_count.put(allocator, @intCast(pid), 0) catch {};
-        histrumented_pid.store(pid, .release);
-    }
-
-    fn increment() void {
-        const this_thread_wait_count = threads_wait_count.getPtr(@intCast(kernel.current_task.tid()));
-        this_thread_wait_count.* += 1;
-
-        _ = global_wait_counter.cmpxchgStrong(this_thread_wait_count.* - 1, this_thread_wait_count.*, .monotonic, .monotonic);
-    }
-
-    fn not_histrumented() bool {
-        return kernel.current_task.pid() != histrumented_pid.load(.monotonic);
-    }
-
-    fn clone(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) void {
-        if (not_histrumented()) return;
-
-        const parent_wait_count = threads_wait_count.get(@intCast(kernel.current_task.tid())).?;
-        threads_wait_count.put(allocator, @intCast(regs.getReturnValue()), parent_wait_count) catch {};
-    }
-
-    fn futexWaitStart(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
-        if (not_histrumented()) return 1; // returning 1 will cancel futexWaitEnd call
-
-        const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
-
-        data.wait_debit = global_wait_counter.load(.monotonic) - threads_wait_count.get(@intCast(kernel.current_task.tid())).?;
-        data.futex_hande = regs.getArgument(0); // We save the handle since it gets clobbered
-
-        return 0;
-    }
-
-    fn futexWaitEnd(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
-        if (regs.getReturnValue() != 0) return; // Not woke by other threads.
-
-        const data: *WaitProbeData = @ptrCast(@alignCast(data_opaque.?));
-
-        kernel.time.delay.us(data.wait_debit * wait_lenght.load(.monotonic));
-
-        const waker_wait_counter = futex_wakers_wait_count.get(data.futex_hande) orelse {
-            @branchHint(.cold);
-            //TODO: signal error
-            return;
-        };
-
-        threads_wait_count.put(allocator, @intCast(kernel.current_task.tid()), waker_wait_counter) catch {};
-    }
-
-    fn futexWake(_: *FProbe, _: c_ulong, _: c_ulong, regs: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
-        if (not_histrumented()) return 1;
-
-        const tid: usize = @intCast(kernel.current_task.tid());
-
-        const this_thread_wait_counter = threads_wait_count.get(tid).?;
-        futex_wakers_wait_count.put(allocator, regs.getArgument(0), this_thread_wait_counter) catch return 1; //TODO: should signal error;
-
-        const wait_debit = global_wait_counter.load(.monotonic) - this_thread_wait_counter;
-        kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
-
-        return 0;
-    }
-
-    fn exit(_: *FProbe, _: c_ulong, _: c_ulong, _: *FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
-        if (not_histrumented()) return 1;
-        const this_thread_wait_count = threads_wait_count.get(@intCast(kernel.current_task.tid())).?;
-
-        const wait_debit = global_wait_counter.load(.monotonic) - this_thread_wait_count;
-        kernel.time.delay.us(wait_debit * wait_lenght.load(.monotonic));
-
-        return 0;
-    }
-};
+    return 0;
+}

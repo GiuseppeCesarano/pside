@@ -22,11 +22,6 @@ export fn init_module() linksection(".init.text") c_int {
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    const Atomic = std.atomic.Value(usize);
-    const atomics: *[8]Atomic = @alignCast(std.mem.bytesAsValue([8]Atomic, chardev.shared_buffer()[0 .. @sizeOf(Atomic) * 9]));
-    for (atomics) |*value| {
-        std.log.info("{}", .{value.load(.monotonic)});
-    }
     chardev.remove();
     causal_engine.deinit();
 }

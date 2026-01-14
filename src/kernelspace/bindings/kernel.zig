@@ -472,8 +472,8 @@ pub const PerfEvent = opaque {
     } || error{Unexpected};
 
     extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
-    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, context: ?*anyopaque) InitErrors!*@This() {
-        const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, context);
+    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitErrors!*@This() {
+        const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, cntxt);
         return switch (linux.errno(rc)) {
             .SUCCESS => @ptrFromInt(rc),
             .INVAL => InitErrors.InvalidConfiguration,
@@ -499,8 +499,13 @@ pub const PerfEvent = opaque {
     }
 
     extern fn c_perf_event_release_kernel(*@This()) c_int;
-    pub fn deint(this: *@This()) void {
-        _ = c_perf_event_release_kernel(this);
+    pub fn deinit(this: ?*@This()) void {
+        if (this) |t| _ = c_perf_event_release_kernel(t);
+    }
+
+    extern fn c_perf_event_context(*@This()) ?*anyopaque;
+    pub fn context(this: *@This()) ?*anyopaque {
+        return c_perf_event_context(this);
     }
 };
 

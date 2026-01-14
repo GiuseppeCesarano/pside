@@ -102,6 +102,7 @@ struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
 void c_perf_event_enable(struct perf_event *);
 void c_perf_event_disable(struct perf_event *);
 int c_perf_event_release_kernel(struct perf_event *);
+void *c_perf_event_context(struct perf_event *);
 
 /* Implementations */
 
@@ -323,4 +324,8 @@ void c_perf_event_disable(struct perf_event *event) {
 
 int c_perf_event_release_kernel(struct perf_event *event) {
   return perf_event_release_kernel(event);
+}
+
+void *c_perf_event_context(struct perf_event *event) {
+  return event->overflow_handler_context;
 }
