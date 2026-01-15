@@ -1,5 +1,5 @@
 pub inline fn throughputPoint(comptime name: []const u8) void {
-    if (name.len >= 256) @compileError("PSIDE point name exceeds 255 characters");
+    if (name.len == 0) @compileError("PSIDE point needs a name");
 
     asm volatile (
         \\   .p2align 4

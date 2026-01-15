@@ -1,6 +1,5 @@
 #define PSIDE_THROUGHPUT_POINT(name)                                           \
-  static_assert(sizeof(name) <= 256,                                           \
-                "PSIDE point name exceeds 255 characters");                    \
+  static_assert(sizeof(name) != 0, "PSIDE point needs a neme");                \
   __asm__ __volatile__(                                                        \
       ".p2align 4\n\t"                                                         \
       "1:\n\t"                                                                 \

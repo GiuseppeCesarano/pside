@@ -2,7 +2,7 @@ const std = @import("std");
 const Program = @import("Program.zig");
 const elf = std.elf;
 
-pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) !std.ArrayList(usize) {
+pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const usize {
     const path = std.mem.span(user_program.path);
     var file = try if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{})
@@ -47,23 +47,37 @@ fn getSectionByName(header: elf.Header, reader: *std.Io.File.Reader, target_name
     } else null;
 }
 
-fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, name: []const u8, allocator: std.mem.Allocator) !std.ArrayList(usize) {
+fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, name: []const u8, allocator: std.mem.Allocator) ![]const usize {
     try reader.seekTo(shdr.sh_offset);
+    const section_data = try reader.interface.readAlloc(allocator, shdr.sh_size);
+    defer allocator.free(section_data);
 
-    var addr = try reader.interface.takeInt(u64, header.endian);
-    var read_name = try reader.interface.takeSentinel(0);
+    var buffer_reader: std.Io.Reader = .fixed(section_data);
+
+    var addr = try buffer_reader.takeInt(u64, header.endian);
+    var read_name = try buffer_reader.takeSentinel(0);
 
     const selected_name = if (name.len != 0) name else read_name;
+    if (selected_name.len == 0)
+        return error.MalformedElfSection;
 
-    var addresses: std.ArrayList(usize) = try .initCapacity(allocator, 16);
-    errdefer addresses.deinit(allocator);
+    const len = std.mem.count(u8, section_data, selected_name);
+    if (len == 0) return error.NoProgressPointsWithSuchName;
 
-    var i: usize = shdr.sh_offset + @sizeOf(u64) + read_name.len;
-    while (i < shdr.sh_offset + shdr.sh_size) : (i += @sizeOf(u64) + read_name.len) {
-        if (std.mem.eql(u8, read_name, selected_name)) try addresses.append(allocator, addr -% header.entry);
-        addr = try reader.interface.takeInt(u64, header.endian);
-        read_name = try reader.interface.takeSentinel(0);
+    const points = try allocator.alloc(usize, len);
+    errdefer allocator.free(points);
+    @memset(points, 0);
+
+    var i: usize = 0;
+    while (buffer_reader.end - buffer_reader.seek > @sizeOf(u64)) {
+        if (std.mem.eql(u8, read_name, selected_name)) {
+            points[i] = addr -% header.entry;
+            i += 1;
+        }
+
+        addr = try buffer_reader.takeInt(u64, header.endian);
+        read_name = try buffer_reader.takeSentinel(0);
     }
 
-    return if (addresses.items.len != 0) addresses else error.NoProgressPointsWithSuchName;
+    return points;
 }

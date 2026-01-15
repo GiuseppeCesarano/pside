@@ -150,7 +150,6 @@ pub fn start(this: @This()) !void {
 pub fn kill(this: @This()) !void {
     return switch (linux.errno(linux.kill(this.pid, .KILL))) {
         .SUCCESS => {},
-        .INVAL => unreachable,
         .PERM => error.PermissionDenied,
         .SRCH => error.ProcessNotFound,
         else => error.Unexpected,
