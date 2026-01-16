@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     const run_bindings_tests = b.addRunArtifact(bindings_tests);
 
     const thread_safe_tests = b.addTest(.{ .root_module = b.addModule("thread_safe", .{
-        .root_source_file = b.path("src/kernelspace/thread_safe.zig"),
+        .root_source_file = b.path("src/kernelspace/causal/thread_safe.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = true,

@@ -37,7 +37,7 @@ pub const state = struct {
 
     var lead_progress = std.atomic.Value(ProgressPoint).init(0);
     var thread_points: ThreadProgressMap = .init;
-    var transfer_map: ProgressTransferMap = .init;
+    var transfer_map: ProgressTransferMap = undefined;
 
     var profiler: *kernel.PerfEvent = undefined;
     var line_selector: *kernel.PerfEvent = undefined;
@@ -61,7 +61,7 @@ const probes_list = [_]ProbeDef{
 var fprobes: [probes_list.len]FProbe = undefined;
 
 pub fn init() !void {
-    try state.transfer_map.growExponential(allocator);
+    state.transfer_map = try .init(allocator);
 
     inline for (probes_list, 0..) |def, i| {
         fprobes[i] = .{

@@ -118,7 +118,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
         }
 
         fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
-            @branchHint(.unlikely);
+            @branchHint(.cold);
 
             const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
             for (new_blocks) |*new_block| {
@@ -194,11 +194,17 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
 
         keys_with_metadata: []KeyWithMetadataAtomic,
         values: [*]std.atomic.Value(Value),
-        capacity: std.atomic.Value(isize),
 
         ref_gate: RefGate,
 
-        pub const init: @This() = .{ .keys_with_metadata = &.{}, .values = undefined, .capacity = .init(0), .ref_gate = .{} };
+        pub fn init(allocator: std.mem.Allocator) !@This() {
+            var r: @This() = .{ .keys_with_metadata = &.{}, .values = undefined, .ref_gate = .{} };
+
+            r.ref_gate.increment();
+            try r.growExponential(allocator);
+            r.ref_gate.decrement();
+            return r;
+        }
 
         pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
             allocator.free(this.values[0..this.keys_with_metadata.len]);
@@ -231,44 +237,51 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
         }
 
         pub fn put(this: *@This(), allocator: std.mem.Allocator, key: Key, value: Value) !void {
-            while (this.capacity.fetchSub(1, .monotonic) <= 1) try this.growExponential(allocator);
-
             const hashed_key = hash(key);
 
             this.ref_gate.increment();
-            this.putUnsafe(key, hashed_key, value);
-            this.ref_gate.decrement();
+            defer this.ref_gate.decrement();
+
+            while (!this.putUnsafe(key, hashed_key, value)) {
+                try this.growExponential(allocator);
+            }
         }
 
-        fn putUnsafe(this: *@This(), key: Key, hashed_key: Key, value: Value) void {
+        fn putUnsafe(this: *@This(), key: Key, hashed_key: Key, value: Value) bool {
             const new_key_data: KeyWithMetadata = .{
                 .full = 1,
                 .collided = 0,
                 .key = @truncate(key),
             };
 
-            var i: usize = 0;
             const len = this.keys_with_metadata.len;
             std.debug.assert(@popCount(len) <= 1);
             const offset = hashed_key & (len - 1);
-            while (i < len) : (i += 1) {
+
+            var i: usize = 0;
+            return found_spot: while (i < len) : (i += 1) {
                 const index = (i + offset) & (len - 1);
-                if (this.keys_with_metadata[index].cmpxchgStrong(KeyWithMetadata.empty_bit, new_key_data, .monotonic, .monotonic) == null) {
+                const old_key_data = this.keys_with_metadata[index].cmpxchgStrong(KeyWithMetadata.empty_bit, new_key_data, .monotonic, .monotonic);
+
+                if (old_key_data == null or old_key_data.?.key == new_key_data.key) {
                     this.values[index].store(value, .monotonic);
-                    return;
+                    break :found_spot true;
                 }
+
                 _ = this.keys_with_metadata[index].fetchOr(KeyWithMetadata.collided_bit, .monotonic);
-            }
+            } else break :found_spot false;
         }
 
-        pub fn growExponential(this: *@This(), allocator: std.mem.Allocator) !void {
-            @branchHint(.unlikely);
+        fn growExponential(this: *@This(), allocator: std.mem.Allocator) !void {
+            @branchHint(.cold);
 
-            this.ref_gate.increment();
             const len = this.keys_with_metadata.len;
             std.debug.assert(@popCount(len) <= 1);
             const new_len = @max(len << 1, 256);
+
+            // Drop callee reference
             this.ref_gate.decrement();
+            defer this.ref_gate.increment();
 
             const new_keys_with_metadata = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
             for (new_keys_with_metadata) |*new_key| new_key.store(KeyWithMetadata.empty_bit, .unordered);
@@ -277,7 +290,6 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             for (new_values) |*new_value| new_value.store(empty_value, .unordered);
 
             this.ref_gate.close();
-
             const old_keys_with_metadata = this.keys_with_metadata;
             const old_values = this.values;
 
@@ -291,14 +303,13 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
 
             this.ref_gate.waitAllReferenceDecrement();
 
-            this.capacity.store(@intCast(new_len - old_keys_with_metadata.len), .monotonic);
-
             this.keys_with_metadata = new_keys_with_metadata;
             this.values = @ptrCast(new_values.ptr);
 
             for (old_keys_with_metadata, old_values) |*old_kwm, *old_value| {
-                const kwm = old_kwm.load(.monotonic);
-                if (kwm.full == 1) this.putUnsafe(kwm.key, hash(kwm.key), old_value.load(.monotonic));
+                const kwm = old_kwm.load(.unordered);
+                if (kwm.full == 1)
+                    std.debug.assert(this.putUnsafe(kwm.key, hash(kwm.key), old_value.load(.unordered)));
             }
 
             this.ref_gate.open();
@@ -405,7 +416,7 @@ test "SparseVector: concurrent growth and access" {
 }
 
 test "AddressMap: single thread functional" {
-    var map = AddressMap(u64, std.math.maxInt(u64)).init;
+    var map = try AddressMap(u64, std.math.maxInt(u64)).init(std.testing.allocator);
     defer map.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(null, map.get(999));
@@ -426,7 +437,7 @@ test "AddressMap: concurrent stress test" {
     const allocator = allocator_status.allocator();
 
     const Map = AddressMap(u64, std.math.maxInt(u64));
-    var map = Map.init;
+    var map = try Map.init(std.testing.allocator);
     defer map.deinit(allocator);
     const thread_count = 4;
     const ops_per_thread = 10000;
