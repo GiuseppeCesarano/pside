@@ -45,7 +45,7 @@ const RefGate = struct {
 pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
     return struct {
         const ValueAtomic = std.atomic.Value(Value);
-        const block_len = @divExact(4096, @sizeOf(ValueAtomic));
+        const block_len = @divExact(std.heap.page_size_min, @sizeOf(ValueAtomic));
 
         const Block = [block_len]ValueAtomic;
 

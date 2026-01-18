@@ -1,7 +1,7 @@
 const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("kernel");
-const causal_engine = @import("causal/engine.zig");
+const CausalInfereceEngine = @import("causal/InferenceEngine.zig");
 
 const name = "pside";
 
@@ -12,18 +12,19 @@ pub const std_options: std.Options = .{
 };
 
 var chardev: kernel.CharDevice = undefined;
+var engine: CausalInfereceEngine = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, ioctlHandler) catch return 1;
     std.log.debug("chardev created at: /dev/" ++ name, .{});
-    causal_engine.init() catch return 1;
+    engine = CausalInfereceEngine.init() catch return 1;
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
     chardev.remove();
-    causal_engine.deinit();
+    engine.deinit();
 }
 
 fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_long {
@@ -33,7 +34,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
     if (copied.len != @sizeOf(communications.Data)) return code(.FAULT);
 
     switch (@as(communications.Commands, @enumFromInt(command))) {
-        .start_profiler_on_pid => causal_engine.profilePid(data.pid),
+        .start_profiler_on_pid => engine.profilePid(data.pid) catch return code(.IO), //TODO: change to a error list
         else => return code(.INVAL),
     }
 
