@@ -61,7 +61,7 @@ lead_progress: std.atomic.Value(ProgressPoint),
 thread_points: ThreadProgressMap,
 transfer_map: ProgressTransferMap,
 
-profiler: *kernel.PerfEvent,
+sampler: *kernel.PerfEvent,
 line_selector: *kernel.PerfEvent,
 selected_line: usize,
 
@@ -76,7 +76,7 @@ pub fn init() !@This() {
         .thread_points = .init,
         .transfer_map = try .init(allocator),
 
-        .profiler = undefined,
+        .sampler = undefined,
         .line_selector = undefined,
         .selected_line = 0,
 
@@ -111,7 +111,7 @@ pub fn deinit(this: *@This()) void {
     this.thread_points.deinit(allocator);
 
     this.line_selector.deinit();
-    this.profiler.deinit();
+    this.sampler.deinit();
 
     std.log.info("Global virtual clock at exit: {}", .{this.lead_progress.load(.monotonic)});
 }
@@ -141,8 +141,8 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     this.line_selector.enable();
 
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
-    this.profiler = kernel.PerfEvent.init(&attr, -1, pid, profiler_cb, this) catch return;
-    this.profiler.enable();
+    this.sampler = kernel.PerfEvent.init(&attr, -1, pid, sampler_cb, this) catch return;
+    this.sampler.enable();
 }
 
 fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -151,7 +151,7 @@ fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtReg
     this.selected_line = regs.ip;
 }
 
-fn profiler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+fn sampler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     if (this.selected_line == regs.ip) this.increment();
 }
