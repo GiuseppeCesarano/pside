@@ -185,7 +185,7 @@ fn notInstrumented(this: *@This()) bool {
 
 fn thisFromProbe(comptime name: []const u8, probe: *kernel.probe.F) *@This() {
     const probe_ptr: *Probes.FilterAndProbe = @fieldParentPtr("probe", probe);
-    return @fieldParentPtr("probes", @as(*Probes, @fieldParentPtr(name, probe_ptr)));
+    return @alignCast(@fieldParentPtr("probes", @as(*Probes, @fieldParentPtr(name, probe_ptr))));
 }
 
 fn clone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) void {

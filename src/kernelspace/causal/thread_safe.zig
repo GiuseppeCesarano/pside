@@ -4,7 +4,7 @@ const RefGate = struct {
     const lock_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
     const references_mask = ~lock_bit;
 
-    reference: std.atomic.Value(usize) = .init(0),
+    reference: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
 
     pub inline fn increment(this: *@This()) void {
         const ref = this.reference.fetchAdd(1, .acquire);
@@ -420,6 +420,11 @@ test "AddressMap: single thread functional" {
     defer map.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(null, map.get(999));
+
+    try map.put(std.testing.allocator, 10, 0);
+    try std.testing.expectEqual(0, map.get(10));
+    try map.put(std.testing.allocator, 10, 99);
+    try std.testing.expectEqual(99, map.get(10));
 
     var i: usize = 0;
     while (i < 3000) : (i += 1) {
