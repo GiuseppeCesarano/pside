@@ -54,8 +54,9 @@ const Probes = struct {
     }
 };
 
-instrumented_pid: std.atomic.Value(Pid),
+instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 delay_per_point_us: std.atomic.Value(usize),
+selected_line: std.atomic.Value(usize),
 
 lead_progress: std.atomic.Value(ProgressPoint),
 thread_points: ThreadProgressMap,
@@ -63,7 +64,6 @@ transfer_map: ProgressTransferMap,
 
 sampler: *kernel.PerfEvent,
 line_selector: *kernel.PerfEvent,
-selected_line: usize,
 
 probes: Probes,
 
@@ -71,6 +71,7 @@ pub fn init() !@This() {
     return .{
         .instrumented_pid = .init(0),
         .delay_per_point_us = .init(0),
+        .selected_line = .init(0),
 
         .lead_progress = .init(0),
         .thread_points = .init,
@@ -78,7 +79,6 @@ pub fn init() !@This() {
 
         .sampler = undefined,
         .line_selector = undefined,
-        .selected_line = 0,
 
         .probes = .{
             .clone = .{
@@ -148,12 +148,12 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
 fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     this.line_selector.disable();
-    this.selected_line = regs.ip;
+    this.selected_line.store(regs.ip, .monotonic);
 }
 
 fn sampler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
-    if (this.selected_line == regs.ip) this.increment();
+    if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
 }
 
 fn profileLoop() void {

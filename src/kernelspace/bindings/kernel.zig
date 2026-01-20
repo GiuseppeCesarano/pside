@@ -512,7 +512,7 @@ pub const PerfEvent = opaque {
 pub const Thread = opaque {
     pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
     extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *@This();
-    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) ?*@This() {
+    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *@This() {
         return c_kthread_run(thread_handler, data, name);
     }
 
