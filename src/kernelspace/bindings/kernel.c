@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/ftrace_regs.h>
 #include <linux/io.h>
+#include <linux/kthread.h>
 #include <linux/ktime.h>
 #include <linux/mm.h>
 #include <linux/module.h>
@@ -103,6 +104,12 @@ void c_perf_event_enable(struct perf_event *);
 void c_perf_event_disable(struct perf_event *);
 int c_perf_event_release_kernel(struct perf_event *);
 void *c_perf_event_context(struct perf_event *);
+
+/* Kthread */
+
+struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
+int c_kthread_stop(struct task_struct *);
+bool c_kthread_should_stop(void);
 
 /* Implementations */
 
@@ -329,3 +336,13 @@ int c_perf_event_release_kernel(struct perf_event *event) {
 void *c_perf_event_context(struct perf_event *event) {
   return event->overflow_handler_context;
 }
+
+/* Kthread */
+struct task_struct *c_kthread_run(int (*threadfn)(void *data), void *data,
+                                  const char *name) {
+  return kthread_run(threadfn, data, name);
+}
+
+int c_kthread_stop(struct task_struct *k) { return kthread_stop(k); }
+
+bool c_kthread_should_stop(void) { return kthread_should_stop(); }

@@ -509,6 +509,24 @@ pub const PerfEvent = opaque {
     }
 };
 
+pub const Thread = opaque {
+    pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
+    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *@This();
+    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) ?*@This() {
+        return c_kthread_run(thread_handler, data, name);
+    }
+
+    extern fn c_kthread_stop(*@This()) c_int;
+    pub fn stop(this: *@This()) void {
+        _ = c_kthread_stop(this); //TODO: this should return errors
+    }
+
+    extern fn c_kthread_should_stop() bool;
+    pub fn shouldThisStop() bool {
+        return c_kthread_should_stop();
+    }
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);
