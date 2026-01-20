@@ -52,6 +52,20 @@ const Probes = struct {
             f.probe.unregister();
         }
     }
+
+    pub fn enableAll(this: *@This()) void {
+        inline for (std.meta.fields(@This())) |field| {
+            const f = &@field(this, field.name);
+            f.probe.enable();
+        }
+    }
+
+    pub fn disableAll(this: *@This()) void {
+        inline for (std.meta.fields(@This())) |field| {
+            const f = &@field(this, field.name);
+            f.probe.disable();
+        }
+    }
 };
 
 instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
@@ -62,6 +76,7 @@ lead_progress: std.atomic.Value(ProgressPoint),
 thread_points: ThreadProgressMap,
 transfer_map: ProgressTransferMap,
 
+profiler_thread: *kernel.Thread,
 sampler: *kernel.PerfEvent,
 line_selector: *kernel.PerfEvent,
 
@@ -77,6 +92,7 @@ pub fn init() !@This() {
         .thread_points = .init,
         .transfer_map = try .init(allocator),
 
+        .profiler_thread = undefined,
         .sampler = undefined,
         .line_selector = undefined,
 
@@ -105,22 +121,25 @@ pub fn init() !@This() {
 }
 
 pub fn deinit(this: *@This()) void {
+    this.profiler_thread.stop();
+
+    this.line_selector.deinit();
+    this.sampler.deinit();
+
     this.probes.unregisterAll();
 
     this.transfer_map.deinit(allocator);
     this.thread_points.deinit(allocator);
 
-    this.line_selector.deinit();
-    this.sampler.deinit();
-
     std.log.info("Global virtual clock at exit: {}", .{this.lead_progress.load(.monotonic)});
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {
-    try this.probes.registerAll();
-
     this.thread_points.put(allocator, @intCast(pid), 0) catch {};
     this.instrumented_pid.store(pid, .release);
+
+    try this.probes.registerAll();
+    this.probes.disableAll();
 
     var attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
@@ -138,25 +157,16 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
         },
     };
     this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, line_selector_cb, this) catch return;
-    this.line_selector.enable();
 
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
     this.sampler = kernel.PerfEvent.init(&attr, -1, pid, sampler_cb, this) catch return;
-    this.sampler.enable();
+
+    this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
 
-fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *@This() = @ptrCast(@alignCast(event.context().?));
-    this.line_selector.disable();
-    this.selected_line.store(regs.ip, .monotonic);
-}
-
-fn sampler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *@This() = @ptrCast(@alignCast(event.context().?));
-    if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
-}
-
-fn profileLoop() void {
+fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
+    const this: *@This() = @ptrCast(@alignCast(ctx));
+    _ = this;
     // while running:
     //     wait_for_points_if_needed()
     //     line = pick_line()
@@ -171,6 +181,21 @@ fn profileLoop() void {
     //     log_results()
     //     experiment_length = adjust_length(min_delta)
     //     cooldown()
+    while (!kernel.Thread.shouldThisStop()) {
+        std.atomic.spinLoopHint();
+    }
+    return 0;
+}
+
+fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(event.context().?));
+    this.line_selector.disable();
+    this.selected_line.store(regs.ip, .monotonic);
+}
+
+fn sampler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(event.context().?));
+    if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
 }
 
 fn increment(this: *@This()) void {
