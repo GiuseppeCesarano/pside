@@ -69,12 +69,15 @@ const Probes = struct {
 };
 
 instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
+experiment_length: std.atomic.Value(usize),
+
 delay_per_point_us: std.atomic.Value(usize),
 selected_line: std.atomic.Value(usize),
 
 lead_progress: std.atomic.Value(ProgressPoint),
 thread_points: ThreadProgressMap,
 transfer_map: ProgressTransferMap,
+active_threads: std.atomic.Value(usize),
 
 profiler_thread: *kernel.Thread,
 sampler: *kernel.PerfEvent,
@@ -82,15 +85,33 @@ line_selector: *kernel.PerfEvent,
 
 probes: Probes,
 
+const task_clock_attr = std.os.linux.perf_event_attr{
+    .type = .SOFTWARE,
+    .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
+    .sample_period_or_freq = 100,
+    .wakeup_events_or_watermark = 1,
+    .flags = .{
+        .disabled = true,
+        .inherit = true,
+        .exclude_host = true,
+        .exclude_guest = true,
+        .exclude_hv = true,
+        .exclude_idle = true,
+        .exclude_kernel = true,
+    },
+};
+
 pub fn init() !@This() {
     return .{
         .instrumented_pid = .init(0),
+        .experiment_length = .init(100 * std.time.us_per_ms),
         .delay_per_point_us = .init(0),
         .selected_line = .init(0),
 
         .lead_progress = .init(0),
         .thread_points = .init,
         .transfer_map = try .init(allocator),
+        .active_threads = .init(1),
 
         .profiler_thread = undefined,
         .sampler = undefined,
@@ -141,59 +162,60 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     try this.probes.registerAll();
     this.probes.disableAll();
 
-    var attr = std.os.linux.perf_event_attr{
-        .type = .SOFTWARE,
-        .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
-        .sample_period_or_freq = 200 * std.time.ns_per_us,
-        .wakeup_events_or_watermark = 1,
-        .flags = .{
-            .disabled = true,
-            .inherit = true,
-            .exclude_host = true,
-            .exclude_guest = true,
-            .exclude_hv = true,
-            .exclude_idle = true,
-            .exclude_kernel = true,
-        },
-    };
-    this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, line_selector_cb, this) catch return;
+    var attr = task_clock_attr;
+    this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, lineSelectorCb, this) catch return;
 
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
-    this.sampler = kernel.PerfEvent.init(&attr, -1, pid, sampler_cb, this) catch return;
+    this.sampler = kernel.PerfEvent.init(&attr, -1, pid, samplerCb, this) catch return;
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *@This() = @ptrCast(@alignCast(ctx));
-    _ = this;
-    // while running:
-    //     wait_for_points_if_needed()
-    //     line = pick_line()
-    //     delay = pick_delay()
-    //     snapshot_all_points()
 
-    //     experiment_active = true
-    //     sleep(experiment_length)
-    //     experiment_active = false
-
-    //     compute_deltas()
-    //     log_results()
-    //     experiment_length = adjust_length(min_delta)
-    //     cooldown()
     while (!kernel.Thread.shouldThisStop()) {
-        std.atomic.spinLoopHint();
+        this.setExperimentParameters() catch return 0;
+        const snapshot = this.takeSnapshot();
+
+        this.sampler.enable();
+        this.probes.enableAll();
+        kernel.time.sleep.us(this.experiment_length.load(.monotonic));
+        this.sampler.disable();
+        this.probes.disableAll();
+
+        // TODO: winddown logic
+        // TODO: compute values
+        _ = snapshot;
     }
+
     return 0;
 }
 
-fn line_selector_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *@This() = @ptrCast(@alignCast(event.context().?));
+fn setExperimentParameters(this: *@This()) !void {
+    this.selected_line.store(0, .monotonic);
+    this.line_selector.enable();
+
+    //TODO: select dealy
+
+    while (this.selected_line.load(.monotonic) == 0) {
+        @branchHint(.unlikely);
+        if (kernel.Thread.shouldThisStop()) return error.Quit;
+    }
     this.line_selector.disable();
+}
+
+fn takeSnapshot(this: @This()) usize {
+    _ = this;
+    return 0;
+}
+
+fn lineSelectorCb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(event.context().?));
     this.selected_line.store(regs.ip, .monotonic);
 }
 
-fn sampler_cb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+fn samplerCb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
 }
@@ -219,6 +241,8 @@ fn clone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.Ftr
 
     const parent_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())).?;
     this.thread_points.put(allocator, @intCast(regs.getReturnValue()), parent_wait_count) catch {};
+
+    _ = this.active_threads.fetchAdd(1, .monotonic);
 }
 
 fn futexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
@@ -272,6 +296,8 @@ fn exit(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceR
 
     const wait_debit = this.lead_progress.load(.monotonic) - this_thread_wait_count;
     kernel.time.delay.us(wait_debit * this.delay_per_point_us.load(.monotonic));
+
+    _ = this.active_threads.fetchSub(1, .monotonic);
 
     return 0;
 }

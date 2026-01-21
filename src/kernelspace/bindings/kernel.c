@@ -111,6 +111,10 @@ struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
 int c_kthread_stop(struct task_struct *);
 bool c_kthread_should_stop(void);
 
+/* Sleep */
+
+void c_sleep(unsigned long);
+
 /* Implementations */
 
 /* Logging */
@@ -346,3 +350,6 @@ struct task_struct *c_kthread_run(int (*threadfn)(void *data), void *data,
 int c_kthread_stop(struct task_struct *k) { return kthread_stop(k); }
 
 bool c_kthread_should_stop(void) { return kthread_should_stop(); }
+
+/* Sleep */
+void c_sleep(unsigned long usecs) { fsleep(usecs); }

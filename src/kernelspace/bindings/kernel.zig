@@ -232,6 +232,13 @@ pub const time = struct {
             return @divTrunc(ms(), 1000);
         }
     };
+
+    pub const sleep = struct {
+        extern fn c_sleep(usize) void;
+        pub fn us(usec: usize) void {
+            c_sleep(usec);
+        }
+    };
 };
 
 pub const current_task = struct {
