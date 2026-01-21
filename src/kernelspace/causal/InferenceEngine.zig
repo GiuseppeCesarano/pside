@@ -120,22 +120,22 @@ pub fn init() !@This() {
         .probes = .{
             .clone = .{
                 .filter = "kernel_clone",
-                .probe = .{ .callbacks = .{ .post_handler = clone } },
+                .probe = .{ .callbacks = .{ .post_handler = onClone } },
             },
 
             .futex_wait = .{
                 .filter = "futex_wait",
-                .probe = .{ .callbacks = .{ .pre_handler = futexWaitStart, .post_handler = futexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeCtx) },
+                .probe = .{ .callbacks = .{ .pre_handler = onFutexWaitStart, .post_handler = onFutexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeCtx) },
             },
 
             .futex_wake = .{
                 .filter = "futex_wake",
-                .probe = .{ .callbacks = .{ .pre_handler = futexWake } },
+                .probe = .{ .callbacks = .{ .pre_handler = onFutexWake } },
             },
 
             .exit = .{
                 .filter = "do_exit",
-                .probe = .{ .callbacks = .{ .pre_handler = exit } },
+                .probe = .{ .callbacks = .{ .pre_handler = onExit } },
             },
         },
     };
@@ -163,10 +163,10 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     this.probes.disableAll();
 
     var attr = task_clock_attr;
-    this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, lineSelectorCb, this) catch return;
+    this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, onLineSelectTick, this) catch return;
 
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
-    this.sampler = kernel.PerfEvent.init(&attr, -1, pid, samplerCb, this) catch return;
+    this.sampler = kernel.PerfEvent.init(&attr, -1, pid, onProfilerTick, this) catch return;
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
@@ -210,15 +210,19 @@ fn takeSnapshot(this: @This()) usize {
     return 0;
 }
 
-fn lineSelectorCb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+// Perf event callabcks
+
+fn onLineSelectTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     this.selected_line.store(regs.ip, .monotonic);
 }
 
-fn samplerCb(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+fn onProfilerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
 }
+
+// Probes callback helpers
 
 fn increment(this: *@This()) void {
     if (this.thread_points.increment(@intCast(kernel.current_task.tid()))) |counter| {
@@ -226,7 +230,7 @@ fn increment(this: *@This()) void {
     }
 }
 
-fn notInstrumented(this: *@This()) bool {
+fn notTarget(this: *@This()) bool {
     return kernel.current_task.pid() != this.instrumented_pid.load(.monotonic);
 }
 
@@ -235,9 +239,11 @@ fn thisFromProbe(comptime name: []const u8, probe: *kernel.probe.F) *@This() {
     return @alignCast(@fieldParentPtr("probes", @as(*Probes, @fieldParentPtr(name, probe_ptr))));
 }
 
-fn clone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) void {
+// Probes callbacks
+
+fn onClone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) void {
     const this = thisFromProbe("clone", probe);
-    if (this.notInstrumented()) return;
+    if (this.notTarget()) return;
 
     const parent_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())).?;
     this.thread_points.put(allocator, @intCast(regs.getReturnValue()), parent_wait_count) catch {};
@@ -245,9 +251,9 @@ fn clone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.Ftr
     _ = this.active_threads.fetchAdd(1, .monotonic);
 }
 
-fn futexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
+fn onFutexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
     const this = thisFromProbe("futex_wait", probe);
-    if (this.notInstrumented()) return 1; // returning 1 will cancel futexWaitEnd call
+    if (this.notTarget()) return 1; // returning 1 will cancel futexWaitEnd call
 
     const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
 
@@ -257,7 +263,7 @@ fn futexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.
     return 0;
 }
 
-fn futexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
+fn onFutexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
     const this = thisFromProbe("futex_wait", probe);
     if (regs.getReturnValue() != 0) return; // Not woke by other threads.
 
@@ -274,9 +280,9 @@ fn futexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.pr
     this.thread_points.put(allocator, @intCast(kernel.current_task.tid()), waker_wait_counter) catch {};
 }
 
-fn futexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
+fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     const this = thisFromProbe("futex_wake", probe);
-    if (this.notInstrumented()) return 1;
+    if (this.notTarget()) return 1;
 
     const tid: usize = @intCast(kernel.current_task.tid());
 
@@ -289,9 +295,9 @@ fn futexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe
     return 0;
 }
 
-fn exit(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
+fn onExit(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     const this = thisFromProbe("exit", probe);
-    if (this.notInstrumented()) return 1;
+    if (this.notTarget()) return 1;
     const this_thread_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())).?;
 
     const wait_debit = this.lead_progress.load(.monotonic) - this_thread_wait_count;
