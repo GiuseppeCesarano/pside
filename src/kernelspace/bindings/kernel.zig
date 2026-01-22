@@ -209,8 +209,7 @@ pub const time = struct {
 
         extern fn c_mdelay(c_ulong) void;
         pub fn ms(msec: usize) void {
-            if (msec == 0) return;
-            c_mdelay(@intCast(msec));
+            if (msec != 0) c_mdelay(@intCast(msec));
         }
     };
 
@@ -236,7 +235,7 @@ pub const time = struct {
     pub const sleep = struct {
         extern fn c_sleep(usize) void;
         pub fn us(usec: usize) void {
-            c_sleep(usec);
+            if (usec != 0) c_sleep(usec);
         }
     };
 };
@@ -405,8 +404,8 @@ pub const probe = struct {
         hlist_array: ?*anyopaque = null,
 
         extern fn c_register_fprobe(*@This(), ?[*]const u8, ?[*]const u8) c_int;
-        pub fn register(this: *@This(), filter: [:0]const u8, notfilter: ?[:0]const u8) RegistrationError!void {
-            _ = try checkRegistration(c_register_fprobe(this, filter.ptr, if (notfilter) |n| n.ptr else null));
+        pub fn register(this: *@This(), filter: [*:0]const u8, notfilter: ?[:0]const u8) RegistrationError!void {
+            _ = try checkRegistration(c_register_fprobe(this, filter, if (notfilter) |n| n.ptr else null));
         }
 
         extern fn c_unregister_fprobe(*@This()) void;
