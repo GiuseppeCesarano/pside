@@ -352,4 +352,4 @@ int c_kthread_stop(struct task_struct *k) { return kthread_stop(k); }
 bool c_kthread_should_stop(void) { return kthread_should_stop(); }
 
 /* Sleep */
-void c_sleep(unsigned long usecs) { fsleep(usecs); }
+void c_sleep(unsigned long usecs) { usleep_range(usecs - 5, usecs + 5); }

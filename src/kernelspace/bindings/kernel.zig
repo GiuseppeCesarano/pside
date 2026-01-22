@@ -234,8 +234,13 @@ pub const time = struct {
 
     pub const sleep = struct {
         extern fn c_sleep(usize) void;
-        pub fn us(usec: usize) void {
-            if (usec != 0) c_sleep(usec);
+        pub inline fn us(usec: usize) void {
+            if (usec == 0) return;
+            if (usec > 5) {
+                c_sleep(usec);
+            } else {
+                delay.us(usec);
+            }
         }
     };
 };
