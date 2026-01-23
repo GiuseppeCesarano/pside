@@ -1,3 +1,4 @@
+// TODO: handle error and rewrite catches
 // TODO: missing syscalls to cover:
 
 // pthread_kill -> tgkill
@@ -245,7 +246,7 @@ fn onFutexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.
 
     const waker_wait_counter = this.transfer_map.get(data.futex_handle) orelse {
         @branchHint(.cold);
-        //TODO: signal error
+        std.log.err("TODO: onFutexWaitEnd thread_poinst null", .{});
         return;
     };
 

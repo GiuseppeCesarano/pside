@@ -281,6 +281,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             const len = this.keys_with_metadata.len;
             std.debug.assert(@popCount(len) <= 1);
             const new_len = @max(len << 1, 256);
+            std.debug.assert(@popCount(new_len) <= 1);
 
             // Drop callee reference
             this.ref_gate.decrement();
