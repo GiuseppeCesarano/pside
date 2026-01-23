@@ -6,9 +6,6 @@
 // sigwaitinfo
 // sigtimedwait
 // sigsuspend
-//
-// TODO: remove the thread_wait_count_map .? since they can actually be null
-// TODO: create error handling with push queue
 const std = @import("std");
 const kernel = @import("kernel");
 const thread_safe = @import("thread_safe.zig");
@@ -49,7 +46,7 @@ thread_points: ThreadProgressMap,
 transfer_map: ProgressTransferMap,
 
 sampler: *kernel.PerfEvent,
-line_selector: *kernel.PerfEvent,
+line_selector: *kernel.PerfEvent, // TODO: We shell reuse the sampler to select the line
 
 probes: [4]ProbeAndData,
 
@@ -128,9 +125,8 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
 
     for (&this.probes) |*probe| {
         const filter = probe.data.filter;
-        probe.data.context = this;
+        probe.data = .{ .context = this };
         try probe.probe.register(filter, null);
-        probe.probe.disable();
     }
 
     var attr = task_clock_attr;
@@ -150,10 +146,8 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const snapshot = this.takeSnapshot();
 
         this.sampler.enable();
-        for (&this.probes) |*probe| probe.probe.enable();
         kernel.time.sleep.us(this.experiment_length.load(.monotonic));
         this.sampler.disable();
-        for (&this.probes) |*probe| probe.probe.disable();
 
         // TODO: winddown logic
         // TODO: compute values
@@ -215,7 +209,12 @@ fn onClone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.F
     const this = thisFromProbe(probe);
     if (this.notTarget()) return;
 
-    const parent_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())).?;
+    const parent_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())) orelse {
+        @branchHint(.cold);
+        std.log.err("TODO: onClone thread_poinst null", .{});
+        return;
+    };
+
     this.thread_points.put(allocator, @intCast(regs.getReturnValue()), parent_wait_count) catch {};
 }
 
@@ -225,7 +224,12 @@ fn onFutexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kerne
 
     const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
 
-    data.lag_debit = this.lead_points.load(.monotonic) - this.thread_points.get(@intCast(kernel.current_task.tid())).?;
+    data.lag_debit = this.lead_points.load(.monotonic) - (this.thread_points.get(@intCast(kernel.current_task.tid())) orelse {
+        @branchHint(.cold);
+        std.log.err("TODO: onFutexWaitStart thread_poinst null", .{});
+        return 1;
+    });
+
     data.futex_handle = regs.getArgument(0); // We save the handle since it gets clobbered
 
     return 0;
@@ -254,7 +258,11 @@ fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.pro
 
     const tid: usize = @intCast(kernel.current_task.tid());
 
-    const this_thread_wait_counter = this.thread_points.get(tid).?;
+    const this_thread_wait_counter = this.thread_points.get(tid) orelse {
+        @branchHint(.cold);
+        std.log.err("TODO: onFutexWake thread_points null", .{});
+        return 1;
+    };
     this.transfer_map.put(allocator, regs.getArgument(0), this_thread_wait_counter) catch return 1; //TODO: should signal error;
 
     const wait_debit = this.lead_points.load(.monotonic) - this_thread_wait_counter;
@@ -266,7 +274,11 @@ fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.pro
 fn onExit(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
     const this = thisFromProbe(probe);
     if (this.notTarget()) return 1;
-    const this_thread_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())).?;
+    const this_thread_wait_count = this.thread_points.get(@intCast(kernel.current_task.tid())) orelse {
+        @branchHint(.cold);
+        std.log.err("TODO: onExit thread_points null", .{});
+        return 1;
+    };
 
     const wait_debit = this.lead_points.load(.monotonic) - this_thread_wait_count;
     kernel.time.delay.us(wait_debit * this.delay_per_point.load(.monotonic));

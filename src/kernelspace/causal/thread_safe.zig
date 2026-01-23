@@ -31,7 +31,7 @@ const RefGate = struct {
         }
     }
 
-    pub inline fn waitAllReferenceDecrement(this: *@This()) void {
+    pub inline fn drain(this: *@This()) void {
         while ((this.reference.load(.acquire) & references_mask) != 0) {
             std.atomic.spinLoopHint();
         }
@@ -121,43 +121,46 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             @branchHint(.cold);
 
             const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
-            for (new_blocks) |*new_block| {
-                new_block.store(null, .monotonic);
-            }
+            @memset(new_blocks, .{ .raw = null });
 
             this.ref_gate.close();
 
-            const blocks = this.blocks;
+            const old_blocks = this.blocks;
 
             // Somebody else may have grown the array already
-            if (new_len <= blocks.len) {
+            if (new_len <= old_blocks.len) {
                 @branchHint(.unlikely);
                 this.ref_gate.open();
                 allocator.free(new_blocks);
                 return;
             }
 
-            this.ref_gate.waitAllReferenceDecrement();
+            this.ref_gate.drain();
 
-            @memcpy(new_blocks[0..this.blocks.len], blocks);
+            @memcpy(new_blocks[0..old_blocks.len], old_blocks);
             this.blocks = new_blocks;
 
             this.ref_gate.open();
 
-            allocator.free(blocks);
+            allocator.free(old_blocks);
         }
 
         fn createBlockUnsafe(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
             @branchHint(.unlikely);
+
             this.ref_gate.decrement();
             const new_block = try allocator.create(Block);
-            for (new_block) |*value| value.store(empty_value, .unordered);
+            @memset(new_block, .{ .raw = empty_value });
             this.ref_gate.increment();
 
-            // Release the unrdered stores in the blocks.
             return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .acquire)) |actual| blk: {
                 @branchHint(.unlikely);
+
+                this.ref_gate.decrement();
+                defer this.ref_gate.increment();
+
                 allocator.destroy(new_block);
+
                 break :blk actual.?;
             } else new_block;
         }
@@ -178,12 +181,12 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 pub fn AddressMap(Value: type, empty_value: Value) type {
     return struct {
         const Key = usize;
-        const KeyWithMetadata = packed struct {
-            pub const empty_bit: @This() = .{ .full = 0, .collided = 0, .key = 0 };
-            pub const collided_bit: @This() = .{ .full = 0, .collided = 1, .key = 0 };
+        const KeyWithMetadata = packed struct(usize) {
+            pub const empty_bit: @This() = .{ .is_full = false, .has_collided = false, .key = 0 };
+            pub const collided_bit: @This() = .{ .is_full = false, .has_collided = true, .key = 0 };
 
-            full: u1,
-            collided: u1,
+            is_full: bool,
+            has_collided: bool,
             key: std.meta.Int(.unsigned, @bitSizeOf(usize) - 2),
         };
         const KeyWithMetadataAtomic = std.atomic.Value(KeyWithMetadata);
@@ -201,7 +204,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             var r: @This() = .{ .keys_with_metadata = &.{}, .values = undefined, .ref_gate = .{} };
 
             r.ref_gate.increment();
-            try r.growExponential(allocator);
+            try r.growExponentialUnsafe(allocator);
             r.ref_gate.decrement();
             return r;
         }
@@ -224,8 +227,8 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             const value_index = search: while (i < len) : (i += 1) {
                 const index = (i + offset) & (len - 1);
                 const entry = this.keys_with_metadata[index].load(.monotonic);
-                if (entry.key == key) break :search if (entry.full == 1) index else null;
-                if (entry.collided != 1) break :search null;
+                if (entry.key == key) break :search if (entry.is_full) index else null;
+                if (!entry.has_collided) break :search null;
             } else null;
 
             return if (value_index) |index| &this.values[index] else null;
@@ -243,14 +246,14 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             defer this.ref_gate.decrement();
 
             while (!this.putUnsafe(key, hashed_key, value)) {
-                try this.growExponential(allocator);
+                try this.growExponentialUnsafe(allocator);
             }
         }
 
         fn putUnsafe(this: *@This(), key: Key, hashed_key: Key, value: Value) bool {
             const new_key_data: KeyWithMetadata = .{
-                .full = 1,
-                .collided = 0,
+                .is_full = true,
+                .has_collided = false,
                 .key = @truncate(key),
             };
 
@@ -272,7 +275,7 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             } else break :found_spot false;
         }
 
-        fn growExponential(this: *@This(), allocator: std.mem.Allocator) !void {
+        fn growExponentialUnsafe(this: *@This(), allocator: std.mem.Allocator) !void {
             @branchHint(.cold);
 
             const len = this.keys_with_metadata.len;
@@ -284,10 +287,10 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
             defer this.ref_gate.increment();
 
             const new_keys_with_metadata = try allocator.alloc(std.meta.Child(@TypeOf(this.keys_with_metadata)), new_len);
-            for (new_keys_with_metadata) |*new_key| new_key.store(KeyWithMetadata.empty_bit, .unordered);
+            @memset(new_keys_with_metadata, .{ .raw = KeyWithMetadata.empty_bit });
 
             const new_values = try allocator.alloc(std.meta.Child(@TypeOf(this.values)), new_len);
-            for (new_values) |*new_value| new_value.store(empty_value, .unordered);
+            @memset(new_values, .{ .raw = empty_value });
 
             this.ref_gate.close();
             const old_keys_with_metadata = this.keys_with_metadata;
@@ -301,14 +304,14 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
                 return;
             }
 
-            this.ref_gate.waitAllReferenceDecrement();
+            this.ref_gate.drain();
 
             this.keys_with_metadata = new_keys_with_metadata;
             this.values = @ptrCast(new_values.ptr);
 
             for (old_keys_with_metadata, old_values) |*old_kwm, *old_value| {
                 const kwm = old_kwm.load(.unordered);
-                if (kwm.full == 1)
+                if (kwm.is_full)
                     std.debug.assert(this.putUnsafe(kwm.key, hash(kwm.key), old_value.load(.unordered)));
             }
 
