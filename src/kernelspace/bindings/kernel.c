@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/ftrace_regs.h>
 #include <linux/io.h>
+#include <linux/kprobes.h>
 #include <linux/kthread.h>
 #include <linux/ktime.h>
 #include <linux/mm.h>
@@ -42,9 +43,10 @@ void c_mdelay(unsigned long);
 /* Time */
 u64 c_ktime_get_ns(void);
 
-/* Task info */
-pid_t c_pid(void);
-pid_t c_tid(void);
+/* Task */
+struct task_struct *c_current_task(void);
+pid_t c_pid(struct task_struct *);
+pid_t c_tid(struct task_struct *);
 
 /* Paths */
 struct path c_kern_path(const char *, int *);
@@ -145,9 +147,10 @@ void c_mdelay(unsigned long msec) { mdelay(msec); }
 /* Time */
 u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 
-/* Task info */
-pid_t c_pid(void) { return task_tgid_nr(current); }
-pid_t c_tid(void) { return task_pid_nr(current); }
+/* Task */
+struct task_struct *c_current_task(void) { return current; }
+pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
+pid_t c_tid(struct task_struct *task) { return task_pid_nr(task); }
 
 /* Paths */
 struct path c_kern_path(const char *path, int *err) {

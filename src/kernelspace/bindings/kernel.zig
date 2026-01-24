@@ -245,15 +245,48 @@ pub const time = struct {
     };
 };
 
-pub const current_task = struct {
-    extern fn c_tid() linux.pid_t;
-    pub fn tid() linux.pid_t {
-        return c_tid();
+pub const Task = opaque {
+    extern fn c_current_task() *@This();
+    pub fn current() *@This() {
+        return c_current_task();
     }
 
-    extern fn c_pid() linux.pid_t;
-    pub fn pid() linux.pid_t {
-        return c_pid();
+    extern fn c_pid(*const @This()) linux.pid_t;
+    pub fn pid(this: *const @This()) linux.pid_t {
+        return c_pid(this);
+    }
+
+    extern fn c_tid(*const @This()) linux.pid_t;
+    pub fn tid(this: *const @This()) linux.pid_t {
+        return c_tid(this);
+    }
+
+    pub const Work = extern struct {
+        pub const Callback = *const fn (*Work) callconv(.c) void;
+        pub const NotifyMode = enum(c_int) {
+            none = 0,
+            @"resume",
+            signal,
+            signal_no_ipi,
+            nmi_current,
+        };
+
+        next: ?*Work align(@alignOf(usize)),
+        func: Callback,
+    };
+
+    pub const WorkAddError = error{
+        InvalidConfig,
+        CantFind,
+    };
+
+    extern fn c_task_work_add(*const @This(), *const Work, Work.NotifyMode) c_int;
+    pub fn addWork(this: *const @This(), work: *const Work, notify: Work.NotifyMode) WorkAddError!void {
+        return switch (linux.errno(c_task_work_add(this, work, notify))) {
+            .SUCCESS => {},
+            .INVAL => WorkAddError.InvalidConfig,
+            .SRCH => WorkAddError.CantFind,
+        };
     }
 };
 
