@@ -111,7 +111,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .cpu_arch = .x86_64,
             .os_tag = .freestanding,
             .abi = .none,
-            .cpu_features_add = std.Target.x86.featureSet(&.{.soft_float}),
+            .cpu_features_add = std.Target.x86.featureSet(&.{ .soft_float, .retpoline, .retpoline_external_thunk }),
             .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
         },
 
@@ -163,7 +163,6 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
     const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
     _ = write_files.add("Makefile", b.fmt(
         \\{s}
-        \\KCFLAGS += -march=native -O2 -flto
         \\obj-m += pside.o
         \\pside-objs := kernel.o {s}
         \\
