@@ -326,6 +326,60 @@ pub fn AddressMap(Value: type, empty_value: Value) type {
     };
 }
 
+pub fn Pool(Type: type) type {
+    return struct {
+        const pool_len = @bitSizeOf(usize);
+        const alignment = @sizeOf(Type) * pool_len;
+
+        entries: [pool_len]Type align(alignment),
+        used_bitmask: std.atomic.Value(usize),
+        context: ?*anyopaque,
+        next: std.atomic.Value(?*@This()),
+
+        pub const empty: @This() = .{
+            .entries = undefined,
+            .used_bitmask = .init(0),
+            .context = null,
+            .next = .init(null),
+        };
+
+        pub fn getPoolPtrFromEntryPtr(entry_ptr: *Type) *@This() {
+            const aligned_addr = std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment);
+            const field_ptr: *[pool_len]Type align(alignment) = @ptrFromInt(aligned_addr);
+
+            return @alignCast(@fieldParentPtr("entries", field_ptr));
+        }
+
+        pub fn getEntry(this: *@This()) ?*Type {
+            var used = this.used_bitmask.load(.monotonic);
+            var first_free = @ctz(~used);
+            if (first_free == pool_len) return null;
+
+            var locking_bit = @as(usize, 1) << @truncate(first_free);
+            used = this.used_bitmask.fetchOr(locking_bit, .acquire);
+            while (used & locking_bit != 0) {
+                @branchHint(.unlikely);
+                first_free = @ctz(~used);
+                if (first_free == pool_len) return null;
+
+                locking_bit = @as(usize, 1) << @truncate(first_free);
+                used = this.used_bitmask.fetchOr(locking_bit, .acquire);
+            }
+
+            return &this.entries[first_free];
+        }
+
+        pub fn freeEntry(this: *@This(), entry_ptr: *Type) void {
+            const entry_address = @intFromPtr(entry_ptr);
+            const position = @divExact(entry_address - std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment), @sizeOf(Type));
+
+            const freeing_bit = ~(@as(usize, 1) << @truncate(position));
+
+            std.debug.assert(this.used_bitmask.fetchAnd(freeing_bit, .release) & (~freeing_bit) != 0);
+        }
+    };
+}
+
 test "RefGate: basic usage" {
     var gate = RefGate{};
 
@@ -477,4 +531,91 @@ test "AddressMap: concurrent stress test" {
             try std.testing.expectEqual(key * 2, val.?);
         }
     }
+}
+
+test "Pool: basic alloc/free and pointer math" {
+    const P = Pool(u64);
+    var pool = P.empty;
+
+    const ptr1 = pool.getEntry() orelse return error.TestUnexpectedFull;
+    ptr1.* = 0xAAAA_BBBB;
+
+    const parent = P.getPoolPtrFromEntryPtr(ptr1);
+    try std.testing.expectEqual(&pool, parent);
+
+    const ptr2 = pool.getEntry() orelse return error.TestUnexpectedFull;
+    try std.testing.expect(ptr1 != ptr2);
+
+    pool.freeEntry(ptr1);
+}
+
+test "Pool: exhaustion and capacity" {
+    const P = Pool(u8);
+    var pool = P.empty;
+    var ptrs: [64]*u8 = undefined;
+
+    for (0..64) |i| {
+        ptrs[i] = pool.getEntry() orelse return error.TestUnexpectedFull;
+    }
+
+    try std.testing.expectEqual(null, pool.getEntry());
+
+    pool.freeEntry(ptrs[0]);
+
+    const new_ptr = pool.getEntry();
+    try std.testing.expect(new_ptr != null);
+    try std.testing.expectEqual(ptrs[0], new_ptr.?);
+}
+
+test "Pool: power of 2 struct alignment" {
+    const Align16 = struct {
+        data: [16]u8,
+    };
+
+    const P = Pool(Align16);
+    var pool = P.empty;
+
+    const ptr = pool.getEntry() orelse return error.TestUnexpectedFull;
+    const parent = P.getPoolPtrFromEntryPtr(ptr);
+    try std.testing.expectEqual(&pool, parent);
+}
+
+test "Pool: concurrent churn" {
+    const P = Pool(usize);
+
+    const pool = try std.testing.allocator.create(P);
+    pool.* = P.empty;
+    defer std.testing.allocator.destroy(pool);
+
+    const thread_count = 4;
+    const ops_per_thread = 20_000;
+
+    const Context = struct {
+        p: *P,
+        id: usize,
+        fn run(ctx: @This()) void {
+            var prng = std.Random.DefaultPrng.init(ctx.id);
+            const random = prng.random();
+
+            var i: usize = 0;
+            while (i < ops_per_thread) : (i += 1) {
+                if (ctx.p.getEntry()) |ptr| {
+                    ptr.* = ctx.id;
+                    if (random.boolean()) std.atomic.spinLoopHint();
+                    ctx.p.freeEntry(ptr);
+                } else {
+                    std.atomic.spinLoopHint();
+                }
+            }
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    for (0..thread_count) |i| {
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .p = pool, .id = i }});
+    }
+
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(usize, 0), pool.used_bitmask.load(.monotonic));
 }
