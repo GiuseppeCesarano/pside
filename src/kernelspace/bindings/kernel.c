@@ -47,6 +47,10 @@ u64 c_ktime_get_ns(void);
 struct task_struct *c_current_task(void);
 pid_t c_pid(struct task_struct *);
 pid_t c_tid(struct task_struct *);
+struct callback_head **c_task_work_ptr(struct task_struct *);
+typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
+                               int);
+int c_task_work_add(struct task_struct *, struct callback_head *, int);
 
 /* Paths */
 struct path c_kern_path(const char *, int *);
@@ -151,6 +155,26 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 struct task_struct *c_current_task(void) { return current; }
 pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
 pid_t c_tid(struct task_struct *task) { return task_pid_nr(task); }
+struct callback_head **c_task_work_ptr(struct task_struct *task) {
+  return &task->task_works;
+}
+
+int c_task_work_add(struct task_struct *task, struct callback_head *twork,
+                    int notify_mode) {
+  static task_work_add_t real_task_work_add = NULL;
+
+  if (unlikely(!real_task_work_add)) {
+    struct kprobe kp = {.symbol_name = "task_work_add"};
+
+    if (register_kprobe(&kp) < 0)
+      return -ENOSYS;
+
+    real_task_work_add = (task_work_add_t)kp.addr;
+    unregister_kprobe(&kp);
+  }
+
+  return real_task_work_add(task, twork, notify_mode);
+}
 
 /* Paths */
 struct path c_kern_path(const char *path, int *err) {

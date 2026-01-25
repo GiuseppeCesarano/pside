@@ -263,29 +263,31 @@ pub const Task = opaque {
 
     pub const Work = extern struct {
         pub const Callback = *const fn (*Work) callconv(.c) void;
-        pub const NotifyMode = enum(c_int) {
-            none = 0,
-            @"resume",
-            signal,
-            signal_no_ipi,
-            nmi_current,
-        };
-
         next: ?*Work align(@alignOf(usize)),
         func: Callback,
     };
 
-    pub const WorkAddError = error{
-        InvalidConfig,
-        CantFind,
+    pub const NotifyMode = enum(c_int) {
+        none = 0,
+        @"resume",
+        signal,
+        signal_no_ipi,
+        nmi_current,
     };
 
-    extern fn c_task_work_add(*const @This(), *const Work, Work.NotifyMode) c_int;
-    pub fn addWork(this: *const @This(), work: *const Work, notify: Work.NotifyMode) WorkAddError!void {
-        return switch (linux.errno(c_task_work_add(this, work, notify))) {
+    pub const WorkAddError = error{
+        KprobeLeakFaild,
+        BadConfig,
+        TooLateShuttingDown,
+    };
+
+    extern fn c_task_work_add(*@This(), *Work, NotifyMode) c_int;
+    pub fn addWork(this: *@This(), work: *Work, notify_mode: NotifyMode) WorkAddError!void {
+        return switch (linux.errno(c_task_work_add(this, work, notify_mode))) {
             .SUCCESS => {},
-            .INVAL => WorkAddError.InvalidConfig,
-            .SRCH => WorkAddError.CantFind,
+            .NOSYS => WorkAddError.KprobeLeakFaild,
+            .INVAL => WorkAddError.BadConfig,
+            .SRCH => WorkAddError.TooLateShuttingDown,
         };
     }
 };
