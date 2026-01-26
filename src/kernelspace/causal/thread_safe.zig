@@ -60,7 +60,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
 
         pub const init = @This(){ .blocks = &.{}, .ref_gate = .{} };
 
-        pub fn unsafeGetPtr(this: *@This(), block_index: usize, item_index: usize) ?*ValueAtomic {
+        fn unsafeGetPtr(this: *@This(), block_index: usize, item_index: usize) ?*ValueAtomic {
             if (block_index >= this.blocks.len) return null;
 
             const block = this.blocks[block_index].load(.acquire) orelse return null;
@@ -333,13 +333,15 @@ pub fn Pool(Type: type) type {
 
         entries: [pool_len]Type align(alignment),
         used_bitmask: std.atomic.Value(usize),
-        context: ?*anyopaque,
+        context: std.atomic.Value(?*anyopaque),
 
-        pub const empty: @This() = .{
-            .entries = undefined,
-            .used_bitmask = .init(0),
-            .context = null,
-        };
+        pub fn empty() @This() {
+            return .{
+                .entries = undefined,
+                .used_bitmask = .init(0),
+                .context = .init(null),
+            };
+        }
 
         pub fn getPoolPtrFromEntryPtr(entry_ptr: *Type) *@This() {
             const aligned_addr = std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment);
@@ -533,7 +535,7 @@ test "AddressMap: concurrent stress test" {
 
 test "Pool: basic alloc/free and pointer math" {
     const P = Pool(u64);
-    var pool = P.empty;
+    var pool = P.empty();
 
     const ptr1 = pool.getEntry() orelse return error.TestUnexpectedFull;
     ptr1.* = 0xAAAA_BBBB;
@@ -549,7 +551,7 @@ test "Pool: basic alloc/free and pointer math" {
 
 test "Pool: exhaustion and capacity" {
     const P = Pool(u8);
-    var pool = P.empty;
+    var pool = P.empty();
     var ptrs: [@bitSizeOf(usize)]*u8 = undefined;
 
     for (0..@bitSizeOf(usize)) |i| {
@@ -571,7 +573,7 @@ test "Pool: power of 2 struct alignment" {
     };
 
     const P = Pool(Align16);
-    var pool = P.empty;
+    var pool = P.empty();
 
     const ptr = pool.getEntry() orelse return error.TestUnexpectedFull;
     const parent = P.getPoolPtrFromEntryPtr(ptr);
@@ -582,7 +584,7 @@ test "Pool: concurrent churn" {
     const P = Pool(usize);
 
     const pool = try std.testing.allocator.create(P);
-    pool.* = P.empty;
+    pool.* = .empty();
     defer std.testing.allocator.destroy(pool);
 
     const thread_count = 4;

@@ -279,15 +279,25 @@ pub const Task = opaque {
         KprobeLeakFaild,
         BadConfig,
         TooLateShuttingDown,
+        Unknown,
     };
 
-    extern fn c_task_work_add(*@This(), *Work, NotifyMode) c_int;
+    extern fn c_task_work_add(?*@This(), ?*Work, NotifyMode) c_int;
+    pub fn findAddWork() WorkAddError!void {
+        return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
+            .SUCCESS => {},
+            .NOSYS => WorkAddError.KprobeLeakFaild,
+            else => WorkAddError.Unknown,
+        };
+    }
+
     pub fn addWork(this: *@This(), work: *Work, notify_mode: NotifyMode) WorkAddError!void {
-        return switch (linux.errno(c_task_work_add(this, work, notify_mode))) {
+        return switch (linux.errno(@intCast(c_task_work_add(this, work, notify_mode)))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFaild,
             .INVAL => WorkAddError.BadConfig,
             .SRCH => WorkAddError.TooLateShuttingDown,
+            else => WorkAddError.Unknown,
         };
     }
 };

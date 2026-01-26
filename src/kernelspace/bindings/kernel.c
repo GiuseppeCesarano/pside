@@ -163,7 +163,7 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
                     int notify_mode) {
   static task_work_add_t real_task_work_add = NULL;
 
-  if (unlikely(!real_task_work_add)) {
+  if (unlikely(!task)) {
     struct kprobe kp = {.symbol_name = "task_work_add"};
 
     if (register_kprobe(&kp) < 0)
@@ -171,8 +171,12 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
 
     real_task_work_add = (task_work_add_t)kp.addr;
     unregister_kprobe(&kp);
+
+    return 0;
   }
 
+  if (!real_task_work_add)
+    return -ENOSYS;
   return real_task_work_add(task, twork, notify_mode);
 }
 
