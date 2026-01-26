@@ -334,13 +334,11 @@ pub fn Pool(Type: type) type {
         entries: [pool_len]Type align(alignment),
         used_bitmask: std.atomic.Value(usize),
         context: ?*anyopaque,
-        next: std.atomic.Value(?*@This()),
 
         pub const empty: @This() = .{
             .entries = undefined,
             .used_bitmask = .init(0),
             .context = null,
-            .next = .init(null),
         };
 
         pub fn getPoolPtrFromEntryPtr(entry_ptr: *Type) *@This() {
@@ -552,9 +550,9 @@ test "Pool: basic alloc/free and pointer math" {
 test "Pool: exhaustion and capacity" {
     const P = Pool(u8);
     var pool = P.empty;
-    var ptrs: [64]*u8 = undefined;
+    var ptrs: [@bitSizeOf(usize)]*u8 = undefined;
 
-    for (0..64) |i| {
+    for (0..@bitSizeOf(usize)) |i| {
         ptrs[i] = pool.getEntry() orelse return error.TestUnexpectedFull;
     }
 
