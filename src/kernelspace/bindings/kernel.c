@@ -16,6 +16,7 @@
 #include <linux/printk.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/tracepoint.h>
 #include <linux/uprobes.h>
 
 /* Forward declarations */
@@ -120,6 +121,14 @@ bool c_kthread_should_stop(void);
 /* Sleep */
 
 void c_sleep(unsigned long);
+
+/* Tracepoints */
+int c_register_sched_fork(void *, void *);
+void c_unregister_sched_fork(void *, void *);
+void c_tracepoint_init(void);
+int c_register_sched_exit(void *, void *);
+void c_unregister_sched_exit(void *, void *);
+void c_tracepoint_sync(void);
 
 /* Implementations */
 
@@ -384,3 +393,48 @@ bool c_kthread_should_stop(void) { return kthread_should_stop(); }
 
 /* Sleep */
 void c_sleep(unsigned long usecs) { usleep_range(usecs - 5, usecs + 5); }
+
+// This is the actual tracepoint object defined in the kernel core
+extern struct tracepoint __tracepoint_sched_process_fork;
+
+/* Tracepoints */
+
+struct tracepoint_provider {
+  struct tracepoint *sched_fork;
+  struct tracepoint *sched_exit;
+} tp_prov = {0};
+
+static void lookup_all_tps(struct tracepoint *tp, void *priv) {
+  if (strcmp(tp->name, "sched_process_fork") == 0)
+    tp_prov.sched_fork = tp;
+  else if (strcmp(tp->name, "sched_process_exit") == 0)
+    tp_prov.sched_exit = tp;
+}
+
+void c_tracepoint_init(void) {
+  for_each_kernel_tracepoint(lookup_all_tps, NULL);
+}
+
+int c_register_sched_fork(void *probe, void *data) {
+  if (!tp_prov.sched_fork)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_fork, probe, data);
+}
+
+void c_unregister_sched_fork(void *probe, void *data) {
+  if (tp_prov.sched_fork)
+    tracepoint_probe_unregister(tp_prov.sched_fork, probe, data);
+}
+
+int c_register_sched_exit(void *probe, void *data) {
+  if (!tp_prov.sched_exit)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_exit, probe, data);
+}
+
+void c_unregister_sched_exit(void *probe, void *data) {
+  if (tp_prov.sched_exit)
+    tracepoint_probe_unregister(tp_prov.sched_exit, probe, data);
+}
+
+void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }

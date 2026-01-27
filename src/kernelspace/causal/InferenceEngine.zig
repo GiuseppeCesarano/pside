@@ -52,7 +52,7 @@ task_work_pools: []TaskWorkPool,
 sampler: *kernel.PerfEvent,
 line_selector: *kernel.PerfEvent, // TODO: We shall reuse the sampler to select the line
 
-probes: [4]ProbeAndData,
+probes: [2]ProbeAndData,
 
 const task_clock_attr = std.os.linux.perf_event_attr{
     .type = .SOFTWARE,
@@ -72,6 +72,7 @@ const task_clock_attr = std.os.linux.perf_event_attr{
 
 pub fn init() !@This() {
     try kernel.Task.findAddWork();
+    kernel.tracepoint.init();
 
     const task_work_pool = try allocator.alloc(TaskWorkPool, 1);
     for (task_work_pool) |*pool| pool.* = .empty();
@@ -93,11 +94,6 @@ pub fn init() !@This() {
 
         .probes = .{
             .{
-                .data = .{ .filter = "kernel_clone" },
-                .probe = .{ .callbacks = .{ .post_handler = onClone } },
-            },
-
-            .{
                 .data = .{ .filter = "futex_wait" },
                 .probe = .{ .callbacks = .{ .pre_handler = onFutexWaitStart, .post_handler = onFutexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeCtx) },
             },
@@ -105,11 +101,6 @@ pub fn init() !@This() {
             .{
                 .data = .{ .filter = "futex_wake" },
                 .probe = .{ .callbacks = .{ .pre_handler = onFutexWake } },
-            },
-
-            .{
-                .data = .{ .filter = "do_exit" },
-                .probe = .{ .callbacks = .{ .pre_handler = onExit } },
             },
         },
     };
@@ -121,6 +112,10 @@ pub fn deinit(this: *@This()) void {
     this.line_selector.deinit();
     this.sampler.deinit();
 
+    kernel.tracepoint.sched_fork.unregister(onSchedFork, this);
+    kernel.tracepoint.sched_exit.unregister(onSchedExit, this);
+    kernel.tracepoint.sync();
+
     for (&this.probes) |*probe| probe.probe.unregister();
 
     this.progress_transfer_map.deinit(atomic_allocator);
@@ -131,10 +126,13 @@ pub fn deinit(this: *@This()) void {
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {
-    this.threads_progress.put(atomic_allocator, @intCast(pid), 0) catch {};
+    try this.threads_progress.put(atomic_allocator, @intCast(pid), 0);
     this.instrumented_pid.store(pid, .release);
 
     for (this.task_work_pools) |*pool| pool.context.store(this, .monotonic);
+
+    try kernel.tracepoint.sched_fork.register(onSchedFork, this);
+    try kernel.tracepoint.sched_exit.register(onSchedExit, this);
 
     for (&this.probes) |*probe| {
         const filter = probe.data.filter;
@@ -200,7 +198,7 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
 }
 
-// Probes callbacks helpers
+// callbacks helpers
 
 fn increment(this: *@This()) void {
     if (this.threads_progress.increment(@intCast(kernel.Task.current().tid()))) |counter| {
@@ -216,21 +214,35 @@ fn thisFromProbe(probe: *kernel.probe.F) *@This() {
     return @ptrCast(@alignCast(@as(*ProbeAndData, @ptrCast(probe)).data.context));
 }
 
-// Probes callbacks
+// Tracepoints callbacks
 
-fn onClone(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) void {
-    const this = thisFromProbe(probe);
-    if (this.shouldIgnore()) return;
+fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(data.?));
+    if (parent.pid() != this.instrumented_pid.load(.monotonic)) return;
 
-    const parent_progress = this.threads_progress.get(@intCast(kernel.Task.current().tid())) orelse {
+    const parent_tid: usize = @intCast(parent.tid());
+    const parent_progress = this.threads_progress.get(parent_tid) orelse {
         @branchHint(.cold);
         std.log.err("TODO: onClone thread_poinst null", .{});
         return;
     };
 
-    const child_tid: usize = @intCast(regs.getReturnValue());
+    const child_tid: usize = @intCast(child.tid());
     this.threads_progress.put(atomic_allocator, child_tid, parent_progress) catch {};
 }
+
+fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(data.?));
+    if (task.pid() != this.instrumented_pid.load(.monotonic)) return;
+
+    const work = this.task_work_pools[0].getEntry() orelse return; //TODO: maybe just execute the sleep.
+    work.func = doSleep;
+    task.addWork(work, .signal_no_ipi) catch {
+        std.log.err("UFFF", .{});
+    }; //TODO: maybe again just execute the sleep.
+}
+
+// Probes callbacks
 
 //TODO: We could change the causality to just one probe and two sleeps, the waker thread tasks works sleeps for it's deficit
 //the waked thread task wake sleeps for the wakee deficit + it's own, this should allow us to cut down on porbes.
@@ -284,17 +296,6 @@ fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.pro
 
     const progress_debit = this.max_progress.load(.monotonic) - current_progress;
     kernel.time.delay.us(progress_debit * this.delay_per_progress_us.load(.monotonic));
-
-    return 0;
-}
-
-fn onExit(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, _: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
-    const this = thisFromProbe(probe);
-    if (this.shouldIgnore()) return 1;
-
-    const work = this.task_work_pools[0].getEntry() orelse return 1; //TODO: maybe just execute the sleep.
-    work.func = doSleep;
-    kernel.Task.current().addWork(work, .signal_no_ipi) catch return 1; //TODO: maybe again just execute the sleep.
 
     return 0;
 }

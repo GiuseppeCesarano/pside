@@ -583,6 +583,47 @@ pub const Thread = opaque {
     }
 };
 
+pub const tracepoint = struct {
+    extern fn c_tracepoint_init() void;
+    extern fn c_tracepoint_sync() void;
+
+    pub fn init() void {
+        c_tracepoint_init();
+    }
+
+    pub fn sync() void {
+        c_tracepoint_sync();
+    }
+
+    pub const sched_fork = struct {
+        pub const Callback = *const fn (data: ?*anyopaque, parent: *Task, child: *Task) callconv(.c) void;
+
+        extern fn c_register_sched_fork(probe: Callback, data: ?*anyopaque) c_int;
+        pub fn register(trace: Callback, data: ?*anyopaque) !void {
+            if (c_register_sched_fork(trace, data) != 0) return error.TracepointRegistrationFailed;
+        }
+
+        extern fn c_unregister_sched_fork(probe: Callback, data: ?*anyopaque) void;
+        pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+            c_unregister_sched_fork(trace, data);
+        }
+    };
+
+    pub const sched_exit = struct {
+        pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
+
+        extern fn c_register_sched_exit(probe: Callback, data: ?*anyopaque) c_int;
+        pub fn register(trace: Callback, data: ?*anyopaque) !void {
+            if (c_register_sched_exit(trace, data) != 0) return error.TracepointRegistrationFailed;
+        }
+
+        extern fn c_unregister_sched_exit(probe: Callback, data: ?*anyopaque) void;
+        pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+            c_unregister_sched_exit(trace, data);
+        }
+    };
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);
