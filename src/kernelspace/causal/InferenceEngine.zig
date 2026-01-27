@@ -50,7 +50,6 @@ progress_transfer_map: ProgressTransferMap,
 task_work_pool: TaskWorkPool,
 
 sampler: *kernel.PerfEvent,
-line_selector: *kernel.PerfEvent, // TODO: We shall reuse the sampler to select the line
 
 probes: [2]ProbeAndData,
 
@@ -87,7 +86,6 @@ pub fn init() !@This() {
 
         .profiler_thread = undefined,
         .sampler = undefined,
-        .line_selector = undefined,
 
         .probes = .{
             .{
@@ -106,7 +104,6 @@ pub fn init() !@This() {
 pub fn deinit(this: *@This()) void {
     this.profiler_thread.stop();
 
-    this.line_selector.deinit();
     this.sampler.deinit();
 
     kernel.tracepoint.sched_fork.unregister(onSchedFork, this);
@@ -137,8 +134,6 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     }
 
     var attr = task_clock_attr;
-    this.line_selector = kernel.PerfEvent.init(&attr, -1, pid, onLineSelectTick, this) catch return;
-
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
     this.sampler = kernel.PerfEvent.init(&attr, -1, pid, onSamplerTick, this) catch return;
 
@@ -166,15 +161,8 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
 fn setExperimentParameters(this: *@This()) !void {
     this.selected_line.store(0, .monotonic);
-    this.line_selector.enable();
 
     //TODO: select dealy
-
-    while (this.selected_line.load(.monotonic) == 0) {
-        @branchHint(.unlikely);
-        if (kernel.Thread.shouldThisStop()) return error.Quit;
-    }
-    this.line_selector.disable();
 }
 
 fn takeSnapshot(this: @This()) usize {
@@ -184,14 +172,16 @@ fn takeSnapshot(this: @This()) usize {
 
 // Perf event callabcks
 
-fn onLineSelectTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *@This() = @ptrCast(@alignCast(event.context().?));
-    this.selected_line.store(regs.ip, .monotonic);
-}
-
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
-    if (this.selected_line.load(.monotonic) == regs.ip) this.increment();
+    const selected_line = this.selected_line.load(.monotonic);
+
+    if (selected_line == 0) {
+        @branchHint(.unlikely);
+        if (this.selected_line.cmpxchgStrong(selected_line, regs.ip, .monotonic, .monotonic) == null) this.increment();
+    } else if (selected_line == regs.ip) {
+        this.increment();
+    }
 }
 
 // callbacks helpers
