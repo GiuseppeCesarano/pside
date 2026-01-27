@@ -47,7 +47,7 @@ selected_line: std.atomic.Value(usize),
 max_progress: std.atomic.Value(ProgressPoint),
 threads_progress: ThreadProgressMap,
 progress_transfer_map: ProgressTransferMap,
-task_work_pool: TaskWorkPool,
+task_work_pool: *TaskWorkPool,
 
 sampler: *kernel.PerfEvent,
 
@@ -73,6 +73,9 @@ pub fn init() !@This() {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
+    const pool = try allocator.create(TaskWorkPool);
+    pool.* = .empty();
+
     return .{
         .instrumented_pid = .init(0),
         .experiment_duration_us = .init(100 * std.time.us_per_ms),
@@ -82,7 +85,7 @@ pub fn init() !@This() {
         .max_progress = .init(0),
         .threads_progress = .init,
         .progress_transfer_map = try .init(atomic_allocator),
-        .task_work_pool = .empty(),
+        .task_work_pool = pool,
 
         .profiler_thread = undefined,
         .sampler = undefined,
@@ -114,6 +117,8 @@ pub fn deinit(this: *@This()) void {
 
     this.progress_transfer_map.deinit(atomic_allocator);
     this.threads_progress.deinit(atomic_allocator);
+
+    allocator.destroy(this.task_work_pool);
 
     std.log.info("Global virtual clock at exit: {}", .{this.max_progress.load(.monotonic)});
 }
