@@ -24,7 +24,7 @@ const ProgressTransferMap = thread_safe.AddressMap(ProgressPoint, std.math.maxIn
 const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
 
 const WaitProbeCtx = struct {
-    progress_lag: ProgressPoint,
+    progress_debit: ProgressPoint,
     futex_handle: FutexHandle,
 };
 
@@ -47,7 +47,7 @@ selected_line: std.atomic.Value(usize),
 max_progress: std.atomic.Value(ProgressPoint),
 threads_progress: ThreadProgressMap,
 progress_transfer_map: ProgressTransferMap,
-task_work_pools: []TaskWorkPool,
+task_work_pool: TaskWorkPool,
 
 sampler: *kernel.PerfEvent,
 line_selector: *kernel.PerfEvent, // TODO: We shall reuse the sampler to select the line
@@ -74,9 +74,6 @@ pub fn init() !@This() {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
-    const task_work_pool = try allocator.alloc(TaskWorkPool, 1);
-    for (task_work_pool) |*pool| pool.* = .empty();
-
     return .{
         .instrumented_pid = .init(0),
         .experiment_duration_us = .init(100 * std.time.us_per_ms),
@@ -86,7 +83,7 @@ pub fn init() !@This() {
         .max_progress = .init(0),
         .threads_progress = .init,
         .progress_transfer_map = try .init(atomic_allocator),
-        .task_work_pools = task_work_pool,
+        .task_work_pool = .empty(),
 
         .profiler_thread = undefined,
         .sampler = undefined,
@@ -120,7 +117,6 @@ pub fn deinit(this: *@This()) void {
 
     this.progress_transfer_map.deinit(atomic_allocator);
     this.threads_progress.deinit(atomic_allocator);
-    allocator.free(this.task_work_pools);
 
     std.log.info("Global virtual clock at exit: {}", .{this.max_progress.load(.monotonic)});
 }
@@ -129,7 +125,7 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     try this.threads_progress.put(atomic_allocator, @intCast(pid), 0);
     this.instrumented_pid.store(pid, .release);
 
-    for (this.task_work_pools) |*pool| pool.context.store(this, .monotonic);
+    this.task_work_pool.context.store(this, .monotonic);
 
     try kernel.tracepoint.sched_fork.register(onSchedFork, this);
     try kernel.tracepoint.sched_exit.register(onSchedExit, this);
@@ -211,7 +207,14 @@ fn shouldIgnore(this: *@This()) bool {
 }
 
 fn thisFromProbe(probe: *kernel.probe.F) *@This() {
-    return @ptrCast(@alignCast(@as(*ProbeAndData, @ptrCast(probe)).data.context));
+    const probe_and_data: *ProbeAndData = @fieldParentPtr("probe", probe);
+    return @ptrCast(@alignCast(probe_and_data.data.context));
+}
+
+fn registerForSleep(this: *@This(), task: *kernel.Task) !void {
+    const work = this.task_work_pool.getEntry() orelse return; //TODO: maybe just execute the sleep.
+    work.func = doSleep;
+    try task.addWork(work, .signal_no_ipi);
 }
 
 // Tracepoints callbacks
@@ -235,30 +238,24 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.instrumented_pid.load(.monotonic)) return;
 
-    const work = this.task_work_pools[0].getEntry() orelse return; //TODO: maybe just execute the sleep.
-    work.func = doSleep;
-    task.addWork(work, .signal_no_ipi) catch {
-        std.log.err("UFFF", .{});
-    }; //TODO: maybe again just execute the sleep.
+    this.registerForSleep(task) catch return {}; //TODO: handle me
 }
 
 // Probes callbacks
-
-//TODO: We could change the causality to just one probe and two sleeps, the waker thread tasks works sleeps for it's deficit
-//the waked thread task wake sleeps for the wakee deficit + it's own, this should allow us to cut down on porbes.
 
 fn onFutexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
     const this = thisFromProbe(probe);
     if (this.shouldIgnore()) return 1; // returning 1 will cancel futexWaitEnd call
 
-    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
-
-    data.progress_lag = this.max_progress.load(.monotonic) - (this.threads_progress.get(@intCast(kernel.Task.current().tid())) orelse {
+    const current_tid: usize = @intCast(kernel.Task.current().tid());
+    const current_progress = this.threads_progress.get(current_tid) orelse {
         @branchHint(.cold);
         std.log.err("TODO: onFutexWaitStart thread_poinst null", .{});
         return 1;
-    });
+    };
 
+    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
+    data.progress_debit = this.max_progress.load(.monotonic) - current_progress;
     data.futex_handle = regs.getArgument(0); // We save the handle since it gets clobbered
 
     return 0;
@@ -270,15 +267,19 @@ fn onFutexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.
 
     const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
 
-    kernel.time.delay.us(data.progress_lag * this.delay_per_progress_us.load(.monotonic));
-
     const waker_progress = this.progress_transfer_map.get(data.futex_handle) orelse {
         @branchHint(.cold);
         std.log.err("TODO: onFutexWaitEnd thread_poinst null", .{});
         return;
     };
 
-    this.threads_progress.put(atomic_allocator, @intCast(kernel.Task.current().tid()), waker_progress) catch {};
+    const current_tid: usize = @intCast(kernel.Task.current().tid());
+    //TODO: we shall do something like this
+    //const new_progress = waker_progress - data.progress_debit;
+    const new_progress = waker_progress;
+    this.threads_progress.put(atomic_allocator, current_tid, new_progress) catch {};
+
+    this.registerForSleep(kernel.Task.current()) catch {}; //TODO: Handle me
 }
 
 fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
@@ -286,16 +287,14 @@ fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.pro
     if (this.shouldIgnore()) return 1;
 
     const current_tid: usize = @intCast(kernel.Task.current().tid());
-
     const current_progress = this.threads_progress.get(current_tid) orelse {
         @branchHint(.cold);
         std.log.err("TODO: onFutexWake thread_points null", .{});
         return 1;
     };
-    this.progress_transfer_map.put(atomic_allocator, regs.getArgument(0), current_progress) catch return 1; //TODO: should signal error;
 
-    const progress_debit = this.max_progress.load(.monotonic) - current_progress;
-    kernel.time.delay.us(progress_debit * this.delay_per_progress_us.load(.monotonic));
+    const futex_handle: FutexHandle = regs.getArgument(0);
+    this.progress_transfer_map.put(atomic_allocator, futex_handle, current_progress) catch return 1; //TODO: should signal error;
 
     return 0;
 }
