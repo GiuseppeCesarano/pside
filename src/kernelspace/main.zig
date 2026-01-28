@@ -18,9 +18,9 @@ export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, ioctlHandler) catch return 1;
     std.log.debug("chardev created at: /dev/" ++ name, .{});
 
-    const throughput_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
-    throughput_ptr.* = .init(0);
-    engine = CausalInfereceEngine.init(throughput_ptr) catch return 1;
+    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
+    progress_points_ptr.* = .init(0);
+    engine = CausalInfereceEngine.init(progress_points_ptr) catch return 1;
 
     return 0;
 }
