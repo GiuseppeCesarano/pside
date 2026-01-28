@@ -53,31 +53,26 @@ fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader
     defer allocator.free(section_data);
 
     var buffer_reader: std.Io.Reader = .fixed(section_data);
+    var list: std.ArrayList(usize) = try .initCapacity(allocator, 10);
+    errdefer list.deinit(allocator);
 
-    var addr = try buffer_reader.takeInt(u64, header.endian);
-    var read_name = try buffer_reader.takeSentinel(0);
+    var target = name;
 
-    const selected_name = if (name.len != 0) name else read_name;
-    if (selected_name.len == 0)
-        return error.MalformedElfSection;
+    while (buffer_reader.seek + @sizeOf(u64) <= buffer_reader.end) {
+        const addr = try buffer_reader.takeInt(u64, header.endian);
+        const read_name = try buffer_reader.takeSentinel(0);
+        if (read_name.len == 0) return error.MalformedElfSection;
 
-    const len = std.mem.count(u8, section_data, selected_name);
-    if (len == 0) return error.NoProgressPointsWithSuchName;
-
-    const points = try allocator.alloc(usize, len);
-    errdefer allocator.free(points);
-    @memset(points, 0);
-
-    var i: usize = 0;
-    while (buffer_reader.end - buffer_reader.seek > @sizeOf(u64)) {
-        if (std.mem.eql(u8, read_name, selected_name)) {
-            points[i] = addr -% header.entry;
-            i += 1;
+        // If user didn't provide a name, we take the first one we find as the target
+        if (target.len == 0) {
+            target = read_name;
         }
 
-        addr = try buffer_reader.takeInt(u64, header.endian);
-        read_name = try buffer_reader.takeSentinel(0);
+        if (std.mem.eql(u8, read_name, target)) {
+            try list.append(allocator, addr -% header.entry);
+        }
     }
 
-    return points;
+    if (list.items.len == 0) return error.NoProgressPointsWithSuchName;
+    return list.toOwnedSlice(allocator);
 }

@@ -44,6 +44,7 @@ profiler_thread: *kernel.Thread,
 delay_per_progress_us: std.atomic.Value(usize),
 selected_line: std.atomic.Value(usize),
 
+throughput: *std.atomic.Value(usize),
 max_progress: std.atomic.Value(ProgressPoint),
 threads_progress: ThreadProgressMap,
 progress_transfer_map: ProgressTransferMap,
@@ -69,7 +70,7 @@ const task_clock_attr = std.os.linux.perf_event_attr{
     },
 };
 
-pub fn init() !@This() {
+pub fn init(throughput_ptr: *std.atomic.Value(usize)) !@This() {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
@@ -82,6 +83,7 @@ pub fn init() !@This() {
         .delay_per_progress_us = .init(0),
         .selected_line = .init(0),
 
+        .throughput = throughput_ptr,
         .max_progress = .init(0),
         .threads_progress = .init,
         .progress_transfer_map = try .init(atomic_allocator),
@@ -120,7 +122,8 @@ pub fn deinit(this: *@This()) void {
 
     allocator.destroy(this.task_work_pool);
 
-    std.log.info("Global virtual clock at exit: {}", .{this.max_progress.load(.monotonic)});
+    std.log.info("Max Progress: {}", .{this.max_progress.load(.monotonic)});
+    std.log.info("Throughput: {}", .{this.throughput.load(.monotonic)});
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {

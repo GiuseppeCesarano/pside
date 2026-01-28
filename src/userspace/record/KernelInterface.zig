@@ -140,7 +140,7 @@ pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t) !void {
 
     const rc = linux.ioctl(
         this.chardev.handle,
-        @intFromEnum(communications.Commands.start_profiler_on_pid),
+        @intFromEnum(communications.Commands.start_profiler),
         @intFromPtr(&data),
     );
     const e = linux.errno(rc);
