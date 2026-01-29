@@ -1,12 +1,4 @@
 // TODO: handle error and rewrite catches
-// TODO: missing syscalls to cover:
-
-// pthread_kill -> tgkill
-//
-// sigwait_wait
-// sigwaitinfo
-// sigtimedwait
-// sigsuspend
 const std = @import("std");
 const kernel = @import("kernel");
 const thread_safe = @import("thread_safe.zig");
@@ -14,27 +6,13 @@ const thread_safe = @import("thread_safe.zig");
 const Pid = std.os.linux.pid_t;
 const Tid = Pid;
 const FutexHandle = usize;
-const ClockTick = isize;
+const ClockTick = usize;
 
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
 
 const ThreadLocalClock = thread_safe.SegmentedSparseVector(ClockTick, std.math.maxInt(ClockTick));
-const ClockTransferMap = thread_safe.AddressMap(ClockTick, std.math.maxInt(ClockTick));
 const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
-
-const WaitProbeCtx = struct {
-    clock_lag: ClockTick,
-    futex_handle: FutexHandle,
-};
-
-const ProbeAndData = struct {
-    probe: kernel.probe.F,
-    data: union {
-        filter: [*:0]const u8,
-        context: *anyopaque,
-    },
-};
 
 instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: std.atomic.Value(usize),
@@ -47,12 +25,9 @@ selected_ip: std.atomic.Value(usize),
 progress: *std.atomic.Value(usize),
 global_virtual_clock: std.atomic.Value(ClockTick),
 thread_local_clocks: ThreadLocalClock,
-sync_clock_map: ClockTransferMap,
 task_work_pool: *TaskWorkPool,
 
 sampler: *kernel.PerfEvent,
-
-probes: [2]ProbeAndData,
 
 const task_clock_attr = std.os.linux.perf_event_attr{
     .type = .SOFTWARE,
@@ -86,38 +61,24 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
         .progress = progress_ptr,
         .global_virtual_clock = .init(0),
         .thread_local_clocks = .init,
-        .sync_clock_map = try .init(atomic_allocator),
         .task_work_pool = pool,
 
         .profiler_thread = undefined,
         .sampler = undefined,
-
-        .probes = .{
-            .{
-                .data = .{ .filter = "futex_wait" },
-                .probe = .{ .callbacks = .{ .pre_handler = onFutexWaitStart, .post_handler = onFutexWaitEnd }, .entry_data_size = @sizeOf(WaitProbeCtx) },
-            },
-
-            .{
-                .data = .{ .filter = "futex_wake" },
-                .probe = .{ .callbacks = .{ .pre_handler = onFutexWake } },
-            },
-        },
     };
 }
 
 pub fn deinit(this: *@This()) void {
-    this.profiler_thread.stop();
+    if (this.instrumented_pid.load(.monotonic) != 0) {
+        this.profiler_thread.stop();
+        this.sampler.deinit();
 
-    this.sampler.deinit();
+        kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
+        kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+        kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+        kernel.tracepoint.sync();
+    }
 
-    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
-    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
-    kernel.tracepoint.sync();
-
-    for (&this.probes) |*probe| probe.probe.unregister();
-
-    this.sync_clock_map.deinit(atomic_allocator);
     this.thread_local_clocks.deinit(atomic_allocator);
 
     allocator.destroy(this.task_work_pool);
@@ -132,13 +93,8 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     this.task_work_pool.context.store(this, .monotonic);
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
+    try kernel.tracepoint.sched.waking.register(onSchedWaking, this);
     try kernel.tracepoint.sched.exit.register(onSchedExit, this);
-
-    for (&this.probes) |*probe| {
-        const filter = probe.data.filter;
-        probe.data = .{ .context = this };
-        try probe.probe.register(filter, null);
-    }
 
     var attr = task_clock_attr;
     attr.sample_period_or_freq = 1 * std.time.ns_per_ms;
@@ -193,6 +149,8 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     } else if (selected_line == regs.ip) {
         this.increment();
     }
+
+    this.registerForSleep(kernel.Task.current()) catch return {}; //TODO: handle me
 }
 
 // callbacks helpers
@@ -207,15 +165,10 @@ fn shouldIgnore(this: *@This()) bool {
     return kernel.Task.current().pid() != this.instrumented_pid.load(.monotonic);
 }
 
-fn thisFromProbe(probe: *kernel.probe.F) *@This() {
-    const probe_and_data: *ProbeAndData = @fieldParentPtr("probe", probe);
-    return @ptrCast(@alignCast(probe_and_data.data.context));
-}
-
 fn registerForSleep(this: *@This(), task: *kernel.Task) !void {
     const work = this.task_work_pool.getEntry() orelse return; //TODO: maybe just execute the sleep.
     work.func = doSleep;
-    try task.addWork(work, .signal_no_ipi);
+    try task.addWork(work, .@"resume");
 }
 
 // Tracepoints callbacks
@@ -235,67 +188,26 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     this.thread_local_clocks.put(atomic_allocator, child_tid, parent_clock) catch {};
 }
 
+fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
+    const this: *@This() = @ptrCast(@alignCast(data.?));
+    const current = kernel.Task.current();
+    const instrumented_pid = this.instrumented_pid.load(.monotonic);
+    if (current.pid() != instrumented_pid or waked.pid() != instrumented_pid) return;
+
+    const current_tid: usize = @intCast(current.tid());
+    const current_clock = this.thread_local_clocks.get(current_tid).?;
+
+    const waked_tid: usize = @intCast(waked.tid());
+    this.thread_local_clocks.put(atomic_allocator, waked_tid, current_clock) catch {};
+
+    //TODO: handle old clock lag
+}
+
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.instrumented_pid.load(.monotonic)) return;
 
     this.registerForSleep(task) catch return {}; //TODO: handle me
-}
-
-// Probes callbacks
-
-fn onFutexWaitStart(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) c_int {
-    const this = thisFromProbe(probe);
-    if (this.shouldIgnore()) return 1; // returning 1 will cancel futexWaitEnd call
-
-    const current_tid: usize = @intCast(kernel.Task.current().tid());
-    const clock = this.thread_local_clocks.get(current_tid) orelse {
-        @branchHint(.cold);
-        std.log.err("TODO: onFutexWaitStart thread_poinst null", .{});
-        return 1;
-    };
-
-    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
-    data.clock_lag = this.global_virtual_clock.load(.monotonic) - clock;
-    data.futex_handle = regs.getArgument(0); // We save the handle since it gets clobbered
-
-    return 0;
-}
-
-fn onFutexWaitEnd(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, data_opaque: ?*anyopaque) callconv(.c) void {
-    const this = thisFromProbe(probe);
-    if (regs.getReturnValue() != 0) return; // Not woke by other threads.
-
-    const data: *WaitProbeCtx = @ptrCast(@alignCast(data_opaque.?));
-
-    const wakers_clock = this.sync_clock_map.get(data.futex_handle) orelse {
-        @branchHint(.cold);
-        std.log.err("TODO: onFutexWaitEnd thread_poinst null", .{});
-        return;
-    };
-
-    const current_tid: usize = @intCast(kernel.Task.current().tid());
-    const new_clock = wakers_clock - data.clock_lag;
-    this.thread_local_clocks.put(atomic_allocator, current_tid, new_clock) catch {};
-
-    this.registerForSleep(kernel.Task.current()) catch {}; //TODO: Handle me
-}
-
-fn onFutexWake(probe: *kernel.probe.F, _: c_ulong, _: c_ulong, regs: *kernel.probe.FtraceRegs, _: ?*anyopaque) callconv(.c) c_int {
-    const this = thisFromProbe(probe);
-    if (this.shouldIgnore()) return 1;
-
-    const current_tid: usize = @intCast(kernel.Task.current().tid());
-    const clock = this.thread_local_clocks.get(current_tid) orelse {
-        @branchHint(.cold);
-        std.log.err("TODO: onFutexWake thread_points null", .{});
-        return 1;
-    };
-
-    const futex_handle: FutexHandle = regs.getArgument(0);
-    this.sync_clock_map.put(atomic_allocator, futex_handle, clock) catch return 1; //TODO: should signal error;
-
-    return 0;
 }
 
 // Task Work Callbacks
