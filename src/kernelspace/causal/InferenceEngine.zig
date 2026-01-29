@@ -111,8 +111,8 @@ pub fn deinit(this: *@This()) void {
 
     this.sampler.deinit();
 
-    kernel.tracepoint.sched_fork.unregister(onSchedFork, this);
-    kernel.tracepoint.sched_exit.unregister(onSchedExit, this);
+    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
+    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
     kernel.tracepoint.sync();
 
     for (&this.probes) |*probe| probe.probe.unregister();
@@ -131,8 +131,8 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
 
     this.task_work_pool.context.store(this, .monotonic);
 
-    try kernel.tracepoint.sched_fork.register(onSchedFork, this);
-    try kernel.tracepoint.sched_exit.register(onSchedExit, this);
+    try kernel.tracepoint.sched.fork.register(onSchedFork, this);
+    try kernel.tracepoint.sched.exit.register(onSchedExit, this);
 
     for (&this.probes) |*probe| {
         const filter = probe.data.filter;

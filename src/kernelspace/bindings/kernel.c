@@ -128,6 +128,8 @@ void c_unregister_sched_fork(void *, void *);
 void c_tracepoint_init(void);
 int c_register_sched_exit(void *, void *);
 void c_unregister_sched_exit(void *, void *);
+int c_register_sched_waking(void *, void *);
+void c_unregister_sched_waking(void *, void *);
 void c_tracepoint_sync(void);
 
 /* Implementations */
@@ -402,6 +404,7 @@ extern struct tracepoint __tracepoint_sched_process_fork;
 struct tracepoint_provider {
   struct tracepoint *sched_fork;
   struct tracepoint *sched_exit;
+  struct tracepoint *sched_waking;
 } tp_prov = {0};
 
 static void lookup_all_tps(struct tracepoint *tp, void *priv) {
@@ -409,6 +412,8 @@ static void lookup_all_tps(struct tracepoint *tp, void *priv) {
     tp_prov.sched_fork = tp;
   else if (strcmp(tp->name, "sched_process_exit") == 0)
     tp_prov.sched_exit = tp;
+  else if (strcmp(tp->name, "sched_waking") == 0)
+    tp_prov.sched_waking = tp;
 }
 
 void c_tracepoint_init(void) {
@@ -435,6 +440,17 @@ int c_register_sched_exit(void *probe, void *data) {
 void c_unregister_sched_exit(void *probe, void *data) {
   if (tp_prov.sched_exit)
     tracepoint_probe_unregister(tp_prov.sched_exit, probe, data);
+}
+
+int c_register_sched_waking(void *probe, void *data) {
+  if (!tp_prov.sched_waking)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_waking, probe, data);
+}
+
+void c_unregister_sched_waking(void *probe, void *data) {
+  if (tp_prov.sched_waking)
+    tracepoint_probe_unregister(tp_prov.sched_waking, probe, data);
 }
 
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }

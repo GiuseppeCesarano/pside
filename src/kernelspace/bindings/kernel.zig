@@ -595,32 +595,53 @@ pub const tracepoint = struct {
         c_tracepoint_sync();
     }
 
-    pub const sched_fork = struct {
-        pub const Callback = *const fn (data: ?*anyopaque, parent: *Task, child: *Task) callconv(.c) void;
+    pub const sched = struct {
+        pub const RegistrationError = error{
+            Failed,
+            //TODO: fill
+        };
 
-        extern fn c_register_sched_fork(probe: Callback, data: ?*anyopaque) c_int;
-        pub fn register(trace: Callback, data: ?*anyopaque) !void {
-            if (c_register_sched_fork(trace, data) != 0) return error.TracepointRegistrationFailed;
-        }
+        pub const fork = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, parent: *Task, child: *Task) callconv(.c) void;
 
-        extern fn c_unregister_sched_fork(probe: Callback, data: ?*anyopaque) void;
-        pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-            c_unregister_sched_fork(trace, data);
-        }
-    };
+            extern fn c_register_sched_fork(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_fork(trace, data) != 0) return RegistrationError.Failed;
+            }
 
-    pub const sched_exit = struct {
-        pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
+            extern fn c_unregister_sched_fork(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_fork(trace, data);
+            }
+        };
 
-        extern fn c_register_sched_exit(probe: Callback, data: ?*anyopaque) c_int;
-        pub fn register(trace: Callback, data: ?*anyopaque) !void {
-            if (c_register_sched_exit(trace, data) != 0) return error.TracepointRegistrationFailed;
-        }
+        pub const exit = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
 
-        extern fn c_unregister_sched_exit(probe: Callback, data: ?*anyopaque) void;
-        pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-            c_unregister_sched_exit(trace, data);
-        }
+            extern fn c_register_sched_exit(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_exit(trace, data) != 0) return RegistrationError.Failed;
+            }
+
+            extern fn c_unregister_sched_exit(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_exit(trace, data);
+            }
+        };
+
+        pub const waking = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
+
+            extern fn c_register_sched_waking(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_waking(trace, data) != 0) return RegistrationError.Failed;
+            }
+
+            extern fn c_unregister_sched_waking(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_waking(trace, data);
+            }
+        };
     };
 };
 
