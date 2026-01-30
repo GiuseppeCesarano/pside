@@ -48,6 +48,7 @@ u64 c_ktime_get_ns(void);
 struct task_struct *c_current_task(void);
 pid_t c_pid(struct task_struct *);
 pid_t c_tid(struct task_struct *);
+int c_task_is_running(struct task_struct *);
 struct callback_head **c_task_work_ptr(struct task_struct *);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
@@ -123,9 +124,11 @@ bool c_kthread_should_stop(void);
 void c_sleep(unsigned long);
 
 /* Tracepoints */
+void c_tracepoint_init(void);
 int c_register_sched_fork(void *, void *);
 void c_unregister_sched_fork(void *, void *);
-void c_tracepoint_init(void);
+int c_register_sched_switch(void *, void *);
+void c_unregister_sched_switch(void *, void *);
 int c_register_sched_exit(void *, void *);
 void c_unregister_sched_exit(void *, void *);
 int c_register_sched_waking(void *, void *);
@@ -166,6 +169,9 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 struct task_struct *c_current_task(void) { return current; }
 pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
 pid_t c_tid(struct task_struct *task) { return task_pid_nr(task); }
+int c_task_is_running(struct task_struct *task) {
+  return task_is_running(task);
+}
 struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;
 }
@@ -405,6 +411,7 @@ struct tracepoint_provider {
   struct tracepoint *sched_fork;
   struct tracepoint *sched_exit;
   struct tracepoint *sched_waking;
+  struct tracepoint *sched_switch;
 } tp_prov = {0};
 
 static void lookup_all_tps(struct tracepoint *tp, void *priv) {
@@ -414,6 +421,8 @@ static void lookup_all_tps(struct tracepoint *tp, void *priv) {
     tp_prov.sched_exit = tp;
   else if (strcmp(tp->name, "sched_waking") == 0)
     tp_prov.sched_waking = tp;
+  else if (strcmp(tp->name, "sched_switch") == 0)
+    tp_prov.sched_switch = tp;
 }
 
 void c_tracepoint_init(void) {
@@ -429,6 +438,17 @@ int c_register_sched_fork(void *probe, void *data) {
 void c_unregister_sched_fork(void *probe, void *data) {
   if (tp_prov.sched_fork)
     tracepoint_probe_unregister(tp_prov.sched_fork, probe, data);
+}
+
+int c_register_sched_switch(void *probe, void *data) {
+  if (!tp_prov.sched_switch)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_switch, probe, data);
+}
+
+void c_unregister_sched_switch(void *probe, void *data) {
+  if (tp_prov.sched_switch)
+    tracepoint_probe_unregister(tp_prov.sched_switch, probe, data);
 }
 
 int c_register_sched_exit(void *probe, void *data) {

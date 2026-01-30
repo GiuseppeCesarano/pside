@@ -251,14 +251,19 @@ pub const Task = opaque {
         return c_current_task();
     }
 
-    extern fn c_pid(*const @This()) linux.pid_t;
-    pub fn pid(this: *const @This()) linux.pid_t {
+    extern fn c_pid(*@This()) linux.pid_t;
+    pub fn pid(this: *@This()) linux.pid_t {
         return c_pid(this);
     }
 
-    extern fn c_tid(*const @This()) linux.pid_t;
-    pub fn tid(this: *const @This()) linux.pid_t {
+    extern fn c_tid(*@This()) linux.pid_t;
+    pub fn tid(this: *@This()) linux.pid_t {
         return c_tid(this);
+    }
+
+    extern fn c_task_is_running(*@This()) c_int;
+    pub fn isRunning(this: *@This()) bool {
+        return c_task_is_running(this) != 0;
     }
 
     pub const Work = extern struct {
@@ -598,7 +603,6 @@ pub const tracepoint = struct {
     pub const sched = struct {
         pub const RegistrationError = error{
             Failed,
-            //TODO: fill
         };
 
         pub const fork = struct {
@@ -640,6 +644,20 @@ pub const tracepoint = struct {
             extern fn c_unregister_sched_waking(probe: Callback, data: ?*anyopaque) void;
             pub fn unregister(trace: Callback, data: ?*anyopaque) void {
                 c_unregister_sched_waking(trace, data);
+            }
+        };
+
+        pub const @"switch" = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, preempt: bool, prev: *Task, next: *Task) callconv(.c) void;
+
+            extern fn c_register_sched_switch(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_switch(trace, data) != 0) return RegistrationError.Failed;
+            }
+
+            extern fn c_unregister_sched_switch(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_switch(trace, data);
             }
         };
     };

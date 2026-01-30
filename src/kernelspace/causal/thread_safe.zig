@@ -228,6 +228,10 @@ pub fn Pool(Type: type) type {
 
             std.debug.assert(this.used_bitmask.fetchAnd(freeing_bit, .release) & (~freeing_bit) != 0);
         }
+
+        pub fn inUse(this: *@This()) bool {
+            return @popCount(this.used_bitmask.load(.monotonic)) != 0;
+        }
     };
 }
 
