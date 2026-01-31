@@ -9,6 +9,7 @@ export const license linksection(".modinfo") = "license=GPL".*;
 
 pub const std_options: std.Options = .{
     .logFn = kernel.LogWithName(name).logFn,
+    .page_size_min = 4096,
 };
 
 var chardev: kernel.CharDevice = undefined;

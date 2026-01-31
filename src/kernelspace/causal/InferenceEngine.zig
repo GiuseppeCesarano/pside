@@ -335,7 +335,7 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
 
     const clock_delta = global_clock - clock;
 
-    const delay =  clock_delta * delay_per_tick + clock_lag;
+    const delay = clock_delta * delay_per_tick + clock_lag;
     if (delay > 10 * std.time.us_per_s) this.fatalErr("Sleep exceded 10s");
 
     kernel.time.sleep.us(delay);
