@@ -1,7 +1,6 @@
 #include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/fprobe.h>
 #include <linux/fs.h>
 #include <linux/ftrace_regs.h>
 #include <linux/io.h>
@@ -17,7 +16,6 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
-#include <linux/uprobes.h>
 
 /* Forward declarations */
 
@@ -53,33 +51,6 @@ struct callback_head **c_task_work_ptr(struct task_struct *);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
 int c_task_work_add(struct task_struct *, struct callback_head *, int);
-
-/* Paths */
-struct path c_kern_path(const char *, int *);
-void c_path_put(struct path *);
-
-/* Dentry / inode */
-void *c_d_inode(void *);
-
-/* Uprobes */
-struct uprobe *c_uprobe_register(void *, u64, struct uprobe_consumer *);
-void c_uprobe_unregister(struct uprobe *, struct uprobe_consumer *);
-
-/* Fprobes */
-int c_register_fprobe(struct fprobe *, const char *, const char *);
-int c_unregister_fprobe(struct fprobe *);
-void c_disable_fprobe(struct fprobe *);
-void c_enable_fprobe(struct fprobe *);
-
-/* ftrace_regs */
-unsigned long c_ftrace_regs_get_instruction_pointer(struct ftrace_regs *);
-unsigned long c_ftrace_regs_get_argument(struct ftrace_regs *, unsigned int);
-unsigned long c_ftrace_regs_get_stack_pointer(struct ftrace_regs *);
-unsigned long c_ftrace_regs_get_return_value(struct ftrace_regs *);
-void c_ftrace_regs_set_return_value(struct ftrace_regs *, unsigned long);
-void c_ftrace_override_function_with_return(struct ftrace_regs *);
-int c_ftrace_regs_query_register_offset(const char *);
-unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *);
 
 /* Chardev */
 
@@ -195,69 +166,6 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
   if (!real_task_work_add)
     return -ENOSYS;
   return real_task_work_add(task, twork, notify_mode);
-}
-
-/* Paths */
-struct path c_kern_path(const char *path, int *err) {
-  struct path p;
-  *err = kern_path(path, LOOKUP_FOLLOW, &p);
-  return p;
-}
-
-void c_path_put(struct path *path) { path_put(path); }
-
-/* Dentry / inode */
-void *c_d_inode(void *dentry) { return d_inode(dentry); }
-
-/* Uprobes */
-struct uprobe *c_uprobe_register(void *inode, u64 offset,
-                                 struct uprobe_consumer *uc) {
-  return uprobe_register(inode, offset, 0, uc);
-}
-
-void c_uprobe_unregister(struct uprobe *u, struct uprobe_consumer *uc) {
-  uprobe_unregister_nosync(u, uc);
-  uprobe_unregister_sync();
-}
-
-/* Fprobes */
-int c_register_fprobe(struct fprobe *probe, const char *filter,
-                      const char *nofilter) {
-  return register_fprobe(probe, filter, nofilter);
-}
-
-int c_unregister_fprobe(struct fprobe *probe) {
-  return unregister_fprobe(probe);
-}
-
-void c_disable_fprobe(struct fprobe *fp) { disable_fprobe(fp); }
-void c_enable_fprobe(struct fprobe *fp) { enable_fprobe(fp); }
-
-/* ftrace_regs */
-unsigned long c_ftrace_regs_get_instruction_pointer(struct ftrace_regs *regs) {
-  return ftrace_regs_get_instruction_pointer(regs);
-}
-
-unsigned long c_ftrace_regs_get_argument(struct ftrace_regs *regs,
-                                         unsigned int n) {
-  return ftrace_regs_get_argument(regs, n);
-}
-
-unsigned long c_ftrace_regs_get_stack_pointer(struct ftrace_regs *regs) {
-  return ftrace_regs_get_stack_pointer(regs);
-}
-
-unsigned long c_ftrace_regs_get_return_value(struct ftrace_regs *regs) {
-  return ftrace_regs_get_return_value(regs);
-}
-
-void c_ftrace_regs_set_return_value(struct ftrace_regs *regs,
-                                    unsigned long ret) {
-  ftrace_regs_set_return_value(regs, ret);
-}
-
-unsigned long c_ftrace_regs_get_frame_pointer(struct ftrace_regs *regs) {
-  return ftrace_regs_get_frame_pointer(regs);
 }
 
 /* Chardev */
@@ -429,48 +337,48 @@ void c_tracepoint_init(void) {
   for_each_kernel_tracepoint(lookup_all_tps, NULL);
 }
 
-int c_register_sched_fork(void *probe, void *data) {
+int c_register_sched_fork(void *callback, void *data) {
   if (!tp_prov.sched_fork)
     return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_fork, probe, data);
+  return tracepoint_probe_register(tp_prov.sched_fork, callback, data);
 }
 
-void c_unregister_sched_fork(void *probe, void *data) {
+void c_unregister_sched_fork(void *callback, void *data) {
   if (tp_prov.sched_fork)
-    tracepoint_probe_unregister(tp_prov.sched_fork, probe, data);
+    tracepoint_probe_unregister(tp_prov.sched_fork, callback, data);
 }
 
-int c_register_sched_switch(void *probe, void *data) {
+int c_register_sched_switch(void *callback, void *data) {
   if (!tp_prov.sched_switch)
     return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_switch, probe, data);
+  return tracepoint_probe_register(tp_prov.sched_switch, callback, data);
 }
 
-void c_unregister_sched_switch(void *probe, void *data) {
+void c_unregister_sched_switch(void *callback, void *data) {
   if (tp_prov.sched_switch)
-    tracepoint_probe_unregister(tp_prov.sched_switch, probe, data);
+    tracepoint_probe_unregister(tp_prov.sched_switch, callback, data);
 }
 
-int c_register_sched_exit(void *probe, void *data) {
+int c_register_sched_exit(void *callback, void *data) {
   if (!tp_prov.sched_exit)
     return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_exit, probe, data);
+  return tracepoint_probe_register(tp_prov.sched_exit, callback, data);
 }
 
-void c_unregister_sched_exit(void *probe, void *data) {
+void c_unregister_sched_exit(void *callback, void *data) {
   if (tp_prov.sched_exit)
-    tracepoint_probe_unregister(tp_prov.sched_exit, probe, data);
+    tracepoint_probe_unregister(tp_prov.sched_exit, callback, data);
 }
 
-int c_register_sched_waking(void *probe, void *data) {
+int c_register_sched_waking(void *callback, void *data) {
   if (!tp_prov.sched_waking)
     return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_waking, probe, data);
+  return tracepoint_probe_register(tp_prov.sched_waking, callback, data);
 }
 
-void c_unregister_sched_waking(void *probe, void *data) {
+void c_unregister_sched_waking(void *callback, void *data) {
   if (tp_prov.sched_waking)
-    tracepoint_probe_unregister(tp_prov.sched_waking, probe, data);
+    tracepoint_probe_unregister(tp_prov.sched_waking, callback, data);
 }
 
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
