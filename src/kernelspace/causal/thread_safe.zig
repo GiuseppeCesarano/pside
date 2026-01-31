@@ -80,7 +80,7 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             } else null;
         }
 
-        pub fn increment(this: *@This(), at: usize) ?Value {
+        pub fn increment(this: *@This(), at: usize, operand: Value) ?Value {
             const indexes = getBlockAndItemIndex(at);
 
             this.ref_gate.increment();
@@ -90,10 +90,10 @@ pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
             return if (nullable_ptr) |ptr| v: {
                 var value = ptr.load(.monotonic);
                 if (value == empty_value) break :v null;
-                while (ptr.cmpxchgWeak(value, value + 1, .monotonic, .monotonic)) |new_val| : (value = new_val) {
+                while (ptr.cmpxchgWeak(value, value + operand, .monotonic, .monotonic)) |new_val| : (value = new_val) {
                     if (value == empty_value) break :v null;
                 }
-                break :v value + 1;
+                break :v value + operand;
             } else null;
         }
 

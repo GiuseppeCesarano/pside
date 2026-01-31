@@ -32,7 +32,7 @@ pub fn spawn(tracee_exe: Program, io: std.Io) !@This() {
     try ptrace.cont(child_pid);
     try ptrace.waitFor(child_pid, .exec);
 
-    const elf_entrypoint = try elfEntrypoint(child_pid, io);
+    const elf_entrypoint = try elfRuntimeEntrypoint(child_pid, io);
     const old_ins = try ptrace.peekWord(.text, child_pid, elf_entrypoint);
     try ptrace.poke(.text, child_pid, elf_entrypoint, arch_specific.interrupt);
 
@@ -120,7 +120,7 @@ fn raise(sig: linux.SIG) !void {
     };
 }
 
-fn elfEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
+fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     const max_pid_chars = comptime std.math.log10(@as(usize, std.math.maxInt(linux.pid_t)));
     const fmt = "/proc/{}/auxv";
 
