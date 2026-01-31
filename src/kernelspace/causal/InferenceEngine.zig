@@ -7,13 +7,12 @@ const thread_safe = @import("thread_safe.zig");
 const Pid = std.os.linux.pid_t;
 const Tid = Pid;
 const FutexHandle = usize;
-const ClockTick = usize;
 
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
 
-const ThreadLocalClock = thread_safe.SegmentedSparseVector(ClockTick, std.math.maxInt(ClockTick));
 const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
+const ClockTick = thread_safe.ThreadsClock.Clock.Tick;
 
 const sampler_frequency_ns = 1 * std.time.ns_per_ms;
 
@@ -28,8 +27,7 @@ selected_ip: std.atomic.Value(usize),
 
 progress: *std.atomic.Value(usize),
 global_virtual_clock: std.atomic.Value(ClockTick),
-thread_local_clocks: ThreadLocalClock,
-thread_local_clocks_lag: ThreadLocalClock,
+threads_virtual_clock: thread_safe.ThreadsClock,
 task_work_pool: *TaskWorkPool,
 
 error_has_occurred: std.atomic.Value(bool),
@@ -49,8 +47,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
 
         .progress = progress_ptr,
         .global_virtual_clock = .init(0),
-        .thread_local_clocks = .init,
-        .thread_local_clocks_lag = .init,
+        .threads_virtual_clock = .init,
         .task_work_pool = pool,
         .error_has_occurred = .init(false),
 
@@ -79,14 +76,14 @@ pub fn deinit(this: *@This()) void {
 
     while (this.task_work_pool.inUse()) kernel.time.sleep.us(100);
 
-    this.thread_local_clocks.deinit(atomic_allocator);
+    this.threads_virtual_clock.deinit(atomic_allocator);
 
     allocator.destroy(this.task_work_pool);
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {
-    try this.thread_local_clocks.put(atomic_allocator, @intCast(pid), 0);
-    try this.thread_local_clocks_lag.put(atomic_allocator, @intCast(pid), 0);
+    try this.threads_virtual_clock.put(atomic_allocator, .ticks, pid, 0);
+    try this.threads_virtual_clock.put(atomic_allocator, .lag, pid, 0);
     this.instrumented_pid.store(pid, .release);
 
     this.task_work_pool.context.store(this, .monotonic);
@@ -166,8 +163,8 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         const selected_ip = this.selected_ip.load(.monotonic);
 
-        const v_ticks = this.global_virtual_clock.load(.monotonic) -% baseline_vclock;
-        const total_delay = @as(usize, v_ticks) * delay_per_tick;
+        const v_ticks = this.global_virtual_clock.load(.monotonic) - baseline_vclock;
+        const total_delay = v_ticks * delay_per_tick;
 
         const adjusted = wall - total_delay;
 
@@ -221,8 +218,8 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 }
 
 fn increment(this: *@This()) void {
-    const current_tid: usize = @intCast(kernel.Task.current().tid());
-    if (this.thread_local_clocks.increment(current_tid, 1)) |clock|
+    const current_tid = kernel.Task.current().tid();
+    if (this.threads_virtual_clock.add(.ticks, current_tid, 1)) |clock|
         _ = this.global_virtual_clock.fetchMax(clock, .monotonic);
 }
 
@@ -251,34 +248,34 @@ fn registerForSleep(this: *@This(), task: *kernel.Task) void {
 }
 
 fn registerLag(this: *@This(), task: *kernel.Task) void {
-    const tid: usize = @intCast(task.tid());
+    const tid = task.tid();
 
-    const local_clock = this.thread_local_clocks.get(tid) orelse return;
+    const local_clock = this.threads_virtual_clock.get(.ticks, tid) orelse return;
     const global_clock = this.global_virtual_clock.load(.monotonic);
 
-    const clock_delta = global_clock -| local_clock;
+    const clock_delta = global_clock - local_clock;
 
-    _ = this.thread_local_clocks_lag.increment(tid, clock_delta);
-    this.thread_local_clocks.put(atomic_allocator, tid, global_clock) catch |e| this.fatalErr(@errorName(e));
+    _ = this.threads_virtual_clock.add(.lag, tid, clock_delta);
+    this.threads_virtual_clock.put(atomic_allocator, .ticks, tid, global_clock) catch |e| this.fatalErr(@errorName(e));
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.instrumented_pid.load(.monotonic)) return;
 
-    const parent_tid: usize = @intCast(parent.tid());
-    const parent_clock = this.thread_local_clocks.get(parent_tid) orelse {
+    const parent_tid = parent.tid();
+    const parent_clock = this.threads_virtual_clock.get(.ticks, parent_tid) orelse {
         this.err("Null parent clock in onSchedFork");
         return;
     };
-    const parent_clock_lag = this.thread_local_clocks_lag.get(parent_tid) orelse {
+    const parent_clock_lag = this.threads_virtual_clock.get(.lag, parent_tid) orelse {
         this.err("Null parent clock lag in onSchedFork");
         return;
     };
 
-    const child_tid: usize = @intCast(child.tid());
-    this.thread_local_clocks.put(atomic_allocator, child_tid, parent_clock) catch |e| this.fatalErr(@errorName(e));
-    this.thread_local_clocks_lag.put(atomic_allocator, child_tid, parent_clock_lag) catch |e| this.fatalErr(@errorName(e));
+    const child_tid = child.tid();
+    this.threads_virtual_clock.put(atomic_allocator, .ticks, child_tid, parent_clock) catch |e| this.fatalErr(@errorName(e));
+    this.threads_virtual_clock.put(atomic_allocator, .lag, child_tid, parent_clock_lag) catch |e| this.fatalErr(@errorName(e));
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
@@ -294,7 +291,7 @@ fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
     const instrumented_pid = this.instrumented_pid.load(.monotonic);
     if (waked.pid() != instrumented_pid) return;
 
-    const waked_tid: usize = @intCast(waked.tid());
+    const waked_tid = waked.tid();
     const current = kernel.Task.current();
 
     if (current.pid() != instrumented_pid) {
@@ -302,15 +299,15 @@ fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
         // so we advance the virtual clock to be equal to the global one to avoid
         // a slowdown that would be caused by external factors
         const global_clock = this.global_virtual_clock.load(.monotonic);
-        this.thread_local_clocks.put(atomic_allocator, waked_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
+        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
     } else {
-        const current_tid: usize = @intCast(current.tid());
-        const current_clock = this.thread_local_clocks.get(current_tid) orelse {
+        const current_tid = current.tid();
+        const current_clock = this.threads_virtual_clock.get(.ticks, current_tid) orelse {
             this.err("Null clock in sched waking tracepoint");
             return;
         };
 
-        this.thread_local_clocks.put(atomic_allocator, waked_tid, current_clock) catch |e| this.fatalErr(@errorName(e));
+        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, current_clock) catch |e| this.fatalErr(@errorName(e));
     }
 }
 
@@ -324,26 +321,26 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
     const pool = TaskWorkPool.getPoolPtrFromEntryPtr(work);
     const this: *@This() = @ptrCast(@alignCast(pool.context.load(.monotonic).?));
-    const current_tid: usize = @intCast(kernel.Task.current().tid());
+    const current_tid = kernel.Task.current().tid();
 
-    const clock = this.thread_local_clocks.get(current_tid) orelse {
+    const clock = this.threads_virtual_clock.get(.ticks, current_tid) orelse {
         this.err("Null clock in doSleep");
         return;
     };
 
-    const clock_lag = this.thread_local_clocks_lag.get(current_tid) orelse 0;
+    const clock_lag = this.threads_virtual_clock.get(.lag, current_tid) orelse 0;
 
     const global_clock = this.global_virtual_clock.load(.monotonic);
     const delay_per_tick = this.virtual_speedup_delay.load(.monotonic);
 
     const clock_delta = global_clock - clock;
 
-    const delay = @as(usize, @intCast(clock_delta)) * delay_per_tick + clock_lag;
+    const delay =  clock_delta * delay_per_tick + clock_lag;
     if (delay > 10 * std.time.us_per_s) this.fatalErr("Sleep exceded 10s");
 
     kernel.time.sleep.us(delay);
 
-    this.thread_local_clocks.put(atomic_allocator, current_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
-    this.thread_local_clocks_lag.put(atomic_allocator, current_tid, 0) catch |e| this.fatalErr(@errorName(e));
+    this.threads_virtual_clock.put(atomic_allocator, .ticks, current_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
+    this.threads_virtual_clock.put(atomic_allocator, .lag, current_tid, 0) catch |e| this.fatalErr(@errorName(e));
     pool.freeEntry(work);
 }

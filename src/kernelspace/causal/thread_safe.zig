@@ -42,140 +42,183 @@ const RefGate = struct {
     }
 };
 
-pub fn SegmentedSparseVector(Value: type, empty_value: Value) type {
-    return struct {
-        const ValueAtomic = std.atomic.Value(Value);
-        const block_len = @divExact(std.heap.page_size_min, @sizeOf(ValueAtomic));
+pub const ThreadsClock = struct {
+    pub const Clock = struct {
+        pub const Tick = usize;
+        pub const empty_tick = @as(Tick, 1) << (@bitSizeOf(Tick) - 1);
 
-        const Block = [block_len]ValueAtomic;
+        pub const empty: @This() = .{ .ticks = .init(empty_tick), .lag = .init(empty_tick) };
 
-        // Those pointers need to be atomic since two threads could be
-        // trying to create the same block and we would find ourself with
-        // an ivalid layout.
-        //
-        // Meanwhile the slice itself can use acquire/release semantic on
-        // the ref_gate
-        blocks: []std.atomic.Value(?*Block),
-        ref_gate: RefGate,
+        const Field = enum {
+            ticks,
+            lag,
+        };
 
-        pub const init = @This(){ .blocks = &.{}, .ref_gate = .{} };
+        ticks: std.atomic.Value(Tick),
+        lag: std.atomic.Value(Tick),
 
-        fn unsafeGetPtr(this: *@This(), block_index: usize, item_index: usize) ?*ValueAtomic {
-            if (block_index >= this.blocks.len) return null;
+        pub fn get(this: *@This(), comptime field: Field) ?Tick {
+            const v = switch (field) {
+                .ticks => this.ticks.load(.monotonic),
+                .lag => this.lag.load(.monotonic),
+            };
 
-            const block = this.blocks[block_index].load(.acquire) orelse return null;
-            return &block[item_index];
+            return if (v & empty_tick == 0) v else null;
         }
 
-        pub fn get(this: *@This(), at: usize) ?Value {
-            const indexes = getBlockAndItemIndex(at);
-
-            this.ref_gate.increment();
-            defer this.ref_gate.decrement();
-
-            const nullable_ptr = this.unsafeGetPtr(indexes[0], indexes[1]);
-            return if (nullable_ptr) |ptr| v: {
-                const value = ptr.load(.monotonic);
-                break :v if (value != empty_value) value else null;
-            } else null;
+        pub fn put(this: *@This(), comptime field: Field, value: Tick) void {
+            switch (field) {
+                .ticks => this.ticks.store(value, .monotonic),
+                .lag => this.lag.store(value, .monotonic),
+            }
         }
 
-        pub fn increment(this: *@This(), at: usize, operand: Value) ?Value {
-            const indexes = getBlockAndItemIndex(at);
+        pub fn fetchAdd(this: *@This(), comptime field: Field, value: Tick) ?Tick {
+            const v = switch (field) {
+                .ticks => &this.ticks,
+                .lag => &this.lag,
+            };
 
-            this.ref_gate.increment();
-            defer this.ref_gate.decrement();
-
-            const nullable_ptr = this.unsafeGetPtr(indexes[0], indexes[1]);
-            return if (nullable_ptr) |ptr| v: {
-                var value = ptr.load(.monotonic);
-                if (value == empty_value) break :v null;
-                while (ptr.cmpxchgWeak(value, value + operand, .monotonic, .monotonic)) |new_val| : (value = new_val) {
-                    if (value == empty_value) break :v null;
-                }
-                break :v value + operand;
-            } else null;
-        }
-
-        pub fn put(this: *@This(), allocator: std.mem.Allocator, at: usize, value: Value) !void {
-            const block_index = @divFloor(at, block_len);
-
-            this.ref_gate.increment();
-            defer this.ref_gate.decrement();
-
-            if (block_index >= this.blocks.len) {
-                this.ref_gate.decrement();
-                try this.grow(allocator, block_index + 1);
-                this.ref_gate.increment();
+            const ret = v.fetchAdd(value, .monotonic);
+            if (ret & empty_tick != 0) {
+                _ = v.cmpxchgStrong(ret, empty_tick, .monotonic, .monotonic);
+                return null;
             }
 
-            const block = this.blocks[block_index].load(.acquire) orelse try this.createBlockUnsafe(allocator, block_index);
-            block[at % block_len].store(value, .monotonic);
+            return ret;
+        }
+    };
+
+    const block_len = @divExact(std.heap.page_size_min, @sizeOf(Clock));
+    const Block = [block_len]Clock;
+
+    const Indexes = struct {
+        block: usize,
+        element: std.meta.Int(.unsigned, std.math.log2(block_len)),
+    };
+
+    // Those pointers need to be atomic since two threads could be
+    // trying to create the same block and we would find ourself with
+    // an ivalid layout.
+    //
+    // Meanwhile the slice itself can use acquire/release semantic on
+    // the ref_gate
+    blocks: []std.atomic.Value(?*Block),
+    ref_gate: RefGate,
+
+    pub const init = @This(){ .blocks = &.{}, .ref_gate = .{} };
+
+    fn getBlockAndItemIndex(at: std.os.linux.pid_t) Indexes {
+        std.debug.assert(at > 0);
+        const i: usize = @intCast(at);
+        return .{ .block = @divFloor(i, block_len), .element = @intCast(i % block_len) };
+    }
+
+    fn unsafeGetPtr(this: *@This(), index: Indexes) ?*Clock {
+        if (index.block >= this.blocks.len) return null;
+
+        const block = this.blocks[index.block].load(.acquire) orelse return null;
+        return &block[index.element];
+    }
+
+    pub fn put(this: *@This(), allocator: std.mem.Allocator, comptime field: Clock.Field, at: std.os.linux.pid_t, value: Clock.Tick) !void {
+        const index = getBlockAndItemIndex(at);
+
+        this.ref_gate.increment();
+        defer this.ref_gate.decrement();
+
+        if (index.block >= this.blocks.len) {
+            const new_size = @max(index.block + 1, this.blocks.len * 2);
+            this.ref_gate.decrement();
+            try this.grow(allocator, new_size);
+            this.ref_gate.increment();
         }
 
-        fn getBlockAndItemIndex(at: usize) struct { usize, usize } {
-            return .{ @divFloor(at, block_len), at % block_len };
-        }
+        const block = this.blocks[index.block].load(.acquire) orelse try this.createBlockUnsafe(allocator, index.block);
+        block[index.element].put(field, value);
+    }
 
-        fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
-            @branchHint(.cold);
+    pub fn get(this: *@This(), comptime field: Clock.Field, at: std.os.linux.pid_t) ?Clock.Tick {
+        const indexes = getBlockAndItemIndex(at);
 
-            const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
-            @memset(new_blocks, .{ .raw = null });
+        this.ref_gate.increment();
+        defer this.ref_gate.decrement();
 
-            this.ref_gate.close();
+        const nullable_ptr = this.unsafeGetPtr(indexes);
+        return if (nullable_ptr) |ptr| ptr.get(field) else null;
+    }
 
-            const old_blocks = this.blocks;
+    pub fn add(this: *@This(), comptime field: Clock.Field, at: std.os.linux.pid_t, operand: Clock.Tick) ?Clock.Tick {
+        const indexes = getBlockAndItemIndex(at);
 
-            // Somebody else may have grown the array already
-            if (new_len <= old_blocks.len) {
-                @branchHint(.unlikely);
-                this.ref_gate.open();
-                allocator.free(new_blocks);
-                return;
-            }
+        this.ref_gate.increment();
+        defer this.ref_gate.decrement();
 
-            this.ref_gate.drain();
+        const nullable_ptr = this.unsafeGetPtr(indexes);
+        return if (nullable_ptr) |ptr| v: {
+            const old = ptr.fetchAdd(field, operand) orelse break :v null;
+            break :v old + operand;
+        } else null;
+    }
 
-            @memcpy(new_blocks[0..old_blocks.len], old_blocks);
-            this.blocks = new_blocks;
+    fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
+        @branchHint(.cold);
 
+        const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
+        @memset(new_blocks, .{ .raw = null });
+
+        this.ref_gate.close();
+
+        const old_blocks = this.blocks;
+
+        // Somebody else may have grown the array already
+        if (new_len <= old_blocks.len) {
+            @branchHint(.unlikely);
             this.ref_gate.open();
-
-            allocator.free(old_blocks);
+            allocator.free(new_blocks);
+            return;
         }
 
-        fn createBlockUnsafe(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
+        this.ref_gate.drain();
+
+        @memcpy(new_blocks[0..old_blocks.len], old_blocks);
+        this.blocks = new_blocks;
+
+        this.ref_gate.open();
+
+        allocator.free(old_blocks);
+    }
+
+    fn createBlockUnsafe(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
+        @branchHint(.unlikely);
+
+        this.ref_gate.decrement();
+        const new_block = try allocator.create(Block);
+        @memset(new_block, .empty);
+        this.ref_gate.increment();
+
+        return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .acquire)) |actual| blk: {
             @branchHint(.unlikely);
 
             this.ref_gate.decrement();
-            const new_block = try allocator.create(Block);
-            @memset(new_block, .{ .raw = empty_value });
-            this.ref_gate.increment();
+            defer this.ref_gate.increment();
 
-            return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .acquire)) |actual| blk: {
-                @branchHint(.unlikely);
+            allocator.destroy(new_block);
 
-                this.ref_gate.decrement();
-                defer this.ref_gate.increment();
+            break :blk actual.?;
+        } else new_block;
+    }
 
-                allocator.destroy(new_block);
-
-                break :blk actual.?;
-            } else new_block;
-        }
-
-        pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
-            for (this.blocks) |*block| {
-                if (block.load(.monotonic)) |ptr| {
-                    allocator.destroy(ptr);
-                }
+    pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
+        for (this.blocks) |*block| {
+            if (block.load(.monotonic)) |ptr| {
+                allocator.destroy(ptr);
             }
-
-            allocator.free(this.blocks);
         }
-    };
-}
+
+        allocator.free(this.blocks);
+    }
+};
 
 pub fn Pool(Type: type) type {
     return struct {
@@ -235,24 +278,25 @@ pub fn Pool(Type: type) type {
     };
 }
 
+const testing = std.testing;
+
 test "RefGate: basic usage" {
     var gate = RefGate{};
 
     gate.increment();
     try std.testing.expectEqual(1, gate.reference.load(.monotonic));
     gate.decrement();
+
     try std.testing.expectEqual(0, gate.reference.load(.monotonic));
 }
 
 test "RefGate: cold path (waiting on closed gate)" {
     var gate = RefGate{};
-
     gate.close();
 
     const Context = struct {
         gate: *RefGate,
         entered: std.atomic.Value(bool) = .init(false),
-
         fn worker(ctx: *@This()) void {
             ctx.gate.increment();
             ctx.entered.store(true, .release);
@@ -264,66 +308,76 @@ test "RefGate: cold path (waiting on closed gate)" {
     const thread = try std.Thread.spawn(.{}, Context.worker, .{&ctx});
 
     try std.testing.io.sleep(.fromMilliseconds(10), .real);
-
     try std.testing.expectEqual(false, ctx.entered.load(.acquire));
 
     gate.open();
-
     thread.join();
+
     try std.testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
-test "SparseVector: single thread functional" {
-    const Vector = SegmentedSparseVector(u32, std.math.maxInt(u32));
-    var vec = Vector.init;
-    defer vec.deinit(std.testing.allocator);
+test "ThreadsClock: single thread functional" {
+    const allocator = testing.allocator;
+    var clock_vec = ThreadsClock.init;
+    defer clock_vec.deinit(allocator);
 
-    try vec.put(std.testing.allocator, 10, 123);
-    try std.testing.expectEqual(123, vec.get(10));
-    try std.testing.expectEqual(null, vec.get(11));
+    try clock_vec.put(allocator, .ticks, 10, 123);
+    try clock_vec.put(allocator, .lag, 10, 456);
 
-    try vec.put(std.testing.allocator, 5000, 999);
-    try std.testing.expectEqual(123, vec.get(10));
-    try std.testing.expectEqual(null, vec.get(11));
+    try testing.expectEqual(@as(?usize, 123), clock_vec.get(.ticks, 10));
+    try testing.expectEqual(@as(?usize, 456), clock_vec.get(.lag, 10));
 
-    try std.testing.expectEqual(999, vec.get(5000));
+    try testing.expectEqual(@as(?usize, null), clock_vec.get(.ticks, 11));
+
+    const old = clock_vec.add(.ticks, 10, 7);
+    try testing.expectEqual(@as(?usize, 130), old);
+    try testing.expectEqual(@as(?usize, 130), clock_vec.get(.ticks, 10));
+
+    try clock_vec.put(allocator, .ticks, 10000, 999);
+    try testing.expectEqual(@as(?usize, 999), clock_vec.get(.ticks, 10000));
+    try testing.expectEqual(@as(?usize, 130), clock_vec.get(.ticks, 10));
 }
 
-test "SparseVector: concurrent growth and access" {
-    var allocator_status = std.heap.ThreadSafeAllocator{ .child_allocator = std.testing.allocator };
-    const allocator = allocator_status.allocator();
+test "ThreadsClock: concurrent growth and access" {
+    var ts_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = testing.allocator };
+    const allocator = ts_alloc.allocator();
 
-    const Vector = SegmentedSparseVector(usize, std.math.maxInt(usize));
-    var vec = Vector.init;
-    defer vec.deinit(allocator);
+    var clock_vec = ThreadsClock.init;
+    defer clock_vec.deinit(allocator);
 
     const thread_count = 4;
-    const items_per_thread = 100_000;
+    const items_per_thread = 500;
 
     const Context = struct {
-        vec: *Vector,
+        vec: *ThreadsClock,
         id: usize,
-        fn run(ctx: @This(), alloc: std.mem.Allocator) !void {
-            var i: usize = 0;
-            while (i < items_per_thread) : (i += 1) {
-                const index = (i * thread_count) + ctx.id;
-                try ctx.vec.put(alloc, index, index * 10);
+        alloc: std.mem.Allocator,
+
+        fn run(ctx: *@This()) void {
+            var i: usize = 1;
+            while (i <= items_per_thread) : (i += 1) {
+                const pid: std.os.linux.pid_t = @intCast((i * thread_count) + ctx.id);
+                ctx.vec.put(ctx.alloc, .ticks, pid, @intCast(pid * 2)) catch unreachable;
             }
         }
     };
 
     var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]Context = undefined;
+
     for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{ Context{ .vec = &vec, .id = i }, allocator });
+        contexts[i] = .{ .vec = &clock_vec, .id = i, .alloc = allocator };
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{&contexts[i]});
     }
 
     for (threads) |t| t.join();
 
     for (0..thread_count) |t_id| {
-        for (0..items_per_thread) |i| {
-            const index = (i * thread_count) + t_id;
-            const val = vec.get(index);
-            try std.testing.expectEqual(index * 10, val.?);
+        var i: usize = 1;
+        while (i <= items_per_thread) : (i += 1) {
+            const pid: std.os.linux.pid_t = @intCast((i * thread_count) + t_id);
+            const val = clock_vec.get(.ticks, pid);
+            try testing.expectEqual(@as(usize, @intCast(pid * 2)), val.?);
         }
     }
 }
