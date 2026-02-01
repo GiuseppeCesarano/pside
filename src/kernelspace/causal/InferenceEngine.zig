@@ -23,10 +23,10 @@ profiler_thread: ?*kernel.Thread,
 sampler: ?*kernel.PerfEvent,
 
 virtual_speedup_delay: std.atomic.Value(usize),
-selected_ip: std.atomic.Value(usize),
+selected_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
 
 progress: *std.atomic.Value(usize),
-global_virtual_clock: std.atomic.Value(ClockTick),
+global_virtual_clock: std.atomic.Value(ClockTick) align(std.atomic.cache_line),
 threads_virtual_clock: thread_safe.ThreadsClock,
 task_work_pool: *TaskWorkPool,
 
@@ -86,7 +86,7 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     try this.threads_virtual_clock.put(atomic_allocator, .lag, pid, 0);
     this.instrumented_pid.store(pid, .release);
 
-    this.task_work_pool.context.store(this, .monotonic);
+    this.task_work_pool.context = this;
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
@@ -320,7 +320,7 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
     const pool = TaskWorkPool.getPoolPtrFromEntryPtr(work);
-    const this: *@This() = @ptrCast(@alignCast(pool.context.load(.monotonic).?));
+    const this: *@This() = @ptrCast(@alignCast(pool.context.?));
     const current_tid = kernel.Task.current().tid();
 
     const clock = this.threads_virtual_clock.get(.ticks, current_tid) orelse {

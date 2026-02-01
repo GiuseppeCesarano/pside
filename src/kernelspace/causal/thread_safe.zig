@@ -226,14 +226,14 @@ pub fn Pool(Type: type) type {
         const alignment = @sizeOf(Type) * pool_len;
 
         entries: [pool_len]Type align(alignment),
-        used_bitmask: std.atomic.Value(usize),
-        context: std.atomic.Value(?*anyopaque),
+        used_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
+        context: ?*anyopaque,
 
         pub fn empty() @This() {
             return .{
                 .entries = undefined,
                 .used_bitmask = .init(0),
-                .context = .init(null),
+                .context = null,
             };
         }
 
