@@ -1,4 +1,5 @@
 #include <linux/cdev.h>
+#include <linux/dcache.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/fs.h>
@@ -13,6 +14,7 @@
 #include <linux/perf_event.h>
 #include <linux/pid.h>
 #include <linux/printk.h>
+#include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
@@ -51,6 +53,15 @@ struct callback_head **c_task_work_ptr(struct task_struct *);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
 int c_task_work_add(struct task_struct *, struct callback_head *, int);
+
+/* RCU */
+void c_rcu_read_lock(void);
+void c_rcu_read_unlock(void);
+
+/* VMA */
+struct vm_area_struct *c_find_vma(struct task_struct *, unsigned long);
+unsigned long c_vma_start(struct vm_area_struct *);
+const char *c_vma_filename(struct vm_area_struct *);
 
 /* Chardev */
 
@@ -166,6 +177,30 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
   if (!real_task_work_add)
     return -ENOSYS;
   return real_task_work_add(task, twork, notify_mode);
+}
+
+/* RCU */
+void c_rcu_read_lock(void) { rcu_read_lock(); }
+void c_rcu_read_unlock(void) { rcu_read_unlock(); }
+
+/* VMA */
+struct vm_area_struct *c_find_vma(struct task_struct *task,
+                                  unsigned long addr) {
+  if (!task || !task->mm)
+    return NULL;
+  return find_vma(task->mm, addr);
+}
+
+unsigned long c_vma_start(struct vm_area_struct *vma) {
+  return vma ? vma->vm_start : 0;
+}
+
+const char *c_vma_filename(struct vm_area_struct *vma) {
+  // Only access vma_file within rcu_read_lock!
+  if (vma && vma->vm_file) {
+    return (const char *)vma->vm_file->f_path.dentry->d_name.name;
+  }
+  return NULL;
 }
 
 /* Chardev */

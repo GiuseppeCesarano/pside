@@ -251,6 +251,15 @@ pub const Task = opaque {
         return c_current_task();
     }
 
+    extern fn c_task_work_add(?*@This(), ?*Work, NotifyMode) c_int;
+    pub fn findAddWork() WorkAddError!void {
+        return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
+            .SUCCESS => {},
+            .NOSYS => WorkAddError.KprobeLeakFaild,
+            else => WorkAddError.Unknown,
+        };
+    }
+
     extern fn c_pid(*@This()) linux.pid_t;
     pub fn pid(this: *@This()) linux.pid_t {
         return c_pid(this);
@@ -287,15 +296,6 @@ pub const Task = opaque {
         Unknown,
     };
 
-    extern fn c_task_work_add(?*@This(), ?*Work, NotifyMode) c_int;
-    pub fn findAddWork() WorkAddError!void {
-        return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
-            .SUCCESS => {},
-            .NOSYS => WorkAddError.KprobeLeakFaild,
-            else => WorkAddError.Unknown,
-        };
-    }
-
     pub fn addWork(this: *@This(), work: *Work, notify_mode: NotifyMode) WorkAddError!void {
         return switch (linux.errno(@intCast(c_task_work_add(this, work, notify_mode)))) {
             .SUCCESS => {},
@@ -304,6 +304,37 @@ pub const Task = opaque {
             .SRCH => WorkAddError.TooLateShuttingDown,
             else => WorkAddError.Unknown,
         };
+    }
+
+    extern fn c_find_vma(*@This(), usize) *Vma;
+    pub fn findVma(this: *@This(), addr: usize) *Vma {
+        return c_find_vma(this, addr);
+    }
+};
+
+pub const rcu = struct {
+    pub const read = struct {
+        extern fn c_rcu_read_lock() void;
+        pub fn lock() void {
+            c_rcu_read_lock();
+        }
+
+        extern fn c_rcu_read_unlock() void;
+        pub fn unlock() void {
+            c_rcu_read_unlock();
+        }
+    };
+};
+
+pub const Vma = opaque {
+    extern fn c_vma_start(*@This()) usize;
+    pub fn start(this: *@This()) usize {
+        return c_vma_start(this);
+    }
+
+    extern fn c_vma_filename(*@This()) [*:0]const u8;
+    pub fn filename(this: *@This()) [*:0]const u8 {
+        return c_vma_filename(this);
     }
 };
 
