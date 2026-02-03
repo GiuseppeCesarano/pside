@@ -24,6 +24,7 @@ sampler: ?*kernel.PerfEvent,
 
 virtual_speedup_delay: std.atomic.Value(usize),
 selected_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
+vma_start: std.atomic.Value(usize),
 
 progress: *std.atomic.Value(usize),
 global_virtual_clock: std.atomic.Value(ClockTick) align(std.atomic.cache_line),
@@ -44,6 +45,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
         .experiment_duration = 50 * std.time.us_per_ms,
         .virtual_speedup_delay = .init(0),
         .selected_ip = .init(0),
+        .vma_start = .init(0),
 
         .progress = progress_ptr,
         .global_virtual_clock = .init(0),
@@ -171,7 +173,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
 
         std.log.info("DATA: 0x{x}, {}, {}, {}, {}", .{
-            selected_ip,
+            selected_ip - this.vma_start.load(.monotonic),
             delay_per_tick,
             @as(usize, @intCast(throughput)),
             v_ticks,
@@ -209,7 +211,20 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 
     if (selected_line == 0) {
         @branchHint(.unlikely);
-        if (this.selected_ip.cmpxchgStrong(selected_line, regs.ip, .monotonic, .monotonic) == null) this.increment();
+        kernel.rcu.read.lock();
+        defer kernel.rcu.read.unlock();
+
+        if (kernel.Task.current().findVma(regs.ip)) |vma| {
+            @branchHint(.likely);
+
+            const fname_ptr = vma.filename();
+            if (fname_ptr != null) {
+                if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null) {
+                    this.increment();
+                    this.vma_start.store(vma.start(), .monotonic);
+                }
+            }
+        }
     } else if (selected_line == regs.ip) {
         this.increment();
     }

@@ -306,8 +306,8 @@ pub const Task = opaque {
         };
     }
 
-    extern fn c_find_vma(*@This(), usize) *Vma;
-    pub fn findVma(this: *@This(), addr: usize) *Vma {
+    extern fn c_find_vma(*@This(), usize) ?*Vma;
+    pub fn findVma(this: *@This(), addr: usize) ?*Vma {
         return c_find_vma(this, addr);
     }
 };
@@ -332,8 +332,8 @@ pub const Vma = opaque {
         return c_vma_start(this);
     }
 
-    extern fn c_vma_filename(*@This()) [*:0]const u8;
-    pub fn filename(this: *@This()) [*:0]const u8 {
+    extern fn c_vma_filename(*@This()) ?[*:0]const u8;
+    pub fn filename(this: *@This()) ?[*:0]const u8 {
         return c_vma_filename(this);
     }
 };

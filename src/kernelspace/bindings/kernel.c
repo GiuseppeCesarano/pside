@@ -188,7 +188,8 @@ struct vm_area_struct *c_find_vma(struct task_struct *task,
                                   unsigned long addr) {
   if (!task || !task->mm)
     return NULL;
-  return find_vma(task->mm, addr);
+
+  return vma_lookup(task->mm, addr);
 }
 
 unsigned long c_vma_start(struct vm_area_struct *vma) {
@@ -196,7 +197,6 @@ unsigned long c_vma_start(struct vm_area_struct *vma) {
 }
 
 const char *c_vma_filename(struct vm_area_struct *vma) {
-  // Only access vma_file within rcu_read_lock!
   if (vma && vma->vm_file) {
     return (const char *)vma->vm_file->f_path.dentry->d_name.name;
   }
