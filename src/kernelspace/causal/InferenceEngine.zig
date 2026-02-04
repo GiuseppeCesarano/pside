@@ -1,4 +1,4 @@
-// For this file if a time variable has no postfix indicating otherwise the default unit is us.
+// For this file if a time variable has no posmonotonictfix indicating otherwise the default unit is us.
 
 const std = @import("std");
 const kernel = @import("kernel");
@@ -14,7 +14,7 @@ const allocator = kernel.heap.allocator;
 const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
 const ClockTick = thread_safe.ThreadsClock.Clock.Tick;
 
-const sampler_frequency = 999; // not round to avoid armonics with the scheduler
+const sampler_frequency = 999; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: usize,
@@ -86,7 +86,7 @@ pub fn deinit(this: *@This()) void {
 pub fn profilePid(this: *@This(), pid: Pid) !void {
     try this.threads_virtual_clock.put(atomic_allocator, .ticks, pid, 0);
     try this.threads_virtual_clock.put(atomic_allocator, .lag, pid, 0);
-    this.instrumented_pid.store(pid, .release);
+    this.instrumented_pid.store(pid, .monotonic);
 
     this.task_work_pool.context = this;
 
@@ -271,7 +271,7 @@ fn registerForSleep(this: *@This(), task: *kernel.Task) void {
     };
     work.func = doSleep;
 
-    task.addWork(work, .signal_no_ipi) catch this.fatalErr("Could not register seelp work");
+    task.addWork(work, .signal_no_ipi) catch this.fatalErr("Could not register sleep work");
 }
 
 fn registerLag(this: *@This(), task: *kernel.Task) void {
@@ -316,12 +316,12 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
     if (!prev.isRunning()) this.registerLag(prev);
 }
 
-fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
+fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
     const instrumented_pid = this.instrumented_pid.load(.monotonic);
-    if (waked.pid() != instrumented_pid) return;
+    if (woke.pid() != instrumented_pid) return;
 
-    const waked_tid = waked.tid();
+    const woke_tid = woke.tid();
     const current = kernel.Task.current();
 
     if (current.pid() != instrumented_pid) {
@@ -329,7 +329,7 @@ fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
         // so we advance the virtual clock to be equal to the global one to avoid
         // a slowdown that would be caused by external factors
         const global_clock = this.global_virtual_clock.load(.monotonic);
-        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, global_clock) catch |e| {
+        this.threads_virtual_clock.put(atomic_allocator, .ticks, woke_tid, global_clock) catch |e| {
             this.fatalErr(@errorName(e));
             return;
         };
@@ -340,7 +340,7 @@ fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
             return;
         };
 
-        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, current_clock) catch |e| this.fatalErr(@errorName(e));
+        this.threads_virtual_clock.put(atomic_allocator, .ticks, woke_tid, current_clock) catch |e| this.fatalErr(@errorName(e));
     }
 }
 
@@ -371,7 +371,7 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
 
     const delay = clock_delta * delay_per_tick + clock_lag;
     if (delay > 10 * std.time.us_per_s) {
-        this.fatalErr("Sleep exceded 10s");
+        this.fatalErr("Sleep exceeded 10s");
         pool.freeEntry(work);
         return;
     }
