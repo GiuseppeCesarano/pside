@@ -4,7 +4,7 @@ const Program = @import("Program.zig");
 
 const chardev_path = @import("KernelInterface.zig").chardev_path;
 const arch_specific = switch (@import("builtin").cpu.arch) {
-    .x86_64 => @import("tracee/x86_64.zig"),
+    .x86_64 => @import("traced/x86_64.zig"),
 
     else => @compileError("Only x86_64 supported right now"),
 };

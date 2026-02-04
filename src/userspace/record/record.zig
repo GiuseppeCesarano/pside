@@ -2,13 +2,13 @@ const std = @import("std");
 const cli = @import("cli");
 const KernelInterface = @import("KernelInterface.zig");
 const Program = @import("Program.zig");
-const Tracee = @import("Tracee.zig");
+const TracedProcess = @import("TracedProcess.zig");
 const elf_section_parser = @import("elf_section_parser.zig");
 
 const linux = std.os.linux;
 
 // Needs to be global so we can kill it inside SIGINT handler
-var gtracee: ?Tracee = null;
+var global_traced_process: ?TracedProcess = null;
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
     const parsed_options = options.parse(struct {
@@ -35,18 +35,18 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         std.log.warn("Could not remove the kernel module ({s}), please try manually with:\n\n\tsudo rmmod pside\n", .{@errorName(err)});
     } else |_| {};
 
-    gtracee = try .spawn(user_program, io);
-    const tracee = &gtracee.?;
-    errdefer tracee.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
+    global_traced_process = try .spawn(user_program, io);
+    const traced_process = &global_traced_process.?;
+    errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
     var module = try future_module.await(io);
-    try module.startProfilerOnPid(tracee.pid);
+    try module.startProfilerOnPid(traced_process.pid);
 
     for (try future_patch_addresses.await(io)) |address|
-        if (address != 0) try tracee.patchProgressPoint(address);
+        if (address != 0) try traced_process.patchProgressPoint(address);
 
-    try tracee.start();
-    _ = tracee.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
+    try traced_process.start();
+    _ = traced_process.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
 }
 
 fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
@@ -62,7 +62,7 @@ fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const
 }
 
 fn removeModuleOnSig(sig: linux.SIG) callconv(.c) void {
-    if (sig == .INT) if (gtracee) |*t| t.kill() catch {};
+    if (sig == .INT) if (global_traced_process) |*t| t.kill() catch {};
 }
 
 fn setIntHandler() void {
