@@ -14,7 +14,7 @@ const allocator = kernel.heap.allocator;
 const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
 const ClockTick = thread_safe.ThreadsClock.Clock.Tick;
 
-const sampler_frequency_ns = 1 * std.time.ns_per_ms;
+const sampler_frequency = 999; // not round to avoid armonics with the scheduler
 
 instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: usize,
@@ -103,21 +103,33 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     errdefer kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
-        .type = .SOFTWARE,
-        .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
-        .sample_period_or_freq = sampler_frequency_ns,
-        .wakeup_events_or_watermark = 1,
+        .type = .HARDWARE,
+        .config = @intFromEnum(std.os.linux.PERF.COUNT.HW.CPU_CYCLES),
+        .sample_period_or_freq = sampler_frequency,
         .flags = .{
+            .freq = true,
             .disabled = true,
             .inherit = true,
-            .exclude_host = true,
             .exclude_guest = true,
             .exclude_hv = true,
             .exclude_idle = true,
             .exclude_kernel = true,
+            .precise_ip = 3,
         },
     };
-    this.sampler = kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this) catch return;
+    this.sampler = kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this) catch |e| sw_event: switch (e) {
+        kernel.PerfEvent.InitErrors.NotSupported => {
+            std.log.warn(
+                \\Hardware doesn't support default perf event, falling back to software event.
+                \\Reported instruction pointers may skid. 
+            , .{});
+            sampler_attr.type = .SOFTWARE;
+            sampler_attr.config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK);
+            sampler_attr.flags.precise_ip = 0;
+            break :sw_event try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
+        },
+        else => return e,
+    };
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
@@ -126,7 +138,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *@This() = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop()) {
-        this.setExperimentParameters() catch return 0;
+        this.setExperimentParameters();
 
         const delay_per_tick = this.virtual_speedup_delay.load(.monotonic);
         const baseline_vclock = this.global_virtual_clock.load(.monotonic);
@@ -183,7 +195,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-fn setExperimentParameters(this: *@This()) !void {
+fn setExperimentParameters(this: *@This()) void {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
         var generator: std.Random = undefined;
@@ -200,7 +212,7 @@ fn setExperimentParameters(this: *@This()) !void {
     // Like coz, ~25% bias twards 0% speedup, then linear distribution on 5% increments.
     const roll = random.generator.uintLessThan(usize, 27);
     const speedup_percent = (roll -| 6) * 5;
-    const delay = @divFloor((speedup_percent * sampler_frequency_ns) / 100, std.time.ns_per_us);
+    const delay = (speedup_percent * sampler_frequency) / 100;
 
     this.virtual_speedup_delay.store(delay, .monotonic);
 }
