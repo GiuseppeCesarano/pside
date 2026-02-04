@@ -380,8 +380,8 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
 
     this.threads_virtual_clock.put(atomic_allocator, .ticks, current_tid, global_clock) catch |e| {
         pool.freeEntry(work); // fatalErr will free the current engine
-                              // if we keep holding the pool entry the deinit 
-                              // will spin forever
+        // if we keep holding the pool entry the deinit
+        // will spin forever
         this.fatalErr(@errorName(e));
         return;
     };

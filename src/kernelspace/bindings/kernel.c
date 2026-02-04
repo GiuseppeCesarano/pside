@@ -193,7 +193,7 @@ struct vm_area_struct *c_find_vma(struct task_struct *task,
 }
 
 unsigned long c_vma_start(struct vm_area_struct *vma) {
-  return vma ? vma->vm_start - (vma->vm_pgoff << PAGE_SHIFT) : 0;
+  return vma ? vma->vm_start : 0;
 }
 
 const char *c_vma_filename(struct vm_area_struct *vma) {
