@@ -22,7 +22,7 @@ experiment_duration: usize,
 profiler_thread: ?*kernel.Thread,
 sampler: ?*kernel.PerfEvent,
 
-virtual_speedup_delay: std.atomic.Value(usize),
+virtual_speedup_delay: std.atomic.Value(u16),
 selected_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
 vma_start: std.atomic.Value(usize),
 
@@ -214,7 +214,7 @@ fn setExperimentParameters(this: *@This()) void {
     const speedup_percent = (roll -| 6) * 5;
     const delay = (speedup_percent * sampler_frequency) / 100;
 
-    this.virtual_speedup_delay.store(delay, .monotonic);
+    this.virtual_speedup_delay.store(@truncate(delay), .monotonic);
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -301,7 +301,10 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     };
 
     const child_tid = child.tid();
-    this.threads_virtual_clock.put(atomic_allocator, .ticks, child_tid, parent_clock) catch |e| this.fatalErr(@errorName(e));
+    this.threads_virtual_clock.put(atomic_allocator, .ticks, child_tid, parent_clock) catch |e| {
+        this.fatalErr(@errorName(e));
+        return;
+    };
     this.threads_virtual_clock.put(atomic_allocator, .lag, child_tid, parent_clock_lag) catch |e| this.fatalErr(@errorName(e));
 }
 
@@ -326,7 +329,10 @@ fn onSchedWaking(data: ?*anyopaque, waked: *kernel.Task) callconv(.c) void {
         // so we advance the virtual clock to be equal to the global one to avoid
         // a slowdown that would be caused by external factors
         const global_clock = this.global_virtual_clock.load(.monotonic);
-        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
+        this.threads_virtual_clock.put(atomic_allocator, .ticks, waked_tid, global_clock) catch |e| {
+            this.fatalErr(@errorName(e));
+            return;
+        };
     } else {
         const current_tid = current.tid();
         const current_clock = this.threads_virtual_clock.get(.ticks, current_tid) orelse {
@@ -347,6 +353,7 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
     const pool = TaskWorkPool.getPoolPtrFromEntryPtr(work);
+
     const this: *@This() = @ptrCast(@alignCast(pool.context.?));
     const current_tid = kernel.Task.current().tid();
 
@@ -363,11 +370,26 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
     const clock_delta = global_clock - clock;
 
     const delay = clock_delta * delay_per_tick + clock_lag;
-    if (delay > 10 * std.time.us_per_s) this.fatalErr("Sleep exceded 10s");
+    if (delay > 10 * std.time.us_per_s) {
+        this.fatalErr("Sleep exceded 10s");
+        pool.freeEntry(work);
+        return;
+    }
 
     kernel.time.sleep.us(delay);
 
-    this.threads_virtual_clock.put(atomic_allocator, .ticks, current_tid, global_clock) catch |e| this.fatalErr(@errorName(e));
-    this.threads_virtual_clock.put(atomic_allocator, .lag, current_tid, 0) catch |e| this.fatalErr(@errorName(e));
+    this.threads_virtual_clock.put(atomic_allocator, .ticks, current_tid, global_clock) catch |e| {
+        pool.freeEntry(work); // fatalErr will free the current engine
+                              // if we keep holding the pool entry the deinit 
+                              // will spin forever
+        this.fatalErr(@errorName(e));
+        return;
+    };
+    this.threads_virtual_clock.put(atomic_allocator, .lag, current_tid, 0) catch |e| {
+        pool.freeEntry(work);
+        this.fatalErr(@errorName(e));
+        return;
+    };
+
     pool.freeEntry(work);
 }
