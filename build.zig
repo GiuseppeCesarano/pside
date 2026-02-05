@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const is_release_bundle = b.option(bool, "release", "Build CLI in ReleaseSmall and Kernel in ReleaseFast") orelse false;
     const target = b.standardTargetOptions(.{
         .whitelist = &.{
             .{
@@ -9,7 +10,8 @@ pub fn build(b: *std.Build) void {
             },
         },
     });
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize = if (is_release_bundle) .ReleaseSmall else b.standardOptimizeOption(.{});
+    const kernel_optimize = if (is_release_bundle) .ReleaseFast else optimize;
 
     const check = b.step("check", "Check for compilation errors");
 
@@ -26,7 +28,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, optimize, &.{ communications_mod, bindings_mod }, check));
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod }, check), is_release_bundle);
 
     const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
         " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -152,15 +154,18 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     return b.addObject(object_options);
 }
 
-fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
+fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile, should_strip: bool) *std.Build.Step.WriteFile {
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
 
     const write_files = b.addWriteFiles();
     _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
     _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
     _ = write_files.add(cmd_name, "");
+
     // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
+    const strip_cmd = if (should_strip) "\n\tstrip --strip-debug pside.ko" else "";
     const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
+
     _ = write_files.add("Makefile", b.fmt(
         \\{s}
         \\obj-m += pside.o
@@ -171,11 +176,12 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
         \\all:
     ++ "\n\t" ++
         \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+    ++ "{s}" ++
         \\ 
         \\clean:
     ++ "\n\t" ++
         \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
-    , .{ debug_flag, zig_kernel_obj.out_filename }));
+    , .{ debug_flag, zig_kernel_obj.out_filename, strip_cmd }));
 
     write_files.step.dependOn(&zig_kernel_obj.step);
 
