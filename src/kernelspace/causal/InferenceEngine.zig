@@ -103,8 +103,8 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
     errdefer kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
-        .type = .HARDWARE,
-        .config = @intFromEnum(std.os.linux.PERF.COUNT.HW.CPU_CYCLES),
+        .type = .SOFTWARE,
+        .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
         .sample_period_or_freq = sampler_frequency,
         .flags = .{
             .freq = true,
@@ -114,22 +114,9 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
             .exclude_hv = true,
             .exclude_idle = true,
             .exclude_kernel = true,
-            .precise_ip = 3,
         },
     };
-    this.sampler = kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this) catch |e| sw_event: switch (e) {
-        kernel.PerfEvent.InitErrors.NotSupported => {
-            std.log.warn(
-                \\Hardware doesn't support default perf event, falling back to software event.
-                \\Reported instruction pointers may skid. 
-            , .{});
-            sampler_attr.type = .SOFTWARE;
-            sampler_attr.config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK);
-            sampler_attr.flags.precise_ip = 0;
-            break :sw_event try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
-        },
-        else => return e,
-    };
+    this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
@@ -184,12 +171,10 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
 
-        std.log.info("DATA: 0x{x}, {}, {}, {}, {}", .{
+        std.log.info("0x{x}: [{}, {}]", .{
             selected_ip - this.vma_start.load(.monotonic),
             delay_per_tick,
-            @as(usize, @intCast(throughput)),
-            v_ticks,
-            adjusted,
+            throughput,
         });
     }
     return 0;
