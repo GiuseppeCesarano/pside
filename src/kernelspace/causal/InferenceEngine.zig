@@ -162,7 +162,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         // if an error has occurred in the current one
         // dont register the point (the next experiment could also
         // be skewed maybe we shall also discrd it)
-        if (this.error_has_occurred.swap(false, .monotonic)) {
+        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
             @branchHint(.unlikely);
             continue;
         }
