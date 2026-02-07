@@ -84,7 +84,7 @@ fn childStart(tracee_exe: Program) !void {
     try ptrace.traceMe();
     try raise(.STOP);
 
-    switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.ptr))) {
+    switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.slice))) {
         .SUCCESS => unreachable,
         .FAULT => unreachable,
         .@"2BIG" => return error.SystemResources,
