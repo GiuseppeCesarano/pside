@@ -304,27 +304,19 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
     const instrumented_pid = this.instrumented_pid.load(.monotonic);
-    if (woke.pid() != instrumented_pid) return;
 
-    const woke_tid = woke.tid();
     const current = kernel.Task.current();
 
-    if (current.pid() != instrumented_pid) {
-        // The sleep is not caused by program state so there is no causal effect,
-        // so we advance the virtual clock to be equal to the global one to avoid
-        // a slowdown that would be caused by external factors
-        const global_clock = this.global_virtual_clock.load(.monotonic);
-        this.threads_virtual_clock.put(atomic_allocator, .ticks, woke_tid, global_clock) catch |e| {
-            this.fatalErr(@errorName(e));
-            return;
-        };
-    } else {
+    if (current.pid() != instrumented_pid and woke.pid() != instrumented_pid) return;
+
+    if (current.pid() == instrumented_pid) {
         const current_tid = current.tid();
         const current_clock = this.threads_virtual_clock.get(.ticks, current_tid) orelse {
             this.err("Null clock in sched waking tracepoint");
             return;
         };
 
+        const woke_tid = woke.tid();
         this.threads_virtual_clock.put(atomic_allocator, .ticks, woke_tid, current_clock) catch |e| this.fatalErr(@errorName(e));
     }
 }
