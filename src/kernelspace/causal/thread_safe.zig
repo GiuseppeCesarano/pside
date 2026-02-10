@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 const RefGate = struct {
     const lock_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
@@ -8,12 +9,12 @@ const RefGate = struct {
 
     pub inline fn increment(this: *@This()) void {
         const ref = this.reference.fetchAdd(1, .acquire);
-        std.debug.assert(ref & lock_bit != lock_bit - 1);
+        assert(ref & lock_bit != lock_bit - 1);
         if (ref & lock_bit != 0) {
             @branchHint(.cold);
             var reference = (this.reference.fetchSub(1, .monotonic) - 1) & references_mask;
             while (this.reference.cmpxchgWeak(reference, reference + 1, .acquire, .monotonic)) |new_ref| {
-                std.debug.assert(new_ref & lock_bit != lock_bit - 1);
+                assert(new_ref & lock_bit != lock_bit - 1);
                 reference = new_ref & references_mask;
                 std.atomic.spinLoopHint();
             }
@@ -21,7 +22,7 @@ const RefGate = struct {
     }
 
     pub inline fn decrement(this: *@This()) void {
-        std.debug.assert(this.reference.fetchSub(1, .release) != 0);
+        assert(this.reference.fetchSub(1, .release) != 0);
     }
 
     pub inline fn close(this: *@This()) void {
@@ -38,185 +39,165 @@ const RefGate = struct {
     }
 
     pub inline fn open(this: *@This()) void {
-        std.debug.assert(this.reference.fetchAnd(references_mask, .release) & lock_bit != 0);
+        assert(this.reference.fetchAnd(references_mask, .release) & lock_bit != 0);
     }
 };
 
-pub const ThreadsClock = struct {
-    pub const Clock = struct {
-        pub const Tick = usize;
-        pub const empty_tick = @as(Tick, 1) << (@bitSizeOf(Tick) - 1);
+/// Concurrent map optimized for thread-local clock propagation.
+///
+/// - It is undefined behavior for multiple threads to concurrently insert
+///   the same key when that key is not already present.
+///
+/// This is also a logical error: key claiming is only valid in two cases:
+/// 1) Tid A created Tid B and transfers its clock to Tid B
+///    (only one creator may exist).
+/// 2) Tid A wakes Tid B and sets lag and a new clock
+///    (only one thread may be responsible for the wake event).
+pub const TidClocks = struct {
+    pub const Tid = std.os.linux.pid_t;
 
-        pub const empty: @This() = .{ .ticks = .init(empty_tick), .lag = .init(empty_tick) };
+    pub const Key = packed struct(u64) {
+        from: Tid,
+        to: Tid,
 
-        const Field = enum {
-            ticks,
-            lag,
-        };
+        const collided_bit: u64 = 1 << 63;
 
-        ticks: std.atomic.Value(Tick),
-        lag: std.atomic.Value(Tick),
+        pub const empty: @This() = @bitCast(@as(u64, 0));
+        pub const empty_collided: @This() = @bitCast(collided_bit);
+        pub const locked: @This() = @bitCast(@as(u64, std.math.maxInt(u64)));
 
-        pub fn get(this: *@This(), comptime field: Field) ?Tick {
-            const v = switch (field) {
-                .ticks => this.ticks.load(.monotonic),
-                .lag => this.lag.load(.monotonic),
-            };
-
-            return if (v & empty_tick == 0) v else null;
+        pub fn clock(tid: Tid) @This() {
+            return .{ .from = tid, .to = 0 };
         }
 
-        pub fn put(this: *@This(), comptime field: Field, value: Tick) void {
-            switch (field) {
-                .ticks => this.ticks.store(value, .monotonic),
-                .lag => this.lag.store(value, .monotonic),
-            }
+        pub fn lag(from: Tid, to: Tid) @This() {
+            return .{ .from = from, .to = to };
         }
 
-        pub fn fetchAdd(this: *@This(), comptime field: Field, value: Tick) ?Tick {
-            const v = switch (field) {
-                .ticks => &this.ticks,
-                .lag => &this.lag,
-            };
+        pub fn hasCollided(this: @This()) bool {
+            return @as(u64, @bitCast(this)) & collided_bit != 0;
+        }
 
-            const ret = v.fetchAdd(value, .monotonic);
-            if (ret & empty_tick != 0) {
-                _ = v.cmpxchgStrong(ret, empty_tick, .monotonic, .monotonic);
-                return null;
-            }
+        pub fn eql(this: @This(), other: @This()) bool {
+            const collided_mask = ~@as(u64, @bitCast(collided_bit));
+            return (@as(u64, @bitCast(this)) & collided_mask) == (@as(u64, @bitCast(other)) & collided_mask);
+        }
 
-            return ret;
+        pub fn hash(this: @This()) u64 {
+            const collided_mask = ~@as(u64, @bitCast(collided_bit));
+            return std.hash.int(@as(u64, @bitCast(this)) & collided_mask);
         }
     };
 
-    const block_len = @divExact(std.heap.page_size_min, @sizeOf(Clock));
-    const Block = [block_len]Clock;
+    const Pair = struct {
+        key: std.atomic.Value(Key),
+        value: u32,
 
-    const Indexes = struct {
-        block: usize,
-        element: std.meta.Int(.unsigned, std.math.log2(block_len)),
+        const empty: @This() = .{ .key = .init(Key.empty), .value = undefined };
     };
 
-    // Those pointers need to be atomic since two threads could be
-    // trying to create the same block and we would find ourself with
-    // an ivalid layout.
-    //
-    // Meanwhile the slice itself can use acquire/release semantic on
-    // the ref_gate
-    blocks: []std.atomic.Value(?*Block),
-    ref_gate: RefGate,
+    ref: RefGate,
+    pairs: []Pair,
 
-    pub const init = @This(){ .blocks = &.{}, .ref_gate = .{} };
+    pub fn init(allocator: std.mem.Allocator, reserve: usize) !@This() {
+        assert(@popCount(reserve) == 1);
 
-    fn getBlockAndItemIndex(at: std.os.linux.pid_t) Indexes {
-        std.debug.assert(at > 0);
-        const i: usize = @intCast(at);
-        return .{ .block = @divFloor(i, block_len), .element = @intCast(i % block_len) };
-    }
-
-    fn unsafeGetPtr(this: *@This(), index: Indexes) ?*Clock {
-        if (index.block >= this.blocks.len) return null;
-
-        const block = this.blocks[index.block].load(.acquire) orelse return null;
-        return &block[index.element];
-    }
-
-    pub fn put(this: *@This(), allocator: std.mem.Allocator, comptime field: Clock.Field, at: std.os.linux.pid_t, value: Clock.Tick) !void {
-        const index = getBlockAndItemIndex(at);
-
-        this.ref_gate.increment();
-        defer this.ref_gate.decrement();
-
-        if (index.block >= this.blocks.len) {
-            const new_size = @max(index.block + 1, this.blocks.len * 2);
-            this.ref_gate.decrement();
-            try this.grow(allocator, new_size);
-            this.ref_gate.increment();
-        }
-
-        const block = this.blocks[index.block].load(.acquire) orelse try this.createBlockUnsafe(allocator, index.block);
-        block[index.element].put(field, value);
-    }
-
-    pub fn get(this: *@This(), comptime field: Clock.Field, at: std.os.linux.pid_t) ?Clock.Tick {
-        const indexes = getBlockAndItemIndex(at);
-
-        this.ref_gate.increment();
-        defer this.ref_gate.decrement();
-
-        const nullable_ptr = this.unsafeGetPtr(indexes);
-        return if (nullable_ptr) |ptr| ptr.get(field) else null;
-    }
-
-    pub fn add(this: *@This(), comptime field: Clock.Field, at: std.os.linux.pid_t, operand: Clock.Tick) ?Clock.Tick {
-        const indexes = getBlockAndItemIndex(at);
-
-        this.ref_gate.increment();
-        defer this.ref_gate.decrement();
-
-        const nullable_ptr = this.unsafeGetPtr(indexes);
-        return if (nullable_ptr) |ptr| v: {
-            const old = ptr.fetchAdd(field, operand) orelse break :v null;
-            break :v old + operand;
-        } else null;
-    }
-
-    fn grow(this: *@This(), allocator: std.mem.Allocator, new_len: usize) !void {
-        @branchHint(.cold);
-
-        const new_blocks = try allocator.alloc(std.meta.Child(@TypeOf(this.blocks)), new_len);
-        @memset(new_blocks, .{ .raw = null });
-
-        this.ref_gate.close();
-
-        const old_blocks = this.blocks;
-
-        // Somebody else may have grown the array already
-        if (new_len <= old_blocks.len) {
-            @branchHint(.unlikely);
-            this.ref_gate.open();
-            allocator.free(new_blocks);
-            return;
-        }
-
-        this.ref_gate.drain();
-
-        @memcpy(new_blocks[0..old_blocks.len], old_blocks);
-        this.blocks = new_blocks;
-
-        this.ref_gate.open();
-
-        allocator.free(old_blocks);
-    }
-
-    fn createBlockUnsafe(this: *@This(), allocator: std.mem.Allocator, block_index: usize) !*Block {
-        @branchHint(.unlikely);
-
-        this.ref_gate.decrement();
-        const new_block = try allocator.create(Block);
-        @memset(new_block, .empty);
-        this.ref_gate.increment();
-
-        return if (this.blocks[block_index].cmpxchgStrong(null, new_block, .release, .acquire)) |actual| blk: {
-            @branchHint(.unlikely);
-
-            this.ref_gate.decrement();
-            defer this.ref_gate.increment();
-
-            allocator.destroy(new_block);
-
-            break :blk actual.?;
-        } else new_block;
+        const pairs = try allocator.alloc(Pair, reserve);
+        @memset(pairs, Pair.empty);
+        return .{ .ref = .{}, .pairs = pairs };
     }
 
     pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
-        for (this.blocks) |*block| {
-            if (block.load(.monotonic)) |ptr| {
-                allocator.destroy(ptr);
+        this.ref.close();
+        this.ref.drain();
+        allocator.free(this.pairs);
+    }
+
+    pub fn put(this: *@This(), key: Key, value: u32) !void {
+        const hash = key.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        try this.putUnsafe(key, hash, value);
+    }
+
+    fn putUnsafe(this: *@This(), key: Key, hash: u64, value: u32) !void {
+        const len = this.pairs.len;
+
+        assert(@popCount(len) == 1);
+        const bitmask = len - 1;
+        const max_retries = @max(16, len / 32);
+
+        var i: usize = 0;
+        while (i < max_retries) : (i += 1) {
+            const index = (hash + i) & bitmask;
+            const local_key = this.pairs[index].key.load(.monotonic);
+
+            if (local_key.eql(key) or
+                (local_key.eql(.empty) and this.pairs[index].key.cmpxchgStrong(.empty, .locked, .monotonic, .monotonic) == null))
+            {
+                this.pairs[index].value = value;
+                this.pairs[index].key.store(key, .release);
+                return;
+            }
+
+            _ = this.pairs[index].key.fetchOr(Key.empty_collided, .monotonic);
+        }
+
+        return error.NoSpace;
+    }
+
+    pub fn get(this: *@This(), key: Key) ?u32 {
+        const hash = key.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const len = this.pairs.len;
+
+        assert(@popCount(len) == 1);
+        const bitmask = len - 1;
+        const max_retries = @max(16, len / 32);
+
+        var local_key: Key = .empty_collided;
+        var i: usize = 0;
+        while (local_key.hasCollided() and i < max_retries) : (i += 1) {
+            const index = (hash + i) & bitmask;
+            local_key = this.pairs[index].key.load(.acquire);
+
+            if (local_key.eql(key)) return this.pairs[index].value;
+        }
+
+        return null;
+    }
+
+    pub fn grow(this: *@This(), allocator: std.mem.Allocator) ![]Pair {
+        this.ref.increment();
+        const new_size = this.pairs.len * 2;
+        this.ref.decrement();
+
+        assert(@popCount(new_size) == 1);
+        const new_pairs = try allocator.alloc(Pair, new_size);
+        @memset(new_pairs, Pair.empty);
+
+        this.ref.close();
+        defer this.ref.open();
+
+        const old_pairs = this.pairs;
+
+        this.ref.drain();
+        this.pairs = new_pairs;
+
+        for (old_pairs) |pair| {
+            const key = pair.key.load(.unordered);
+            const hash = key.hash();
+            if (!key.eql(.empty)) {
+                try this.putUnsafe(key, hash, pair.value);
             }
         }
 
-        allocator.free(this.blocks);
+        return old_pairs;
     }
 };
 
@@ -269,7 +250,7 @@ pub fn Pool(Type: type) type {
 
             const freeing_bit = ~(@as(usize, 1) << @truncate(position));
 
-            std.debug.assert(this.used_bitmask.fetchAnd(freeing_bit, .release) & (~freeing_bit) != 0);
+            assert(this.used_bitmask.fetchAnd(freeing_bit, .release) & (~freeing_bit) != 0);
         }
 
         pub fn inUse(this: *@This()) bool {
@@ -284,10 +265,10 @@ test "RefGate: basic usage" {
     var gate = RefGate{};
 
     gate.increment();
-    try std.testing.expectEqual(1, gate.reference.load(.monotonic));
+    try testing.expectEqual(1, gate.reference.load(.monotonic));
     gate.decrement();
 
-    try std.testing.expectEqual(0, gate.reference.load(.monotonic));
+    try testing.expectEqual(0, gate.reference.load(.monotonic));
 }
 
 test "RefGate: cold path (waiting on closed gate)" {
@@ -307,79 +288,210 @@ test "RefGate: cold path (waiting on closed gate)" {
     var ctx = Context{ .gate = &gate };
     const thread = try std.Thread.spawn(.{}, Context.worker, .{&ctx});
 
-    try std.testing.io.sleep(.fromMilliseconds(10), .real);
-    try std.testing.expectEqual(false, ctx.entered.load(.acquire));
+    try testing.io.sleep(.fromMilliseconds(10), .real);
+    try testing.expectEqual(false, ctx.entered.load(.acquire));
 
     gate.open();
     thread.join();
 
-    try std.testing.expectEqual(true, ctx.entered.load(.acquire));
+    try testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
-test "ThreadsClock: single thread functional" {
-    const allocator = testing.allocator;
-    var clock_vec = ThreadsClock.init;
-    defer clock_vec.deinit(allocator);
+test "TidClocks.Key: construction and bit manipulation" {
+    const Key = TidClocks.Key;
 
-    try clock_vec.put(allocator, .ticks, 10, 123);
-    try clock_vec.put(allocator, .lag, 10, 456);
+    const k1 = Key.clock(100);
+    try testing.expectEqual(100, k1.from);
+    try testing.expectEqual(0, k1.to);
+    try testing.expect(!k1.hasCollided());
 
-    try testing.expectEqual(@as(?usize, 123), clock_vec.get(.ticks, 10));
-    try testing.expectEqual(@as(?usize, 456), clock_vec.get(.lag, 10));
+    const k2 = Key.lag(100, 200);
+    try testing.expectEqual(100, k2.from);
+    try testing.expectEqual(200, k2.to);
 
-    try testing.expectEqual(@as(?usize, null), clock_vec.get(.ticks, 11));
+    var k3 = k1;
+    const raw_k3: *u64 = @ptrCast(&k3);
+    raw_k3.* |= Key.collided_bit;
 
-    const old = clock_vec.add(.ticks, 10, 7);
-    try testing.expectEqual(@as(?usize, 130), old);
-    try testing.expectEqual(@as(?usize, 130), clock_vec.get(.ticks, 10));
-
-    try clock_vec.put(allocator, .ticks, 10000, 999);
-    try testing.expectEqual(@as(?usize, 999), clock_vec.get(.ticks, 10000));
-    try testing.expectEqual(@as(?usize, 130), clock_vec.get(.ticks, 10));
+    try testing.expect(k3.hasCollided());
+    try testing.expect(k1.eql(k3));
 }
 
-test "ThreadsClock: concurrent growth and access" {
-    var ts_alloc = std.heap.ThreadSafeAllocator{ .child_allocator = testing.allocator };
-    const allocator = ts_alloc.allocator();
+test "TidClocks: basic put and get" {
+    const Key = TidClocks.Key;
 
-    var clock_vec = ThreadsClock.init;
-    defer clock_vec.deinit(allocator);
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    defer clocks.deinit(testing.allocator);
+
+    const k1 = Key.clock(1);
+    const v1 = 1234;
+
+    try clocks.put(k1, v1);
+
+    const retrieved = clocks.get(k1);
+    try testing.expectEqual(v1, retrieved);
+
+    const k2 = Key.clock(2);
+    try testing.expectEqual(null, clocks.get(k2));
+}
+
+test "TidClocks: update existing key" {
+    const Key = TidClocks.Key;
+
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    defer clocks.deinit(testing.allocator);
+
+    const k1 = Key.clock(1);
+    try clocks.put(k1, 10);
+    try testing.expectEqual(10, clocks.get(k1).?);
+
+    try clocks.put(k1, 20);
+    try testing.expectEqual(20, clocks.get(k1).?);
+}
+
+test "TidClocks: functioning with reasonable size" {
+    const Key = TidClocks.Key;
+    const size = 1024; // max_retries = 32
+    var clocks = try TidClocks.init(testing.allocator, size);
+    defer clocks.deinit(testing.allocator);
+
+    var i: i32 = 0;
+    while (i < 100) : (i += 1) {
+        try clocks.put(Key.clock(i), @intCast(i * 10));
+    }
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        const val = clocks.get(Key.clock(i));
+        try testing.expectEqual(@as(u32, @intCast(i * 10)), val.?);
+    }
+}
+
+test "ThreadLocalClock: grow data preservation and memory return" {
+    const Key = TidClocks.Key;
+
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    var i: u32 = 1;
+    while (i < 9) : (i += 1) {
+        try clocks.put(Key.clock(@intCast(i)), i * 10);
+    }
+
+    const old_pairs = try clocks.grow(testing.allocator);
+
+    testing.allocator.free(old_pairs);
+
+    i = 1;
+    for (clocks.pairs) |pair| {
+        if (!pair.key.load(.acquire).eql(.empty)) {}
+    }
+    while (i < 9) : (i += 1) {
+        const val = clocks.get(Key.clock(@intCast(i)));
+        try testing.expectEqual(i * 10, val.?);
+    }
+
+    try testing.expectEqual(@as(usize, 32), clocks.pairs.len);
+
+    clocks.deinit(testing.allocator);
+}
+
+test "ThreadLocalClock: grow blocks concurrent readers" {
+    const Key = TidClocks.Key;
+    var clocks = try TidClocks.init(testing.allocator, 16);
+
+    const target_key = Key.clock(1234);
+    try clocks.put(target_key, 55);
+
+    const ReaderContext = struct {
+        clocks: *TidClocks,
+        key: Key,
+        stop: std.atomic.Value(bool) = .init(false),
+        success_count: std.atomic.Value(usize) = .init(0),
+
+        fn run(ctx: *@This()) void {
+            while (!ctx.stop.load(.monotonic)) {
+                if (ctx.clocks.get(ctx.key)) |v| {
+                    assert(v == 55);
+                    _ = ctx.success_count.fetchAdd(1, .monotonic);
+                }
+            }
+        }
+    };
+
+    var ctx = ReaderContext{ .clocks = &clocks, .key = target_key };
+    const thread = try std.Thread.spawn(.{}, ReaderContext.run, .{&ctx});
+
+    try testing.io.sleep(.fromMilliseconds(1), .real);
+
+    const old_pairs = try clocks.grow(testing.allocator);
+    testing.allocator.free(old_pairs);
+
+    ctx.stop.store(true, .release);
+    thread.join();
+
+    try testing.expect(ctx.success_count.load(.monotonic) > 0);
+    clocks.deinit(testing.allocator);
+}
+
+test "ThreadLocalClock: grow error on full table" {
+    const Key = TidClocks.Key;
+
+    var clocks = try TidClocks.init(testing.allocator, 2);
+    defer clocks.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    var failed = false;
+    while (i < 5) : (i += 1) {
+        clocks.put(Key.clock(@intCast(i)), i) catch {
+            failed = true;
+            break;
+        };
+    }
+
+    try testing.expect(failed);
+
+    const old_pairs = try clocks.grow(testing.allocator);
+    testing.allocator.free(old_pairs);
+
+    try clocks.put(Key.clock(100), 100);
+    try testing.expectEqual(@as(u32, 100), clocks.get(Key.clock(100)).?);
+}
+
+test "TidClocks: concurrent put/get" {
+    const Key = TidClocks.Key;
+
+    var clocks = try TidClocks.init(testing.allocator, 4096);
+    defer clocks.deinit(testing.allocator);
 
     const thread_count = 4;
     const items_per_thread = 500;
 
     const Context = struct {
-        vec: *ThreadsClock,
-        id: usize,
-        alloc: std.mem.Allocator,
+        clocks: *TidClocks,
+        id: i32,
+        fn run(ctx: @This()) void {
+            var i: i32 = 0;
+            const start = ctx.id * items_per_thread;
 
-        fn run(ctx: *@This()) void {
-            var i: usize = 1;
-            while (i <= items_per_thread) : (i += 1) {
-                const pid: std.os.linux.pid_t = @intCast((i * thread_count) + ctx.id);
-                ctx.vec.put(ctx.alloc, .ticks, pid, @intCast(pid * 2)) catch unreachable;
+            while (i < items_per_thread) : (i += 1) {
+                const key_val = start + i;
+                ctx.clocks.put(Key.clock(key_val), @intCast(key_val)) catch unreachable;
+            }
+
+            i = 0;
+            while (i < items_per_thread) : (i += 1) {
+                const key_val = start + i;
+                const val = ctx.clocks.get(Key.clock(key_val));
+                assert(val != null and val.? == @as(u32, @intCast(key_val)));
             }
         }
     };
 
     var threads: [thread_count]std.Thread = undefined;
-    var contexts: [thread_count]Context = undefined;
-
     for (0..thread_count) |i| {
-        contexts[i] = .{ .vec = &clock_vec, .id = i, .alloc = allocator };
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{&contexts[i]});
+        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .clocks = &clocks, .id = @intCast(i) }});
     }
 
     for (threads) |t| t.join();
-
-    for (0..thread_count) |t_id| {
-        var i: usize = 1;
-        while (i <= items_per_thread) : (i += 1) {
-            const pid: std.os.linux.pid_t = @intCast((i * thread_count) + t_id);
-            const val = clock_vec.get(.ticks, pid);
-            try testing.expectEqual(@as(usize, @intCast(pid * 2)), val.?);
-        }
-    }
 }
 
 test "Pool: basic alloc/free and pointer math" {
@@ -390,10 +502,10 @@ test "Pool: basic alloc/free and pointer math" {
     ptr1.* = 0xAAAA_BBBB;
 
     const parent = P.getPoolPtrFromEntryPtr(ptr1);
-    try std.testing.expectEqual(&pool, parent);
+    try testing.expectEqual(&pool, parent);
 
     const ptr2 = pool.getEntry() orelse return error.TestUnexpectedFull;
-    try std.testing.expect(ptr1 != ptr2);
+    try testing.expect(ptr1 != ptr2);
 
     pool.freeEntry(ptr1);
 }
@@ -407,13 +519,12 @@ test "Pool: exhaustion and capacity" {
         ptrs[i] = pool.getEntry() orelse return error.TestUnexpectedFull;
     }
 
-    try std.testing.expectEqual(null, pool.getEntry());
+    try testing.expectEqual(null, pool.getEntry());
 
     pool.freeEntry(ptrs[0]);
 
     const new_ptr = pool.getEntry();
-    try std.testing.expect(new_ptr != null);
-    try std.testing.expectEqual(ptrs[0], new_ptr.?);
+    try testing.expectEqual(ptrs[0], new_ptr.?);
 }
 
 test "Pool: power of 2 struct alignment" {
@@ -426,15 +537,15 @@ test "Pool: power of 2 struct alignment" {
 
     const ptr = pool.getEntry() orelse return error.TestUnexpectedFull;
     const parent = P.getPoolPtrFromEntryPtr(ptr);
-    try std.testing.expectEqual(&pool, parent);
+    try testing.expectEqual(&pool, parent);
 }
 
 test "Pool: concurrent churn" {
     const P = Pool(usize);
 
-    const pool = try std.testing.allocator.create(P);
+    const pool = try testing.allocator.create(P);
     pool.* = .empty();
-    defer std.testing.allocator.destroy(pool);
+    defer testing.allocator.destroy(pool);
 
     const thread_count = 4;
     const ops_per_thread = 20_000;
@@ -466,5 +577,5 @@ test "Pool: concurrent churn" {
 
     for (threads) |t| t.join();
 
-    try std.testing.expectEqual(@as(usize, 0), pool.used_bitmask.load(.monotonic));
+    try testing.expectEqual(@as(usize, 0), pool.used_bitmask.load(.monotonic));
 }
