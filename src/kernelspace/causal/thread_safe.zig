@@ -45,14 +45,8 @@ const RefGate = struct {
 
 /// Concurrent map optimized for thread-local clock propagation.
 ///
-/// - It is undefined behavior for multiple threads to concurrently insert
-///   the same key when that key is not already present.
-///
-/// This is also a logical error: key claiming is only valid in two cases:
-/// 1) Tid A created Tid B and transfers its clock to Tid B
-///    (only one creator may exist).
-/// 2) Tid A wakes Tid B and sets lag and a new clock
-///    (only one thread may be responsible for the wake event).
+/// It is undefined behavior for multiple threads to concurrently
+/// try to reserve the same key .
 pub const TidClocks = struct {
     pub const Tid = std.os.linux.pid_t;
 
@@ -89,14 +83,14 @@ pub const TidClocks = struct {
         }
     };
 
-    const Value = packed struct(u32) {
+    pub const Value = packed struct(u32) {
         epoque: u16,
         ticks: u16,
     };
 
     const Pair = struct {
         key: std.atomic.Value(Key),
-        value: Value,
+        value: std.atomic.Value(Value),
 
         const empty: @This() = .{ .key = .init(Key.empty), .value = undefined };
     };
@@ -119,16 +113,7 @@ pub const TidClocks = struct {
         allocator.free(this.pairs);
     }
 
-    pub fn put(this: *@This(), key: Key, value: u16) !void {
-        const hash = key.hash();
-
-        this.ref.increment();
-        defer this.ref.decrement();
-
-        try this.putUnsafe(key, hash, value);
-    }
-
-    fn putUnsafe(this: *@This(), key: Key, hash: u64, ticks: u16) !void {
+    fn reserveSlotUnsafe(this: *@This(), key: Key, hash: u64) !*Pair {
         const len = this.pairs.len;
 
         assert(@popCount(len) == 1);
@@ -142,12 +127,7 @@ pub const TidClocks = struct {
 
             if (local_key.eql(key) or
                 (local_key.eql(.empty) and this.pairs[index].key.cmpxchgStrong(.empty, .locked, .monotonic, .monotonic) == null))
-            {
-                this.pairs[index].value.epoque = @truncate(this.epoque.load(.monotonic));
-                this.pairs[index].value.ticks = ticks;
-                this.pairs[index].key.store(key, .release);
-                return;
-            }
+                return &this.pairs[index];
 
             if (!local_key.hasCollided())
                 _ = this.pairs[index].key.fetchOr(Key.empty_collided, .monotonic);
@@ -156,39 +136,157 @@ pub const TidClocks = struct {
         return error.NoSpace;
     }
 
-    pub fn get(this: *@This(), key: Key) ?u16 {
-        const hash = key.hash();
-
-        this.ref.increment();
-        defer this.ref.decrement();
-
+    fn getSlotUnsafe(this: *@This(), key: Key, hash: u64) *Pair {
         const len = this.pairs.len;
 
         assert(@popCount(len) == 1);
         const bitmask = len - 1;
         const max_retries = @max(16, len / 32);
 
-        var local_key: Key = .empty_collided;
         var i: usize = 0;
-        while (local_key.hasCollided() and i < max_retries) : (i += 1) {
+        var current_key: Key = .empty_collided;
+
+        return slot: while (current_key.hasCollided() and i < max_retries) : (i += 1) {
             const index = (hash + i) & bitmask;
-            local_key = this.pairs[index].key.load(.acquire);
+            current_key = this.pairs[index].key.load(.monotonic);
 
-            if (local_key.eql(key))
-                return if (this.epoque.load(.monotonic) == this.pairs[index].value.epoque)
-                    this.pairs[index].value.ticks
-                else
-                    null;
-        }
+            if (current_key.eql(key)) break :slot &this.pairs[index];
+        } else unreachable; // Somehow we required a tid that has no entry.
+        // This would be faulty logic in the algorithm implementaiton
+        // so we use unreachable to catch that in the tests.
+    }
 
-        return null;
+    pub fn put(this: *@This(), clock: Key, ticks: u16) !void {
+        assert(clock.to == 0);
+        const hash = clock.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const slot = try this.reserveSlotUnsafe(clock, hash);
+        const epoque = this.epoque.load(.monotonic);
+
+        slot.value.store(.{
+            .epoque = epoque,
+            .ticks = ticks,
+        }, .monotonic);
+
+        slot.key.store(clock, .monotonic);
+    }
+
+    pub fn tick(this: *@This(), clock: Key) !void {
+        assert(clock.to == 0);
+
+        const hash = clock.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const slot = try this.reserveSlotUnsafe(clock, hash);
+
+        const epoque = this.epoque.load(.monotonic);
+        const value = slot.value.load(.monotonic);
+
+        slot.value.store(.{
+            .epoque = epoque,
+            .ticks = if (epoque == value.epoque) value.ticks + 1 else 1,
+        }, .monotonic);
+
+        slot.key.store(clock, .monotonic);
+    }
+
+    // The key will contain the from clock and the to clock.
+    // the from clock is the waking tid's clock while the to clock is woke tid's clock.
+    //
+    // At this point the to clock will not contain the ticks but the delay with the global
+    // clock's tick when the tid went to sleep.
+    //
+    // The attribution logic is the following:
+    //
+    // to_ticks = from_ticks - to_lag + old_transfered_lag
+    // old_transfered_lag = global_ticks - from_ticks
+    //
+    // Old transfered lag is simply the lag we already counted in other transfers from the same
+    // tid to avoid recounting the same lag
+    //
+    /// Transfers clocks from one tid to another, both clocks must have an entry
+    pub fn transfer(this: *@This(), lag: Key, global_ticks: u16) !void {
+        // Tick shall be used only for transfering lag
+        assert(lag.from != 0 and lag.to != 0);
+
+        const lag_hash = lag.hash();
+
+        const from_clock: Key = .clock(lag.from);
+        const from_hash = from_clock.hash();
+
+        const to_clock: Key = .clock(lag.to);
+        const to_hash = from_clock.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+        const epoque = this.epoque.load(.monotonic);
+
+        // to_ticks = from_ticks - to_lag + old_transfered_lag
+        // old_transfered_lag = global_ticks - from_ticks
+
+        const from_slot = this.getSlotUnsafe(from_clock, from_hash);
+        const to_slot = this.getSlotUnsafe(to_clock, to_hash);
+        const old_transfered_lag_slot = try this.reserveSlotUnsafe(lag, lag_hash);
+
+        const from_ticks = l: {
+            const value = from_slot.value.load(.monotonic);
+            break :l if (value.epoque == this.epoque) value.ticks else 0;
+        };
+
+        const to_lag = l: {
+            const value = to_slot.value.load(.monotonic);
+            break :l if (value.epoque == this.epoque) value.ticks else 0;
+        };
+
+        const old_transfered_lag = l: {
+            const value = old_transfered_lag_slot.value.load(.monotonic);
+            break :l if (value.epoque == epoque) value.ticks else 0;
+        };
+
+        to_slot.value.store(.{
+            .epoque = epoque,
+            .ticks = from_ticks - to_lag + old_transfered_lag,
+        }, .monotonic);
+
+        old_transfered_lag_slot.value.store(.{
+            .epoque = epoque,
+            .ticks = global_ticks - from_ticks,
+        }, .monotonic);
+        old_transfered_lag_slot.key.store(lag, .monotonic);
+    }
+
+    pub fn drainAndGetLag(this: *@This(), clock: Key, global_ticks: u16) u16 {
+        assert(clock.to == 0);
+        const hash = clock.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const epoque = this.epoque.load(.monotonic);
+
+        const slot = this.getSlotUnsafe(clock, hash);
+        const value = slot.value.load(.monotonic);
+        slot.value.store(.{ .epoque = epoque, .ticks = 0 }, .monotonic);
+        const ticks = if (value.epoque == this.epoque) value.ticks else 0;
+
+        return global_ticks - ticks;
     }
 
     pub fn clear(this: *@This()) void {
         _ = this.epoque.fetchAdd(1, .monotonic);
         // This could wrap around and it means that we could actually resurrect data
         // that was in old epoques; The situation should basically never happen
-        // and even if it does a bad datapoint is completly fine
+        //
+        // (It only happens if we don't access a specific fields for ~30m to ~1h,
+        // based on experiment length 25ms or 50ms, and then we read the data
+        // without inserting something new)
+        //
+        // and even if it does happen a bad datapoint is completly fine
     }
 
     pub fn grow(this: *@This(), allocator: std.mem.Allocator) ![]Pair {
@@ -209,12 +307,15 @@ pub const TidClocks = struct {
         this.pairs = new_pairs;
 
         const epoque = this.epoque.load(.monotonic);
+
         for (old_pairs) |pair| {
             const key = pair.key.load(.unordered);
-            const value = pair.value;
+            const value = pair.value.load(.unordered);
             const hash = key.hash();
             if (!key.eql(.empty) and value.epoque == epoque) {
-                try this.putUnsafe(key, hash, pair.value.ticks);
+                const slot = try this.reserveSlotUnsafe(key, hash); // We could drop to non atomic operations.
+                slot.value.store(.{ .epoque = epoque, .ticks = value.ticks }, .unordered);
+                slot.key.store(key, .unordered);
             }
         }
 
