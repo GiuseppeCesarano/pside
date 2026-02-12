@@ -8,21 +8,23 @@ const RefGate = struct {
     reference: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
 
     pub inline fn increment(this: *@This()) void {
-        const ref = this.reference.fetchAdd(1, .acquire);
+        var ref = this.reference.fetchAdd(1, .acquire);
         assert((ref & references_mask) != references_mask);
-        if (ref & lock_bit != 0) {
+
+        while (ref & lock_bit != 0) {
             @branchHint(.cold);
-            var reference = (this.reference.fetchSub(1, .monotonic) - 1) & references_mask;
-            while (this.reference.cmpxchgWeak(reference, reference + 1, .acquire, .monotonic)) |new_ref| {
-                assert(new_ref & lock_bit != lock_bit - 1);
-                reference = new_ref & references_mask;
-                std.atomic.spinLoopHint();
-            }
+
+            _ = this.reference.fetchSub(1, .monotonic);
+
+            while (this.reference.load(.monotonic) & lock_bit != 0) std.atomic.spinLoopHint();
+
+            ref = this.reference.fetchAdd(1, .acquire);
+            assert((ref & references_mask) != references_mask);
         }
     }
 
     pub inline fn decrement(this: *@This()) void {
-        assert(this.reference.fetchSub(1, .release) != 0);
+        assert(this.reference.fetchSub(1, .release) & references_mask != 0);
     }
 
     pub inline fn close(this: *@This()) void {
@@ -126,7 +128,7 @@ pub const TidClocks = struct {
             const local_key = this.pairs[index].key.load(.monotonic);
 
             if (local_key.eql(key) or
-                (local_key.eql(.empty) and this.pairs[index].key.cmpxchgStrong(.empty, .locked, .monotonic, .monotonic) == null))
+                (local_key.eql(.empty) and this.pairs[index].key.cmpxchgStrong(.empty, .locked, .acquire, .monotonic) == null))
                 return &this.pairs[index];
 
             if (!local_key.hasCollided())
@@ -148,7 +150,7 @@ pub const TidClocks = struct {
 
         return slot: while (current_key.hasCollided() and i < max_retries) : (i += 1) {
             const index = (hash + i) & bitmask;
-            current_key = this.pairs[index].key.load(.monotonic);
+            current_key = this.pairs[index].key.load(.acquire);
 
             if (current_key.eql(key)) break :slot &this.pairs[index];
         } else unreachable; // Somehow we required a tid that has no entry.
@@ -157,7 +159,7 @@ pub const TidClocks = struct {
     }
 
     pub fn put(this: *@This(), clock: Key, ticks: u16) !void {
-        assert(clock.to == 0);
+        assert(clock.from != 0 and clock.to == 0);
         const hash = clock.hash();
 
         this.ref.increment();
@@ -171,11 +173,26 @@ pub const TidClocks = struct {
             .ticks = ticks,
         }, .monotonic);
 
-        slot.key.store(clock, .monotonic);
+        slot.key.store(clock, .release);
+    }
+
+    pub fn get(this: *@This(), clock: Key) u16 {
+        assert(!clock.eql(.empty));
+        const hash = clock.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const slot = this.getSlotUnsafe(clock, hash);
+        const epoque = this.epoque.load(.monotonic);
+
+        const value = slot.value.load(.monotonic);
+
+        return if (value.epoque == epoque) value.ticks else 0;
     }
 
     pub fn tick(this: *@This(), clock: Key) !void {
-        assert(clock.to == 0);
+        assert(clock.from != 0 and clock.to == 0);
 
         const hash = clock.hash();
 
@@ -192,14 +209,12 @@ pub const TidClocks = struct {
             .ticks = if (epoque == value.epoque) value.ticks + 1 else 1,
         }, .monotonic);
 
-        slot.key.store(clock, .monotonic);
+        slot.key.store(clock, .release);
     }
 
     // The key will contain the from clock and the to clock.
-    // the from clock is the waking tid's clock while the to clock is woke tid's clock.
-    //
-    // At this point the to clock will not contain the ticks but the delay with the global
-    // clock's tick when the tid went to sleep.
+    // The from clock is the waking tid's ticks while the to clock is woke tid's lag from
+    // the global clock ticks at the time of sleeping.
     //
     // The attribution logic is the following:
     //
@@ -220,7 +235,7 @@ pub const TidClocks = struct {
         const from_hash = from_clock.hash();
 
         const to_clock: Key = .clock(lag.to);
-        const to_hash = from_clock.hash();
+        const to_hash = to_clock.hash();
 
         this.ref.increment();
         defer this.ref.decrement();
@@ -235,12 +250,12 @@ pub const TidClocks = struct {
 
         const from_ticks = l: {
             const value = from_slot.value.load(.monotonic);
-            break :l if (value.epoque == this.epoque) value.ticks else 0;
+            break :l if (value.epoque == epoque) value.ticks else 0;
         };
 
         const to_lag = l: {
             const value = to_slot.value.load(.monotonic);
-            break :l if (value.epoque == this.epoque) value.ticks else 0;
+            break :l if (value.epoque == epoque) value.ticks else 0;
         };
 
         const old_transfered_lag = l: {
@@ -257,10 +272,10 @@ pub const TidClocks = struct {
             .epoque = epoque,
             .ticks = global_ticks - from_ticks,
         }, .monotonic);
-        old_transfered_lag_slot.key.store(lag, .monotonic);
+        old_transfered_lag_slot.key.store(lag, .release);
     }
 
-    pub fn drainAndGetLag(this: *@This(), clock: Key, global_ticks: u16) u16 {
+    pub fn prepareForTransferOrSleep(this: *@This(), clock: Key, global_ticks: u16) void {
         assert(clock.to == 0);
         const hash = clock.hash();
 
@@ -271,20 +286,19 @@ pub const TidClocks = struct {
 
         const slot = this.getSlotUnsafe(clock, hash);
         const value = slot.value.load(.monotonic);
-        slot.value.store(.{ .epoque = epoque, .ticks = 0 }, .monotonic);
-        const ticks = if (value.epoque == this.epoque) value.ticks else 0;
+        const ticks = if (value.epoque == epoque) value.ticks else 0;
 
-        return global_ticks - ticks;
+        slot.value.store(.{ .epoque = epoque, .ticks = global_ticks - ticks }, .monotonic);
     }
 
     pub fn clear(this: *@This()) void {
         _ = this.epoque.fetchAdd(1, .monotonic);
         // This could wrap around and it means that we could actually resurrect data
-        // that was in old epoques; The situation should basically never happen
+        // that was in old epoques; this situation is rare:
         //
-        // (It only happens if we don't access a specific fields for ~30m to ~1h,
+        // It only happens if we don't access a specific fields for ~30m to ~1h,
         // based on experiment length 25ms or 50ms, and then we read the data
-        // without inserting something new)
+        // without inserting something new
         //
         // and even if it does happen a bad datapoint is completly fine
     }
@@ -419,260 +433,167 @@ test "RefGate: cold path (waiting on closed gate)" {
     try testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
-test "TidClocks.Key: construction and bit manipulation" {
-    const Key = TidClocks.Key;
-
-    const k1 = Key.clock(100);
-    try testing.expectEqual(100, k1.from);
-    try testing.expectEqual(0, k1.to);
-    try testing.expect(!k1.hasCollided());
-
-    const k2 = Key.lag(100, 200);
-    try testing.expectEqual(100, k2.from);
-    try testing.expectEqual(200, k2.to);
-
-    var k3 = k1;
-    const raw_k3: *u64 = @ptrCast(&k3);
-    raw_k3.* |= Key.collided_bit;
-
-    try testing.expect(k3.hasCollided());
-    try testing.expect(k1.eql(k3));
-}
-
-test "TidClocks: basic put and get" {
-    const Key = TidClocks.Key;
-
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
-
-    const k1 = Key.clock(1);
-    const v1 = 1234;
-
-    try clocks.put(k1, v1);
-
-    const retrieved = clocks.get(k1);
-    try testing.expectEqual(v1, retrieved);
-
-    const k2 = Key.clock(2);
-    try testing.expectEqual(null, clocks.get(k2));
-}
-
-test "TidClocks: update existing key" {
-    const Key = TidClocks.Key;
-
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
-
-    const k1 = Key.clock(1);
-    try clocks.put(k1, 10);
-    try testing.expectEqual(10, clocks.get(k1).?);
-
-    try clocks.put(k1, 20);
-    try testing.expectEqual(20, clocks.get(k1).?);
-}
-
-test "TidClocks: functioning with reasonable size" {
-    const Key = TidClocks.Key;
-    const size = 1024; // max_retries = 32
-    var clocks = try TidClocks.init(testing.allocator, size);
-    defer clocks.deinit(testing.allocator);
-
-    var i: u16 = 0;
-    while (i < 100) : (i += 1) {
-        try clocks.put(Key.clock(i), i * 10);
-    }
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        const val = clocks.get(Key.clock(i));
-        try testing.expectEqual(i * 10, val.?);
-    }
-}
-
-test "ThreadLocalClock: grow data preservation and memory return" {
-    const Key = TidClocks.Key;
-
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    var i: u16 = 1;
-    while (i < 9) : (i += 1) {
-        try clocks.put(Key.clock(i), i * 10);
-    }
-
-    const old_pairs = try clocks.grow(testing.allocator);
-
-    testing.allocator.free(old_pairs);
-
-    i = 1;
-    for (clocks.pairs) |pair| {
-        if (!pair.key.load(.acquire).eql(.empty)) {}
-    }
-    while (i < 9) : (i += 1) {
-        const val = clocks.get(Key.clock(i));
-        try testing.expectEqual(i * 10, val.?);
-    }
-
-    try testing.expectEqual(32, clocks.pairs.len);
-
-    clocks.deinit(testing.allocator);
-}
-
-test "ThreadLocalClock: grow blocks concurrent readers" {
-    const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 16);
-
-    const target_key = Key.clock(1234);
-    try clocks.put(target_key, 55);
-
-    const ReaderContext = struct {
-        clocks: *TidClocks,
-        key: Key,
-        stop: std.atomic.Value(bool) = .init(false),
-        success_count: std.atomic.Value(usize) = .init(0),
-
-        fn run(ctx: *@This()) void {
-            while (!ctx.stop.load(.monotonic)) {
-                if (ctx.clocks.get(ctx.key)) |v| {
-                    assert(v == 55);
-                    _ = ctx.success_count.fetchAdd(1, .monotonic);
-                }
-            }
-        }
-    };
-
-    var ctx = ReaderContext{ .clocks = &clocks, .key = target_key };
-    const thread = try std.Thread.spawn(.{}, ReaderContext.run, .{&ctx});
-
-    try testing.io.sleep(.fromMilliseconds(1), .real);
-
-    const old_pairs = try clocks.grow(testing.allocator);
-    testing.allocator.free(old_pairs);
-
-    ctx.stop.store(true, .release);
-    thread.join();
-
-    try testing.expect(ctx.success_count.load(.monotonic) > 0);
-    clocks.deinit(testing.allocator);
-}
-
-test "ThreadLocalClock: grow error on full table" {
-    const Key = TidClocks.Key;
-
-    var clocks = try TidClocks.init(testing.allocator, 2);
-    defer clocks.deinit(testing.allocator);
-
-    var i: u16 = 0;
-    var failed = false;
-    while (i < 5) : (i += 1) {
-        clocks.put(Key.clock(i), i) catch {
-            failed = true;
-            break;
-        };
-    }
-
-    try testing.expect(failed);
-
-    const old_pairs = try clocks.grow(testing.allocator);
-    testing.allocator.free(old_pairs);
-
-    try clocks.put(Key.clock(100), 100);
-    try testing.expectEqual(100, clocks.get(Key.clock(100)).?);
-}
-
-test "TidClocks: epoque clear invalidates entries" {
+test "TidClocks: epoque isolation" {
     const Key = TidClocks.Key;
     var clocks = try TidClocks.init(testing.allocator, 16);
     defer clocks.deinit(testing.allocator);
 
     const k1 = Key.clock(1);
-    const k2 = Key.clock(2);
 
     try clocks.put(k1, 100);
-    try clocks.put(k2, 200);
-
-    try testing.expectEqual(100, clocks.get(k1).?);
-    try testing.expectEqual(200, clocks.get(k2).?);
+    try testing.expectEqual(100, clocks.get(k1));
 
     clocks.clear();
 
-    try testing.expectEqual(null, clocks.get(k1));
-    try testing.expectEqual(null, clocks.get(k2));
+    try testing.expectEqual(0, clocks.get(k1));
+
+    try clocks.tick(k1);
+    try testing.expectEqual(1, clocks.get(k1));
 }
 
-test "TidClocks: epoque recycling" {
+test "TidClocks: hash collision and linear probing" {
     const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
 
-    const k1 = Key.clock(1);
-
-    try clocks.put(k1, 10);
-    try testing.expectEqual(10, clocks.get(k1).?);
-
-    clocks.clear();
-    try testing.expectEqual(null, clocks.get(k1));
-
-    try clocks.put(k1, 20);
-
-    try testing.expectEqual(20, clocks.get(k1).?);
-
-    clocks.clear();
-    try testing.expectEqual(null, clocks.get(k1));
-}
-
-test "TidClocks: grow preserves only current epoque values (indirectly)" {
-    const Key = TidClocks.Key;
     var clocks = try TidClocks.init(testing.allocator, 4);
     defer clocks.deinit(testing.allocator);
 
     try clocks.put(Key.clock(1), 10);
-    clocks.clear(); // Invalidates Key 1
+    try clocks.put(Key.clock(2), 20);
+    try clocks.put(Key.clock(3), 30);
 
-    try clocks.put(Key.clock(2), 20); // Valid in new epoch
+    try testing.expectEqual(10, clocks.get(Key.clock(1)));
+    try testing.expectEqual(20, clocks.get(Key.clock(2)));
+    try testing.expectEqual(30, clocks.get(Key.clock(3)));
+}
+
+test "TidClocks: tick logic" {
+    const Key = TidClocks.Key;
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    defer clocks.deinit(testing.allocator);
+
+    const k1 = Key.clock(1);
+
+    try clocks.tick(k1);
+    try testing.expectEqual(1, clocks.get(k1));
+
+    try clocks.tick(k1);
+    try testing.expectEqual(2, clocks.get(k1));
+
+    clocks.clear();
+    try clocks.tick(k1);
+    try testing.expectEqual(1, clocks.get(k1));
+}
+
+test "TidClocks: prepareForTransferOrSleep" {
+    const Key = TidClocks.Key;
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    defer clocks.deinit(testing.allocator);
+
+    const k1 = Key.clock(1);
+    try clocks.put(k1, 30);
+
+    clocks.prepareForTransferOrSleep(k1, 100);
+    try testing.expectEqual(70, clocks.get(k1));
+}
+
+test "TidClocks: complex transfer (propagation)" {
+    var clocks = try TidClocks.init(testing.allocator, 16);
+    defer clocks.deinit(testing.allocator);
+
+    const a: TidClocks.Tid = 1;
+    const b: TidClocks.Tid = 2;
+
+    var global_ticks: u16 = 100;
+    try clocks.put(.clock(a), 100);
+    try clocks.put(.clock(b), 90);
+    clocks.prepareForTransferOrSleep(.clock(b), global_ticks);
+
+    // b_ticks = a_ticks(100) - b_lag(10) + old_lag(0) = 90
+    // old_lag = global(150) - a_ticks(100) = 50
+    global_ticks = 150;
+    try clocks.transfer(.lag(a, b), global_ticks);
+    try testing.expectEqual(90, clocks.get(.clock(b)));
+    try testing.expectEqual(50, clocks.get(.lag(a, b)));
+
+    global_ticks = 200;
+    try clocks.put(.clock(a), 120); // a_ticks = 120
+    clocks.prepareForTransferOrSleep(.clock(b), global_ticks); // b_lag = global(200) - b_tiks(90) = 110
+    try testing.expectEqual(110, clocks.get(.clock(b)));
+
+    // b_ticks = a_ticks(120) - b_lag(110) + old_lag(50) = 60
+    // old_lag = global(200) - from(120) = 80
+    try clocks.transfer(.lag(a, b), global_ticks);
+    try testing.expectEqual(60, clocks.get(.clock(b)));
+    try testing.expectEqual(80, clocks.get(.lag(a, b)));
+}
+
+test "TidClocks: grow and safety" {
+    const Key = TidClocks.Key;
+    var clocks = try TidClocks.init(testing.allocator, 2);
+    defer clocks.deinit(testing.allocator);
+
+    try clocks.put(Key.clock(1), 10);
+    try clocks.put(Key.clock(2), 20);
 
     const old_pairs = try clocks.grow(testing.allocator);
     testing.allocator.free(old_pairs);
 
-    try testing.expectEqual(null, clocks.get(Key.clock(1)));
-    try testing.expectEqual(20, clocks.get(Key.clock(2)).?);
+    try testing.expectEqual(10, clocks.get(Key.clock(1)));
+    try testing.expectEqual(20, clocks.get(Key.clock(2)));
 }
 
-test "TidClocks: concurrent put/get" {
+test "TidClocks: concurrent stress with growth" {
     const Key = TidClocks.Key;
-
-    var clocks = try TidClocks.init(testing.allocator, 4096);
-    defer clocks.deinit(testing.allocator);
-
     const thread_count = 4;
-    const items_per_thread = 500;
+    const ops_per_thread = 5_000;
+
+    var clocks = try TidClocks.init(testing.allocator, 8);
+    defer clocks.deinit(testing.allocator);
 
     const Context = struct {
         clocks: *TidClocks,
-        id: usize,
-        fn run(ctx: @This()) void {
-            var i: usize = 0;
-            const start = ctx.id * items_per_thread;
 
-            while (i < items_per_thread) : (i += 1) {
-                const key: i32 = @truncate(@as(i64, @bitCast(start + i)));
-                const val: u16 = @truncate(start + i);
-                ctx.clocks.put(Key.clock(key), val) catch unreachable;
+        fn worker(ctx: *@This(), id: u32) void {
+            var prng = std.Random.DefaultPrng.init(id);
+            const rand = prng.random();
+
+            const tid: TidClocks.Tid = @intCast(id + 100);
+            const my_key = Key.clock(tid);
+
+            ctx.clocks.put(my_key, 0) catch unreachable;
+
+            for (0..ops_per_thread) |_| {
+                const op = rand.uintLessThan(u8, 100);
+                if (op < 40) {
+                    _ = ctx.clocks.get(my_key);
+                } else if (op < 80) {
+                    ctx.clocks.tick(my_key) catch {};
+                } else {
+                    ctx.clocks.put(my_key, @truncate(rand.int(u16))) catch {};
+                }
             }
+        }
 
-            i = 0;
-            while (i < items_per_thread) : (i += 1) {
-                const key_val: i32 = @truncate(@as(i64, @bitCast(start + i)));
-                const val = ctx.clocks.get(Key.clock(key_val));
-                assert(val != null and val.? == key_val);
+        fn resizer(ctx: *@This()) void {
+            for (0..10) |_| {
+                testing.io.sleep(.fromMilliseconds(1), .real) catch unreachable;
+                const old = ctx.clocks.grow(testing.allocator) catch unreachable;
+                testing.allocator.free(old);
             }
         }
     };
 
+    var ctx = Context{ .clocks = &clocks };
     var threads: [thread_count]std.Thread = undefined;
+
     for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .clocks = &clocks, .id = i }});
+        threads[i] = try std.Thread.spawn(.{}, Context.worker, .{ &ctx, @as(u32, @truncate(i)) });
     }
 
+    const resizer_thread = try std.Thread.spawn(.{}, Context.resizer, .{&ctx});
+
     for (threads) |t| t.join();
+    resizer_thread.join();
 }
 
 test "Pool: basic alloc/free and pointer math" {
@@ -758,5 +679,5 @@ test "Pool: concurrent churn" {
 
     for (threads) |t| t.join();
 
-    try testing.expectEqual(@as(usize, 0), pool.used_bitmask.load(.monotonic));
+    try testing.expectEqual(0, pool.used_bitmask.load(.monotonic));
 }
