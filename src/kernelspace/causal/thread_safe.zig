@@ -35,9 +35,8 @@ const RefGate = struct {
     }
 
     pub inline fn drain(this: *@This()) void {
-        while ((this.reference.load(.acquire) & references_mask) != 0) {
+        while ((this.reference.load(.acquire) & references_mask) != 0)
             std.atomic.spinLoopHint();
-        }
     }
 
     pub inline fn open(this: *@This()) void {
@@ -49,7 +48,7 @@ const RefGate = struct {
 ///
 /// It is undefined behavior for multiple threads to concurrently
 /// try to reserve the same key .
-pub const TidClocks = struct {
+pub const DriftRegistry = struct {
     pub const Tid = std.os.linux.pid_t;
 
     pub const Key = packed struct(u64) {
@@ -191,7 +190,7 @@ pub const TidClocks = struct {
         return if (value.epoque == epoque) value.ticks else 0;
     }
 
-    pub fn tick(this: *@This(), clock: Key) !void {
+    pub fn tick(this: *@This(), clock: Key) u16 {
         assert(clock.from != 0 and clock.to == 0);
 
         const hash = clock.hash();
@@ -199,17 +198,19 @@ pub const TidClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const slot = try this.reserveSlotUnsafe(clock, hash);
+        const slot = this.getSlotUnsafe(clock, hash);
 
         const epoque = this.epoque.load(.monotonic);
         const value = slot.value.load(.monotonic);
 
+        const ticks = if (epoque == value.epoque) value.ticks + 1 else 1;
+
         slot.value.store(.{
             .epoque = epoque,
-            .ticks = if (epoque == value.epoque) value.ticks + 1 else 1,
+            .ticks = ticks,
         }, .monotonic);
 
-        slot.key.store(clock, .release);
+        return ticks;
     }
 
     // The key will contain the from clock and the to clock.
@@ -275,7 +276,7 @@ pub const TidClocks = struct {
         old_transfered_lag_slot.key.store(lag, .release);
     }
 
-    pub fn prepareForTransferOrSleep(this: *@This(), clock: Key, global_ticks: u16) void {
+    pub fn prepareForTransfer(this: *@This(), clock: Key, global_ticks: u16) void {
         assert(clock.to == 0);
         const hash = clock.hash();
 
@@ -344,13 +345,11 @@ pub fn Pool(Type: type) type {
 
         entries: [pool_len]Type align(alignment),
         used_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
-        context: ?*anyopaque,
 
         pub fn empty() @This() {
             return .{
                 .entries = undefined,
                 .used_bitmask = .init(0),
-                .context = null,
             };
         }
 
@@ -433,131 +432,131 @@ test "RefGate: cold path (waiting on closed gate)" {
     try testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
-test "TidClocks: epoque isolation" {
-    const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
+test "DriftRegistry: epoque isolation" {
+    const Key = DriftRegistry.Key;
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
 
     const k1 = Key.clock(1);
 
-    try clocks.put(k1, 100);
-    try testing.expectEqual(100, clocks.get(k1));
+    try registry.put(k1, 100);
+    try testing.expectEqual(100, registry.get(k1));
 
-    clocks.clear();
+    registry.clear();
 
-    try testing.expectEqual(0, clocks.get(k1));
+    try testing.expectEqual(0, registry.get(k1));
 
-    try clocks.tick(k1);
-    try testing.expectEqual(1, clocks.get(k1));
+    try registry.tick(k1);
+    try testing.expectEqual(1, registry.get(k1));
 }
 
-test "TidClocks: hash collision and linear probing" {
-    const Key = TidClocks.Key;
+test "DriftRegistry: hash collision and linear probing" {
+    const Key = DriftRegistry.Key;
 
-    var clocks = try TidClocks.init(testing.allocator, 4);
-    defer clocks.deinit(testing.allocator);
+    var registry: DriftRegistry = try .init(testing.allocator, 4);
+    defer registry.deinit(testing.allocator);
 
-    try clocks.put(Key.clock(1), 10);
-    try clocks.put(Key.clock(2), 20);
-    try clocks.put(Key.clock(3), 30);
+    try registry.put(Key.clock(1), 10);
+    try registry.put(Key.clock(2), 20);
+    try registry.put(Key.clock(3), 30);
 
-    try testing.expectEqual(10, clocks.get(Key.clock(1)));
-    try testing.expectEqual(20, clocks.get(Key.clock(2)));
-    try testing.expectEqual(30, clocks.get(Key.clock(3)));
+    try testing.expectEqual(10, registry.get(Key.clock(1)));
+    try testing.expectEqual(20, registry.get(Key.clock(2)));
+    try testing.expectEqual(30, registry.get(Key.clock(3)));
 }
 
-test "TidClocks: tick logic" {
-    const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
+test "DriftRegistry: tick logic" {
+    const Key = DriftRegistry.Key;
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
 
     const k1 = Key.clock(1);
 
-    try clocks.tick(k1);
-    try testing.expectEqual(1, clocks.get(k1));
+    try registry.tick(k1);
+    try testing.expectEqual(1, registry.get(k1));
 
-    try clocks.tick(k1);
-    try testing.expectEqual(2, clocks.get(k1));
+    try registry.tick(k1);
+    try testing.expectEqual(2, registry.get(k1));
 
-    clocks.clear();
-    try clocks.tick(k1);
-    try testing.expectEqual(1, clocks.get(k1));
+    registry.clear();
+    try registry.tick(k1);
+    try testing.expectEqual(1, registry.get(k1));
 }
 
-test "TidClocks: prepareForTransferOrSleep" {
-    const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
+test "DriftRegistry: prepareForTransfer" {
+    const Key = DriftRegistry.Key;
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
 
     const k1 = Key.clock(1);
-    try clocks.put(k1, 30);
+    try registry.put(k1, 30);
 
-    clocks.prepareForTransferOrSleep(k1, 100);
-    try testing.expectEqual(70, clocks.get(k1));
+    registry.prepareForTransfer(k1, 100);
+    try testing.expectEqual(70, registry.get(k1));
 }
 
-test "TidClocks: complex transfer (propagation)" {
-    var clocks = try TidClocks.init(testing.allocator, 16);
-    defer clocks.deinit(testing.allocator);
+test "DriftRegistry: complex transfer (propagation)" {
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
 
-    const a: TidClocks.Tid = 1;
-    const b: TidClocks.Tid = 2;
+    const a: DriftRegistry.Tid = 1;
+    const b: DriftRegistry.Tid = 2;
 
     var global_ticks: u16 = 100;
-    try clocks.put(.clock(a), 100);
-    try clocks.put(.clock(b), 90);
-    clocks.prepareForTransferOrSleep(.clock(b), global_ticks);
+    try registry.put(.clock(a), 100);
+    try registry.put(.clock(b), 90);
+    registry.prepareForTransfer(.clock(b), global_ticks);
 
     // b_ticks = a_ticks(100) - b_lag(10) + old_lag(0) = 90
     // old_lag = global(150) - a_ticks(100) = 50
     global_ticks = 150;
-    try clocks.transfer(.lag(a, b), global_ticks);
-    try testing.expectEqual(90, clocks.get(.clock(b)));
-    try testing.expectEqual(50, clocks.get(.lag(a, b)));
+    try registry.transfer(.lag(a, b), global_ticks);
+    try testing.expectEqual(90, registry.get(.clock(b)));
+    try testing.expectEqual(50, registry.get(.lag(a, b)));
 
     global_ticks = 200;
-    try clocks.put(.clock(a), 120); // a_ticks = 120
-    clocks.prepareForTransferOrSleep(.clock(b), global_ticks); // b_lag = global(200) - b_tiks(90) = 110
-    try testing.expectEqual(110, clocks.get(.clock(b)));
+    try registry.put(.clock(a), 120); // a_ticks = 120
+    registry.prepareForTransfer(.clock(b), global_ticks); // b_lag = global(200) - b_tiks(90) = 110
+    try testing.expectEqual(110, registry.get(.clock(b)));
 
     // b_ticks = a_ticks(120) - b_lag(110) + old_lag(50) = 60
     // old_lag = global(200) - from(120) = 80
-    try clocks.transfer(.lag(a, b), global_ticks);
-    try testing.expectEqual(60, clocks.get(.clock(b)));
-    try testing.expectEqual(80, clocks.get(.lag(a, b)));
+    try registry.transfer(.lag(a, b), global_ticks);
+    try testing.expectEqual(60, registry.get(.clock(b)));
+    try testing.expectEqual(80, registry.get(.lag(a, b)));
 }
 
-test "TidClocks: grow and safety" {
-    const Key = TidClocks.Key;
-    var clocks = try TidClocks.init(testing.allocator, 2);
-    defer clocks.deinit(testing.allocator);
+test "DriftRegistry: grow and safety" {
+    const Key = DriftRegistry.Key;
+    var registry = try DriftRegistry.init(testing.allocator, 2);
+    defer registry.deinit(testing.allocator);
 
-    try clocks.put(Key.clock(1), 10);
-    try clocks.put(Key.clock(2), 20);
+    try registry.put(Key.clock(1), 10);
+    try registry.put(Key.clock(2), 20);
 
-    const old_pairs = try clocks.grow(testing.allocator);
+    const old_pairs = try registry.grow(testing.allocator);
     testing.allocator.free(old_pairs);
 
-    try testing.expectEqual(10, clocks.get(Key.clock(1)));
-    try testing.expectEqual(20, clocks.get(Key.clock(2)));
+    try testing.expectEqual(10, registry.get(Key.clock(1)));
+    try testing.expectEqual(20, registry.get(Key.clock(2)));
 }
 
-test "TidClocks: concurrent stress with growth" {
-    const Key = TidClocks.Key;
+test "DriftRegistry: concurrent stress with growth" {
+    const Key = DriftRegistry.Key;
     const thread_count = 4;
     const ops_per_thread = 5_000;
 
-    var clocks = try TidClocks.init(testing.allocator, 8);
-    defer clocks.deinit(testing.allocator);
+    var registry: DriftRegistry = try .init(testing.allocator, 8);
+    defer registry.deinit(testing.allocator);
 
     const Context = struct {
-        clocks: *TidClocks,
+        clocks: *DriftRegistry,
 
         fn worker(ctx: *@This(), id: u32) void {
             var prng = std.Random.DefaultPrng.init(id);
             const rand = prng.random();
 
-            const tid: TidClocks.Tid = @intCast(id + 100);
+            const tid: DriftRegistry.Tid = @intCast(id + 100);
             const my_key = Key.clock(tid);
 
             ctx.clocks.put(my_key, 0) catch unreachable;
@@ -583,7 +582,7 @@ test "TidClocks: concurrent stress with growth" {
         }
     };
 
-    var ctx = Context{ .clocks = &clocks };
+    var ctx = Context{ .clocks = &registry };
     var threads: [thread_count]std.Thread = undefined;
 
     for (0..thread_count) |i| {
