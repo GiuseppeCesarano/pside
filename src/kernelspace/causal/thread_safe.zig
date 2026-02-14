@@ -52,30 +52,40 @@ pub const DriftRegistry = struct {
     pub const Tid = std.os.linux.pid_t;
 
     pub const Key = packed struct(u64) {
-        from: Tid,
-        to: Tid,
+        upper_half: Tid,
+        lower_half: Tid,
 
         const collided_bit: u64 = 1 << 63;
 
         pub const empty: @This() = @bitCast(@as(u64, 0));
         pub const empty_collided: @This() = @bitCast(collided_bit);
-        pub const locked: @This() = @bitCast(@as(u64, std.math.maxInt(u64)));
+        pub const locked: @This() = @bitCast(@as(u64, std.math.maxInt(u64)) & ~collided_bit);
 
         pub fn clock(tid: Tid) @This() {
-            return .{ .from = tid, .to = 0 };
+            return .{ .upper_half = tid, .lower_half = 0 };
         }
 
         pub fn lag(from: Tid, to: Tid) @This() {
-            return .{ .from = from, .to = to };
+            return .{ .upper_half = from, .lower_half = to };
         }
 
         pub fn hasCollided(this: @This()) bool {
             return @as(u64, @bitCast(this)) & collided_bit != 0;
         }
 
+        pub fn collidedCopy(this: @This()) @This() {
+            return @bitCast(@as(u64, @bitCast(this)) | collided_bit);
+        }
+
         pub fn eql(this: @This(), other: @This()) bool {
             const collided_mask = ~@as(u64, @bitCast(collided_bit));
             return (@as(u64, @bitCast(this)) & collided_mask) == (@as(u64, @bitCast(other)) & collided_mask);
+        }
+
+        pub fn upperHalfEql(this: @This(), other: @This()) bool {
+            const rhs = this.collidedCopy();
+            const lhs = other.collidedCopy();
+            return rhs.upper_half == lhs.upper_half;
         }
 
         pub fn hash(this: @This()) u64 {
@@ -158,7 +168,7 @@ pub const DriftRegistry = struct {
     }
 
     pub fn put(this: *@This(), clock: Key, ticks: u16) !void {
-        assert(clock.from != 0 and clock.to == 0);
+        assert(!clock.eql(.empty));
         const hash = clock.hash();
 
         this.ref.increment();
@@ -172,7 +182,7 @@ pub const DriftRegistry = struct {
             .ticks = ticks,
         }, .monotonic);
 
-        slot.key.store(clock, .release);
+        _ = slot.key.fetchAnd(clock.collidedCopy(), .release);
     }
 
     pub fn get(this: *@This(), clock: Key) u16 {
@@ -191,7 +201,7 @@ pub const DriftRegistry = struct {
     }
 
     pub fn tick(this: *@This(), clock: Key) u16 {
-        assert(clock.from != 0 and clock.to == 0);
+        assert(clock.upper_half != 0 and clock.lower_half == 0);
 
         const hash = clock.hash();
 
@@ -228,14 +238,14 @@ pub const DriftRegistry = struct {
     /// Transfers clocks from one tid to another, both clocks must have an entry
     pub fn transfer(this: *@This(), lag: Key, global_ticks: u16) !void {
         // Tick shall be used only for transfering lag
-        assert(lag.from != 0 and lag.to != 0);
+        assert(lag.upper_half != 0 and lag.lower_half != 0);
 
         const lag_hash = lag.hash();
 
-        const from_clock: Key = .clock(lag.from);
+        const from_clock: Key = .clock(lag.upper_half);
         const from_hash = from_clock.hash();
 
-        const to_clock: Key = .clock(lag.to);
+        const to_clock: Key = .clock(lag.lower_half);
         const to_hash = to_clock.hash();
 
         this.ref.increment();
@@ -273,11 +283,11 @@ pub const DriftRegistry = struct {
             .epoque = epoque,
             .ticks = global_ticks - from_ticks,
         }, .monotonic);
-        old_transfered_lag_slot.key.store(lag, .release);
+        _ = old_transfered_lag_slot.key.fetchAnd(lag.collidedCopy(), .release);
     }
 
     pub fn prepareForTransfer(this: *@This(), clock: Key, global_ticks: u16) void {
-        assert(clock.to == 0);
+        assert(clock.lower_half == 0);
         const hash = clock.hash();
 
         this.ref.increment();
@@ -290,6 +300,36 @@ pub const DriftRegistry = struct {
         const ticks = if (value.epoque == epoque) value.ticks else 0;
 
         slot.value.store(.{ .epoque = epoque, .ticks = global_ticks - ticks }, .monotonic);
+    }
+
+    /// This function shall only be called by the thread with the tid that matches the from attribute.
+    pub fn copy(this: *@This(), from: Key, to: Key) !void {
+        assert(!from.eql(to));
+        assert(from != Key.empty and to != Key.empty);
+        assert(from.lower_half == 0 and to.lower_half == 0);
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const epoque = this.epoque.load(.monotonic);
+
+        // We don't care about other threads updates, so we are not racing them with unordered
+        // We only want the current tid values to be put in the new thread; than ref.decrement()
+        // will handle the publishing
+        for (this.pairs) |*pair| {
+            const key = pair.key.load(.unordered);
+            if (key.upperHalfEql(from)) {
+                @branchHint(.unpredictable);
+                _ = pair.key.load(.acquire);
+                const value = pair.value.load(.unordered);
+                if (value.epoque == epoque or key.lower_half == 0) { // We still want to reserve space for the clock itself
+                    const new_key: Key = .{ .upper_half = to.upper_half, .lower_half = key.lower_half };
+                    const slot = try this.reserveSlotUnsafe(new_key, new_key.hash());
+                    slot.value.store(value, .unordered);
+                    slot.key.store(new_key, .unordered);
+                }
+            }
+        }
     }
 
     pub fn clear(this: *@This()) void {
@@ -446,23 +486,21 @@ test "DriftRegistry: epoque isolation" {
 
     try testing.expectEqual(0, registry.get(k1));
 
-    try registry.tick(k1);
+    _ = registry.tick(k1);
     try testing.expectEqual(1, registry.get(k1));
 }
 
 test "DriftRegistry: hash collision and linear probing" {
-    const Key = DriftRegistry.Key;
-
     var registry: DriftRegistry = try .init(testing.allocator, 4);
     defer registry.deinit(testing.allocator);
 
-    try registry.put(Key.clock(1), 10);
-    try registry.put(Key.clock(2), 20);
-    try registry.put(Key.clock(3), 30);
+    try registry.put(.clock(1), 10);
+    try registry.put(.clock(2), 20);
+    try registry.put(.clock(3), 30);
 
-    try testing.expectEqual(10, registry.get(Key.clock(1)));
-    try testing.expectEqual(20, registry.get(Key.clock(2)));
-    try testing.expectEqual(30, registry.get(Key.clock(3)));
+    try testing.expectEqual(10, registry.get(.clock(1)));
+    try testing.expectEqual(20, registry.get(.clock(2)));
+    try testing.expectEqual(30, registry.get(.clock(3)));
 }
 
 test "DriftRegistry: tick logic" {
@@ -470,17 +508,13 @@ test "DriftRegistry: tick logic" {
     var registry: DriftRegistry = try .init(testing.allocator, 16);
     defer registry.deinit(testing.allocator);
 
-    const k1 = Key.clock(1);
-
-    try registry.tick(k1);
-    try testing.expectEqual(1, registry.get(k1));
-
-    try registry.tick(k1);
-    try testing.expectEqual(2, registry.get(k1));
+    const k: Key = .clock(1);
+    try registry.put(k, 0);
+    try testing.expectEqual(1, registry.tick(k));
+    try testing.expectEqual(2, registry.tick(k));
 
     registry.clear();
-    try registry.tick(k1);
-    try testing.expectEqual(1, registry.get(k1));
+    try testing.expectEqual(1, registry.tick(k));
 }
 
 test "DriftRegistry: prepareForTransfer" {
@@ -488,11 +522,11 @@ test "DriftRegistry: prepareForTransfer" {
     var registry: DriftRegistry = try .init(testing.allocator, 16);
     defer registry.deinit(testing.allocator);
 
-    const k1 = Key.clock(1);
-    try registry.put(k1, 30);
+    const k: Key = .clock(1);
+    try registry.put(k, 30);
 
-    registry.prepareForTransfer(k1, 100);
-    try testing.expectEqual(70, registry.get(k1));
+    registry.prepareForTransfer(k, 100);
+    try testing.expectEqual(70, registry.get(k));
 }
 
 test "DriftRegistry: complex transfer (propagation)" {
@@ -527,21 +561,97 @@ test "DriftRegistry: complex transfer (propagation)" {
 }
 
 test "DriftRegistry: grow and safety" {
-    const Key = DriftRegistry.Key;
-    var registry = try DriftRegistry.init(testing.allocator, 2);
+    var registry: DriftRegistry = try .init(testing.allocator, 2);
     defer registry.deinit(testing.allocator);
 
-    try registry.put(Key.clock(1), 10);
-    try registry.put(Key.clock(2), 20);
+    try registry.put(.clock(1), 10);
+    try registry.put(.clock(2), 20);
 
     const old_pairs = try registry.grow(testing.allocator);
     testing.allocator.free(old_pairs);
 
-    try testing.expectEqual(10, registry.get(Key.clock(1)));
-    try testing.expectEqual(20, registry.get(Key.clock(2)));
+    try testing.expectEqual(10, registry.get(.clock(1)));
+    try testing.expectEqual(20, registry.get(.clock(2)));
 }
 
-test "DriftRegistry: concurrent stress with growth" {
+test "DriftRegistry: copy basic functionality" {
+    var registry: DriftRegistry = try .init(testing.allocator, 32);
+    defer registry.deinit(testing.allocator);
+
+    const a: DriftRegistry.Tid = 1;
+    const b: DriftRegistry.Tid = 2;
+    const c: DriftRegistry.Tid = 3;
+
+    try registry.put(.clock(a), 100);
+    try registry.put(.lag(a, c), 42);
+
+    try registry.copy(.clock(a), .clock(b));
+
+    try testing.expectEqual(100, registry.get(.clock(b)));
+    try testing.expectEqual(42, registry.get(.lag(b, c)));
+    try testing.expectEqual(100, registry.get(.clock(a)));
+}
+
+test "DriftRegistry: copy epoque filtration" {
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
+
+    const a: DriftRegistry.Tid = 1;
+    const b: DriftRegistry.Tid = 2;
+
+    try registry.put(.clock(a), 10);
+
+    registry.clear();
+
+    try registry.copy(.clock(a), .clock(b));
+
+    try testing.expectEqual(0, registry.get(.clock(b)));
+}
+
+test "DriftRegistry: copy overwrites/updates destination" {
+    var registry: DriftRegistry = try .init(testing.allocator, 16);
+    defer registry.deinit(testing.allocator);
+
+    const a: DriftRegistry.Tid = 1;
+    const b: DriftRegistry.Tid = 2;
+
+    try registry.put(.clock(a), 100);
+    try registry.put(.clock(b), 50);
+
+    try registry.copy(.clock(a), .clock(b));
+
+    try testing.expectEqual(100, registry.get(.clock(b)));
+}
+
+test "DriftRegistry: mid-copy exhaustion and recovery" {
+    var registry: DriftRegistry = try .init(testing.allocator, 4);
+    defer registry.deinit(testing.allocator);
+
+    const a: DriftRegistry.Tid = 1;
+    const b: DriftRegistry.Tid = 2;
+    const c: DriftRegistry.Tid = 3;
+    const d: DriftRegistry.Tid = 4;
+
+    try registry.put(.clock(a), 10);
+    try registry.put(.lag(a, c), 20);
+    try registry.put(.lag(a, d), 30);
+
+    const copy_err = registry.copy(.clock(a), .clock(b));
+    try testing.expectError(error.NoSpace, copy_err);
+
+    const old_pairs = try registry.grow(testing.allocator);
+    testing.allocator.free(old_pairs);
+
+    try registry.copy(.clock(a), .clock(b));
+
+    try testing.expectEqual(10, registry.get(.clock(b)));
+    try testing.expectEqual(20, registry.get(.lag(b, c)));
+    try testing.expectEqual(30, registry.get(.lag(b, d)));
+
+    try testing.expectEqual(10, registry.get(.clock(a)));
+}
+
+test "DriftRegistry: concurrent stress with growth and copies" {
     const Key = DriftRegistry.Key;
     const thread_count = 4;
     const ops_per_thread = 5_000;
@@ -563,20 +673,23 @@ test "DriftRegistry: concurrent stress with growth" {
 
             for (0..ops_per_thread) |_| {
                 const op = rand.uintLessThan(u8, 100);
-                if (op < 40) {
+                if (op < 35) {
                     _ = ctx.clocks.get(my_key);
-                } else if (op < 80) {
-                    ctx.clocks.tick(my_key) catch {};
-                } else {
+                } else if (op < 70) {
+                    _ = ctx.clocks.tick(my_key);
+                } else if (op < 95) {
                     ctx.clocks.put(my_key, @truncate(rand.int(u16))) catch {};
+                } else {
+                    const shadow_tid: DriftRegistry.Tid = @intCast(id + 200);
+                    ctx.clocks.copy(my_key, Key.clock(shadow_tid)) catch {};
                 }
             }
         }
 
         fn resizer(ctx: *@This()) void {
             for (0..10) |_| {
-                testing.io.sleep(.fromMilliseconds(1), .real) catch unreachable;
-                const old = ctx.clocks.grow(testing.allocator) catch unreachable;
+                std.Thread.yield() catch {};
+                const old = ctx.clocks.grow(testing.allocator) catch continue;
                 testing.allocator.free(old);
             }
         }
