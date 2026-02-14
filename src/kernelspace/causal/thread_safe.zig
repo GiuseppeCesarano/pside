@@ -236,6 +236,8 @@ pub const DriftRegistry = struct {
     // tid to avoid recounting the same lag
     //
     /// Transfers clocks from one tid to another, both clocks must have an entry
+    /// The lag.from key must match the callee tid
+    /// The lag.to tid must be blocked or not try to read/increment it's own clock
     pub fn transfer(this: *@This(), lag: Key, global_ticks: u16) !void {
         // Tick shall be used only for transfering lag
         assert(lag.upper_half != 0 and lag.lower_half != 0);
@@ -260,17 +262,17 @@ pub const DriftRegistry = struct {
         const old_transfered_lag_slot = try this.reserveSlotUnsafe(lag, lag_hash);
 
         const from_ticks = l: {
-            const value = from_slot.value.load(.monotonic);
+            const value = from_slot.value.load(.unordered);
             break :l if (value.epoque == epoque) value.ticks else 0;
         };
 
         const to_lag = l: {
-            const value = to_slot.value.load(.monotonic);
+            const value = to_slot.value.load(.unordered);
             break :l if (value.epoque == epoque) value.ticks else 0;
         };
 
         const old_transfered_lag = l: {
-            const value = old_transfered_lag_slot.value.load(.monotonic);
+            const value = old_transfered_lag_slot.value.load(.unordered);
             break :l if (value.epoque == epoque) value.ticks else 0;
         };
 
@@ -282,7 +284,7 @@ pub const DriftRegistry = struct {
         old_transfered_lag_slot.value.store(.{
             .epoque = epoque,
             .ticks = global_ticks - from_ticks,
-        }, .monotonic);
+        }, .unordered);
         _ = old_transfered_lag_slot.key.fetchAnd(lag.collidedCopy(), .release);
     }
 
@@ -302,7 +304,8 @@ pub const DriftRegistry = struct {
         slot.value.store(.{ .epoque = epoque, .ticks = global_ticks - ticks }, .monotonic);
     }
 
-    /// This function shall only be called by the thread with the tid that matches the from attribute.
+    /// The from key must match the callee tid
+    /// The to tid must be blocked or not try to read/increment it's own clock
     pub fn copy(this: *@This(), from: Key, to: Key) !void {
         assert(!from.eql(to));
         assert(from != Key.empty and to != Key.empty);
