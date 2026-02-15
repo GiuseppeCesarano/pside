@@ -23,6 +23,15 @@ const RefGate = struct {
         }
     }
 
+    pub inline fn tryIncrement(this: *@This()) !void {
+        const ref = this.reference.fetchAdd(1, .acquire);
+        assert((ref & references_mask) != references_mask);
+        if (ref & lock_bit != 0) {
+            _ = this.reference.fetchSub(1, .monotonic);
+            return error.WouldBlock;
+        }
+    }
+
     pub inline fn decrement(this: *@This()) void {
         assert(this.reference.fetchSub(1, .release) & references_mask != 0);
     }
@@ -73,7 +82,7 @@ pub const DriftRegistry = struct {
             return @as(u64, @bitCast(this)) & collided_bit != 0;
         }
 
-        pub fn collidedCopy(this: @This()) @This() {
+        pub fn withCollisionBitSet(this: @This()) @This() {
             return @bitCast(@as(u64, @bitCast(this)) | collided_bit);
         }
 
@@ -83,8 +92,8 @@ pub const DriftRegistry = struct {
         }
 
         pub fn upperHalfEql(this: @This(), other: @This()) bool {
-            const rhs = this.collidedCopy();
-            const lhs = other.collidedCopy();
+            const rhs = this.withCollisionBitSet();
+            const lhs = other.withCollisionBitSet();
             return rhs.upper_half == lhs.upper_half;
         }
 
@@ -95,8 +104,8 @@ pub const DriftRegistry = struct {
     };
 
     pub const Value = packed struct(u32) {
-        epoque: u16,
-        ticks: u16,
+        epoch: u16,
+        data: packed union { ticks: u16, lag: u16 },
     };
 
     const Pair = struct {
@@ -107,7 +116,7 @@ pub const DriftRegistry = struct {
     };
 
     ref: RefGate,
-    epoque: std.atomic.Value(u16) align(std.atomic.cache_line),
+    epoch: std.atomic.Value(u16) align(std.atomic.cache_line),
     pairs: []Pair,
 
     pub fn init(allocator: std.mem.Allocator, reserve: usize) !@This() {
@@ -115,7 +124,7 @@ pub const DriftRegistry = struct {
 
         const pairs = try allocator.alloc(Pair, reserve);
         @memset(pairs, Pair.empty);
-        return .{ .ref = .{}, .pairs = pairs, .epoque = .init(0) };
+        return .{ .ref = .{}, .pairs = pairs, .epoch = .init(0) };
     }
 
     pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
@@ -163,7 +172,7 @@ pub const DriftRegistry = struct {
 
             if (current_key.eql(key)) break :slot &this.pairs[index];
         } else unreachable; // Somehow we required a tid that has no entry.
-        // This would be faulty logic in the algorithm implementaiton
+        // This would be faulty logic in the algorithm implementation
         // so we use unreachable to catch that in the tests.
     }
 
@@ -175,14 +184,14 @@ pub const DriftRegistry = struct {
         defer this.ref.decrement();
 
         const slot = try this.reserveSlotUnsafe(clock, hash);
-        const epoque = this.epoque.load(.monotonic);
+        const epoch = this.epoch.load(.monotonic);
 
         slot.value.store(.{
-            .epoque = epoque,
-            .ticks = ticks,
+            .epoch = epoch,
+            .data = .{ .ticks = ticks },
         }, .monotonic);
 
-        _ = slot.key.fetchAnd(clock.collidedCopy(), .release);
+        _ = slot.key.fetchAnd(clock.withCollisionBitSet(), .release);
     }
 
     pub fn get(this: *@This(), clock: Key) u16 {
@@ -193,34 +202,53 @@ pub const DriftRegistry = struct {
         defer this.ref.decrement();
 
         const slot = this.getSlotUnsafe(clock, hash);
-        const epoque = this.epoque.load(.monotonic);
+        const epoch = this.epoch.load(.monotonic);
 
         const value = slot.value.load(.monotonic);
 
-        return if (value.epoque == epoque) value.ticks else 0;
+        return if (value.epoch == epoch) value.data.ticks else 0;
     }
 
-    pub fn tick(this: *@This(), clock: Key) u16 {
+    pub fn tick(this: *@This(), clock: Key) !u16 {
         assert(clock.upper_half != 0 and clock.lower_half == 0);
 
+        const hash = clock.hash();
+
+        try this.ref.tryIncrement();
+        defer this.ref.decrement();
+
+        const slot = this.getSlotUnsafe(clock, hash);
+
+        const epoch = this.epoch.load(.monotonic);
+        const value = slot.value.load(.monotonic);
+
+        const ticks = if (epoch == value.epoch) value.data.ticks + 1 else 1;
+
+        slot.value.store(.{
+            .epoch = epoch,
+            .data = .{ .ticks = ticks },
+        }, .monotonic);
+
+        return ticks;
+    }
+
+    pub fn prepareForTransfer(this: *@This(), clock: Key, global_ticks: u16) void {
+        assert(clock.lower_half == 0);
         const hash = clock.hash();
 
         this.ref.increment();
         defer this.ref.decrement();
 
+        const epoch = this.epoch.load(.monotonic);
+
         const slot = this.getSlotUnsafe(clock, hash);
-
-        const epoque = this.epoque.load(.monotonic);
         const value = slot.value.load(.monotonic);
-
-        const ticks = if (epoque == value.epoque) value.ticks + 1 else 1;
+        const ticks = if (value.epoch == epoch) value.data.ticks else 0;
 
         slot.value.store(.{
-            .epoque = epoque,
-            .ticks = ticks,
+            .epoch = epoch,
+            .data = .{ .lag = global_ticks - ticks },
         }, .monotonic);
-
-        return ticks;
     }
 
     // The key will contain the from clock and the to clock.
@@ -229,17 +257,18 @@ pub const DriftRegistry = struct {
     //
     // The attribution logic is the following:
     //
-    // to_ticks = from_ticks - to_lag + old_transfered_lag
-    // old_transfered_lag = global_ticks - from_ticks
+    // to_ticks = from_ticks - to_lag + old_transferred_lag
+    // old_transferred_lag = global_ticks - from_ticks
     //
-    // Old transfered lag is simply the lag we already counted in other transfers from the same
+    // Old transferred lag is simply the lag we already counted in other transfers from the same
     // tid to avoid recounting the same lag
     //
     /// Transfers clocks from one tid to another, both clocks must have an entry
     /// The lag.from key must match the callee tid
-    /// The lag.to tid must be blocked or not try to read/increment it's own clock
+    /// The lag.to tid must be blocked or not try to read/increment its own clock
+    /// prepareForTransfer(...) must be called on the lag.to tid before calling this function.
     pub fn transfer(this: *@This(), lag: Key, global_ticks: u16) !void {
-        // Tick shall be used only for transfering lag
+        // Tick shall be used only for transferring lag
         assert(lag.upper_half != 0 and lag.lower_half != 0);
 
         const lag_hash = lag.hash();
@@ -252,60 +281,44 @@ pub const DriftRegistry = struct {
 
         this.ref.increment();
         defer this.ref.decrement();
-        const epoque = this.epoque.load(.monotonic);
+        const epoch = this.epoch.load(.monotonic);
 
-        // to_ticks = from_ticks - to_lag + old_transfered_lag
-        // old_transfered_lag = global_ticks - from_ticks
+        // to_ticks = from_ticks - to_lag + old_transferred_lag
+        // old_transferred_lag = global_ticks - from_ticks
 
         const from_slot = this.getSlotUnsafe(from_clock, from_hash);
         const to_slot = this.getSlotUnsafe(to_clock, to_hash);
-        const old_transfered_lag_slot = try this.reserveSlotUnsafe(lag, lag_hash);
+        const old_transferred_lag_slot = try this.reserveSlotUnsafe(lag, lag_hash);
 
         const from_ticks = l: {
             const value = from_slot.value.load(.unordered);
-            break :l if (value.epoque == epoque) value.ticks else 0;
+            break :l if (value.epoch == epoch) value.data.ticks else 0;
         };
 
         const to_lag = l: {
             const value = to_slot.value.load(.unordered);
-            break :l if (value.epoque == epoque) value.ticks else 0;
+            break :l if (value.epoch == epoch) value.data.lag else 0;
         };
 
-        const old_transfered_lag = l: {
-            const value = old_transfered_lag_slot.value.load(.unordered);
-            break :l if (value.epoque == epoque) value.ticks else 0;
+        const old_transferred_lag = l: {
+            const value = old_transferred_lag_slot.value.load(.unordered);
+            break :l if (value.epoch == epoch) value.data.lag else 0;
         };
 
         to_slot.value.store(.{
-            .epoque = epoque,
-            .ticks = from_ticks - to_lag + old_transfered_lag,
+            .epoch = epoch,
+            .data = .{ .ticks = from_ticks - to_lag + old_transferred_lag },
         }, .monotonic);
 
-        old_transfered_lag_slot.value.store(.{
-            .epoque = epoque,
-            .ticks = global_ticks - from_ticks,
+        old_transferred_lag_slot.value.store(.{
+            .epoch = epoch,
+            .data = .{ .lag = global_ticks - from_ticks },
         }, .unordered);
-        _ = old_transfered_lag_slot.key.fetchAnd(lag.collidedCopy(), .release);
-    }
-
-    pub fn prepareForTransfer(this: *@This(), clock: Key, global_ticks: u16) void {
-        assert(clock.lower_half == 0);
-        const hash = clock.hash();
-
-        this.ref.increment();
-        defer this.ref.decrement();
-
-        const epoque = this.epoque.load(.monotonic);
-
-        const slot = this.getSlotUnsafe(clock, hash);
-        const value = slot.value.load(.monotonic);
-        const ticks = if (value.epoque == epoque) value.ticks else 0;
-
-        slot.value.store(.{ .epoque = epoque, .ticks = global_ticks - ticks }, .monotonic);
+        _ = old_transferred_lag_slot.key.fetchAnd(lag.withCollisionBitSet(), .release);
     }
 
     /// The from key must match the callee tid
-    /// The to tid must be blocked or not try to read/increment it's own clock
+    /// The to tid must be blocked or not try to read/increment its own clock
     pub fn copy(this: *@This(), from: Key, to: Key) !void {
         assert(!from.eql(to));
         assert(from != Key.empty and to != Key.empty);
@@ -314,10 +327,10 @@ pub const DriftRegistry = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const epoque = this.epoque.load(.monotonic);
+        const epoch = this.epoch.load(.monotonic);
 
         // We don't care about other threads updates, so we are not racing them with unordered
-        // We only want the current tid values to be put in the new thread; than ref.decrement()
+        // We only want the current tid values to be put in the new thread; then ref.decrement()
         // will handle the publishing
         for (this.pairs) |*pair| {
             const key = pair.key.load(.unordered);
@@ -325,7 +338,7 @@ pub const DriftRegistry = struct {
                 @branchHint(.unpredictable);
                 _ = pair.key.load(.acquire);
                 const value = pair.value.load(.unordered);
-                if (value.epoque == epoque or key.lower_half == 0) { // We still want to reserve space for the clock itself
+                if (value.epoch == epoch or key.lower_half == 0) { // We still want to reserve space for the clock itself
                     const new_key: Key = .{ .upper_half = to.upper_half, .lower_half = key.lower_half };
                     const slot = try this.reserveSlotUnsafe(new_key, new_key.hash());
                     slot.value.store(value, .unordered);
@@ -336,15 +349,15 @@ pub const DriftRegistry = struct {
     }
 
     pub fn clear(this: *@This()) void {
-        _ = this.epoque.fetchAdd(1, .monotonic);
+        _ = this.epoch.fetchAdd(1, .monotonic);
         // This could wrap around and it means that we could actually resurrect data
-        // that was in old epoques; this situation is rare:
+        // that was in old epochs; this situation is rare:
         //
-        // It only happens if we don't access a specific fields for ~30m to ~1h,
+        // It only happens if we don't access a field for ~30m to ~1h,
         // based on experiment length 25ms or 50ms, and then we read the data
         // without inserting something new
         //
-        // and even if it does happen a bad datapoint is completly fine
+        // and even if it does happen a bad datapoint is completely fine
     }
 
     pub fn grow(this: *@This(), allocator: std.mem.Allocator) ![]Pair {
@@ -364,15 +377,15 @@ pub const DriftRegistry = struct {
         this.ref.drain();
         this.pairs = new_pairs;
 
-        const epoque = this.epoque.load(.monotonic);
+        const epoch = this.epoch.load(.monotonic);
 
         for (old_pairs) |pair| {
             const key = pair.key.load(.unordered);
             const value = pair.value.load(.unordered);
             const hash = key.hash();
-            if (!key.eql(.empty) and value.epoque == epoque) {
+            if (!key.eql(.empty) and value.epoch == epoch) {
                 const slot = try this.reserveSlotUnsafe(key, hash); // We could drop to non atomic operations.
-                slot.value.store(.{ .epoque = epoque, .ticks = value.ticks }, .unordered);
+                slot.value.store(.{ .epoch = epoch, .data = value.data }, .unordered);
                 slot.key.store(key, .unordered);
             }
         }
@@ -389,12 +402,7 @@ pub fn Pool(Type: type) type {
         entries: [pool_len]Type align(alignment),
         used_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
 
-        pub fn empty() @This() {
-            return .{
-                .entries = undefined,
-                .used_bitmask = .init(0),
-            };
-        }
+        const empty: @This() = .{ .entries = undefined, .used_bitmask = .init(0) };
 
         pub fn getPoolPtrFromEntryPtr(entry_ptr: *Type) *@This() {
             const aligned_addr = std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment);
@@ -475,7 +483,7 @@ test "RefGate: cold path (waiting on closed gate)" {
     try testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
-test "DriftRegistry: epoque isolation" {
+test "DriftRegistry: epoch isolation" {
     const Key = DriftRegistry.Key;
     var registry: DriftRegistry = try .init(testing.allocator, 16);
     defer registry.deinit(testing.allocator);
@@ -489,7 +497,7 @@ test "DriftRegistry: epoque isolation" {
 
     try testing.expectEqual(0, registry.get(k1));
 
-    _ = registry.tick(k1);
+    _ = registry.tick(k1) catch unreachable;
     try testing.expectEqual(1, registry.get(k1));
 }
 
@@ -513,11 +521,11 @@ test "DriftRegistry: tick logic" {
 
     const k: Key = .clock(1);
     try registry.put(k, 0);
-    try testing.expectEqual(1, registry.tick(k));
-    try testing.expectEqual(2, registry.tick(k));
+    try testing.expectEqual(1, registry.tick(k) catch unreachable);
+    try testing.expectEqual(2, registry.tick(k) catch unreachable);
 
     registry.clear();
-    try testing.expectEqual(1, registry.tick(k));
+    try testing.expectEqual(1, registry.tick(k) catch unreachable);
 }
 
 test "DriftRegistry: prepareForTransfer" {
@@ -595,7 +603,7 @@ test "DriftRegistry: copy basic functionality" {
     try testing.expectEqual(100, registry.get(.clock(a)));
 }
 
-test "DriftRegistry: copy epoque filtration" {
+test "DriftRegistry: copy epoch filtration" {
     var registry: DriftRegistry = try .init(testing.allocator, 16);
     defer registry.deinit(testing.allocator);
 
@@ -679,7 +687,7 @@ test "DriftRegistry: concurrent stress with growth and copies" {
                 if (op < 35) {
                     _ = ctx.clocks.get(my_key);
                 } else if (op < 70) {
-                    _ = ctx.clocks.tick(my_key);
+                    _ = ctx.clocks.tick(my_key) catch continue;
                 } else if (op < 95) {
                     ctx.clocks.put(my_key, @truncate(rand.int(u16))) catch {};
                 } else {
@@ -713,7 +721,7 @@ test "DriftRegistry: concurrent stress with growth and copies" {
 
 test "Pool: basic alloc/free and pointer math" {
     const P = Pool(u64);
-    var pool = P.empty();
+    var pool: P = .empty;
 
     const ptr1 = pool.getEntry() orelse return error.TestUnexpectedFull;
     ptr1.* = 0xAAAA_BBBB;
@@ -729,7 +737,7 @@ test "Pool: basic alloc/free and pointer math" {
 
 test "Pool: exhaustion and capacity" {
     const P = Pool(u8);
-    var pool = P.empty();
+    var pool: P = .empty;
     var ptrs: [@bitSizeOf(usize)]*u8 = undefined;
 
     for (0..@bitSizeOf(usize)) |i| {
@@ -750,7 +758,7 @@ test "Pool: power of 2 struct alignment" {
     };
 
     const P = Pool(Align16);
-    var pool = P.empty();
+    var pool: P = .empty;
 
     const ptr = pool.getEntry() orelse return error.TestUnexpectedFull;
     const parent = P.getPoolPtrFromEntryPtr(ptr);
@@ -761,7 +769,7 @@ test "Pool: concurrent churn" {
     const P = Pool(usize);
 
     const pool = try testing.allocator.create(P);
-    pool.* = .empty();
+    pool.* = .empty;
     defer testing.allocator.destroy(pool);
 
     const thread_count = 4;
