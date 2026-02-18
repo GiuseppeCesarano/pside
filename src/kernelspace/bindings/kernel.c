@@ -53,6 +53,9 @@ struct callback_head **c_task_work_ptr(struct task_struct *);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
 int c_task_work_add(struct task_struct *, struct callback_head *, int);
+struct task_struct *c_get_task_from_tid(pid_t);
+void c_get_task_struct(struct task_struct *t);
+void c_put_task_struct(struct task_struct *t);
 
 /* RCU */
 void c_rcu_read_lock(void);
@@ -178,6 +181,25 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
     return -ENOSYS;
   return real_task_work_add(task, twork, notify_mode);
 }
+
+struct task_struct *c_get_task_from_tid(pid_t tid) {
+  struct pid *pid_struct;
+  struct task_struct *task;
+
+  pid_struct = find_get_pid(tid);
+  if (!pid_struct) {
+    return NULL;
+  }
+
+  task = get_pid_task(pid_struct, PIDTYPE_PID);
+
+  put_pid(pid_struct);
+
+  return task;
+}
+
+void c_get_task_struct(struct task_struct *task) { get_task_struct(task); }
+void c_put_task_struct(struct task_struct *task) { put_task_struct(task); }
 
 /* RCU */
 void c_rcu_read_lock(void) { rcu_read_lock(); }

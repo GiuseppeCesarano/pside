@@ -12,25 +12,30 @@ const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
 const start_registry_len = 1024;
 
-const TaskWorkPool = thread_safe.Pool(kernel.Task.Work);
-const ClockTick = u16;
+const SleepTaskWork = struct {
+    work: kernel.Task.Work,
+    delay: std.atomic.Value(usize),
+    _: usize,
+};
+
+const TaskSleepPool = thread_safe.Pool(SleepTaskWork);
+const ProfiledTasksPool = thread_safe.Pool(std.atomic.Value(?*kernel.Task));
+const ClockTick = u32;
 
 const sampler_frequency = 999; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 
-instrumented_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
+profiled_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: usize,
 
 profiler_thread: ?*kernel.Thread,
 sampler: ?*kernel.PerfEvent,
 
-virtual_speedup_delay: std.atomic.Value(u16),
+delay_per_tick: std.atomic.Value(u16),
 selected_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
-vma_start: std.atomic.Value(usize),
 
 progress: *std.atomic.Value(usize),
-global_clock: std.atomic.Value(ClockTick) align(std.atomic.cache_line),
 drift_registry: thread_safe.DriftRegistry,
-task_work_pool: *TaskWorkPool,
+task_sleep_pool: *TaskSleepPool,
 
 error_has_occurred: std.atomic.Value(bool),
 
@@ -38,21 +43,23 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
-    const pool = try allocator.create(TaskWorkPool);
-    errdefer allocator.destroy(pool);
-    pool.* = .empty();
+    const sleep_pool = try allocator.create(TaskSleepPool);
+    errdefer allocator.destroy(sleep_pool);
+    sleep_pool.* = .empty;
+
+    const tid_pools = try allocator.alloc(ProfiledTasksPool, 4);
+    errdefer allocator.free(tid_pools);
+    @memset(tid_pools, .{ .used_bitmask = .init(0), .entries = @splat(.init(null)) });
 
     return .{
-        .instrumented_pid = .init(0),
+        .profiled_pid = .init(0),
         .experiment_duration = 50 * std.time.us_per_ms,
-        .virtual_speedup_delay = .init(0),
+        .delay_per_tick = .init(0),
         .selected_ip = .init(0),
-        .vma_start = .init(0),
 
         .progress = progress_ptr,
-        .global_clock = .init(0),
         .drift_registry = try .init(allocator, start_registry_len),
-        .task_work_pool = pool,
+        .task_sleep_pool = sleep_pool,
         .error_has_occurred = .init(false),
 
         .profiler_thread = null,
@@ -61,36 +68,36 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
 }
 
 pub fn deinit(this: *@This()) void {
-    // If those are both true, a fatal error has occurred
-    // which called deinit, so this avoids the regual deinit
-    // to cause a double free.
-    if (this.instrumented_pid.load(.monotonic) == 0 and this.error_has_occurred.load(.monotonic)) return;
+    const pid = this.profiled_pid.load(.monotonic);
+    const deinitted = std.math.maxInt(Pid);
+    if (pid == deinitted or this.profiled_pid.cmpxchgStrong(pid, deinitted, .monotonic, .monotonic) != null) return;
 
-    if (this.instrumented_pid.load(.monotonic) != 0) {
-        kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
-        kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
-        kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-        kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
-        kernel.tracepoint.sync();
-    }
-    this.instrumented_pid.store(0, .monotonic);
+    this.profiled_pid.store(0, .monotonic);
+    this.error_has_occurred.store(true, .monotonic);
 
-    if (this.profiler_thread) |t| t.stop();
     if (this.sampler) |s| s.deinit();
+    if (this.profiler_thread) |t| t.stop();
 
-    while (this.task_work_pool.inUse()) kernel.time.sleep.us(100);
+    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
+    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
+    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+
+    kernel.tracepoint.sync();
+
+    while (this.task_sleep_pool.inUse()) kernel.time.sleep.us(100);
 
     this.drift_registry.ref.increment();
     const drift_len = this.drift_registry.pairs.len;
     this.drift_registry.ref.decrement();
     this.drift_registry.deinit(if (drift_len == start_registry_len) allocator else atomic_allocator);
 
-    allocator.destroy(this.task_work_pool);
+    allocator.destroy(this.task_sleep_pool);
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {
     try this.drift_registry.put(.clock(pid), 0);
-    this.instrumented_pid.store(pid, .monotonic);
+    this.profiled_pid.store(pid, .monotonic);
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
@@ -125,60 +132,25 @@ pub fn profilePid(this: *@This(), pid: Pid) !void {
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *@This() = @ptrCast(@alignCast(ctx));
+    this.sampler.?.enable();
 
     while (!kernel.Thread.shouldThisStop()) {
         this.setExperimentParameters();
 
-        const delay_per_tick = this.virtual_speedup_delay.load(.monotonic);
-        const baseline_vclock = this.global_clock.load(.monotonic);
-        const baseline_prog = this.progress.load(.monotonic);
-
-        const start_wall = kernel.time.now.us();
-
-        this.sampler.?.enable();
+        this.progress.store(0, .monotonic);
         kernel.time.sleep.us(this.experiment_duration);
-        var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
-        while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog) {
+        var prog_delta = this.progress.load(.monotonic);
+        while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic)) {
             @branchHint(.cold);
             if (kernel.Thread.shouldThisStop()) return 0;
 
             this.experiment_duration *= 2;
             kernel.time.sleep.us(this.experiment_duration / 2);
         }
-        this.sampler.?.disable();
-
-        // Set false to error in next experiment.
-        // if an error has occurred in the current one
-        // dont register the point (the next experiment could also
-        // be skewed maybe we shall also discrd it)
-        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
-            @branchHint(.unlikely);
-            continue;
-        }
-
-        while (this.task_work_pool.inUse()) {
-            @branchHint(.cold);
-            kernel.time.sleep.us(100);
-        }
-
-        const end_wall = kernel.time.now.us();
-        const wall = end_wall - start_wall;
-
-        const selected_ip = this.selected_ip.load(.monotonic);
-
-        const v_ticks = this.global_clock.load(.monotonic) - baseline_vclock;
-        const total_delay = v_ticks * delay_per_tick;
-
-        const adjusted = wall - total_delay;
-
-        const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
-
-        std.log.info("0x{x}: [{}, {}]", .{
-            selected_ip - this.vma_start.load(.monotonic),
-            delay_per_tick,
-            throughput,
-        });
+        // this.sampler.?.disable();
+        this.drift_registry.clear();
     }
+
     return 0;
 }
 
@@ -190,7 +162,7 @@ fn setExperimentParameters(this: *@This()) void {
 
     if (random.context == null) {
         @branchHint(.cold);
-        random.context = std.Random.DefaultPrng.init(@intCast(this.instrumented_pid.load(.monotonic)));
+        random.context = std.Random.DefaultPrng.init(@intCast(this.profiled_pid.load(.monotonic)));
         random.generator = random.context.?.random();
     }
 
@@ -199,9 +171,28 @@ fn setExperimentParameters(this: *@This()) void {
     // Like coz, ~25% bias twards 0% speedup, then linear distribution on 5% increments.
     const roll = random.generator.uintLessThan(usize, 27);
     const speedup_percent = (roll -| 6) * 5;
-    const delay = (speedup_percent * sampler_frequency) / 100;
+    const delay = (speedup_percent * (1_000_000 / sampler_frequency)) / 100;
 
-    this.virtual_speedup_delay.store(@truncate(delay), .monotonic);
+    this.delay_per_tick.store(@truncate(delay), .monotonic);
+}
+
+fn registerForSleep(this: *@This(), task: *kernel.Task, global_ticks: ClockTick, delay_per_tick: usize) void {
+    const ticks = if (task.isRunning())
+        global_ticks - this.drift_registry.get(.clock(task.tid()), .ticks)
+    else
+        this.drift_registry.get(.clock(task.tid()), .lag);
+
+    const delay: usize = ticks * delay_per_tick;
+    if (delay == 0) return;
+
+    const slot = this.task_sleep_pool.getEntry() orelse {
+        this.err("TODO");
+        return;
+    };
+
+    slot.work.func = doSleep;
+    slot.delay.store(delay, .monotonic);
+    task.addWork(&slot.work, .signal_no_ipi) catch this.fatalErr("Could not register sleep work");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -210,30 +201,17 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 
     if (selected_line == 0) {
         @branchHint(.unlikely);
-        kernel.rcu.read.lock();
-        defer kernel.rcu.read.unlock();
-
-        if (kernel.Task.current().findVma(regs.ip)) |vma| {
-            @branchHint(.likely);
-
-            const fname_ptr = vma.filename();
-            if (fname_ptr != null) {
-                if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null) {
-                    this.increment();
-                    this.vma_start.store(vma.start(), .monotonic);
-                }
-            }
-        }
-    } else if (selected_line == regs.ip) {
-        this.increment();
-    }
+        if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null) this.increment();
+    } else if (selected_line == regs.ip) this.increment();
 }
 
 fn increment(this: *@This()) void {
     const tid = kernel.Task.current().tid();
 
-    const ticks = this.drift_registry.tick(.clock(tid));
-    _ = this.global_clock.fetchMax(ticks, .monotonic);
+    this.drift_registry.tick(.clock(tid)) catch return;
+    // catch return means that we will miss a sample where the ip actually matched
+    // but it is no different than simply not hitting the instruction pointer while
+    // sampling; the profiler is resilient to that.
 }
 
 fn err(this: *@This(), s: []const u8) void {
@@ -249,93 +227,46 @@ fn fatalErr(this: *@This(), s: []const u8) void {
     this.deinit();
 }
 
-fn registerForSleep(this: *@This(), task: *kernel.Task) void {
-    const work = this.task_work_pool.getEntry() orelse {
-        @branchHint(.cold);
-        std.log.warn("TODO: Handle me", .{});
-        return;
-    };
-    work.func = doSleep;
-
-    task.addWork(work, .signal_no_ipi) catch this.fatalErr("Could not register sleep work");
-}
-
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
-    if (parent.pid() != this.instrumented_pid.load(.monotonic)) return;
+    if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    this.drift_registry.copy(.clock(parent.tid()), .clock(child.tid()));
+    this.drift_registry.copy(.clock(parent.tid()), .clock(child.tid())) catch {}; //TODO: Let's allocate
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
 
-    if (prev.pid() != this.instrumented_pid.load(.monotonic)) return;
+    if (prev.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    const global_clock = this.global_clock.load(.monotonic);
-    if (!prev.isRunning()) this.drift_registry.prepareForTransfer(.clock(prev.tid()), global_clock);
+    if (!prev.isRunning()) this.drift_registry.prepareForTransfer(.clock(prev.tid()));
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
-    const instrumented_pid = this.instrumented_pid.load(.monotonic);
+    const instrumented_pid = this.profiled_pid.load(.monotonic);
 
     const current = kernel.Task.current();
 
-    if (current.pid() != instrumented_pid and woke.pid() != instrumented_pid) return;
+    if (current.pid() != instrumented_pid or woke.pid() != instrumented_pid) return;
 
-    const global_clock = this.global_clock.load(.monotonic);
-    this.drift_registry.transfer(.lag(current.tid(), woke.tid()), global_clock) catch {
+    this.drift_registry.transfer(.lag(current.tid(), woke.tid())) catch {
         //TODO: we could allocate with atomic_allocator
     };
 }
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *@This() = @ptrCast(@alignCast(data.?));
-    if (task.pid() != this.instrumented_pid.load(.monotonic)) return;
+    if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    this.registerForSleep(task);
+    // this.registerForSleep(task, this.global_clock.load(.monotonic), this.delay_per_tick.load(.monotonic));
 }
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
-    const pool = TaskWorkPool.getPoolPtrFromEntryPtr(work);
+    const sleep_work: *SleepTaskWork = @fieldParentPtr("work", work);
 
-    const this: *@This() = @ptrCast(@alignCast(pool.context.?));
-    const current_tid = kernel.Task.current().tid();
-
-    const clock = this.drift_registry.get(.ticks, current_tid) orelse {
-        this.err("Null clock in doSleep");
-        return;
-    };
-
-    const clock_lag = this.drift_registry.get(.lag, current_tid) orelse 0;
-
-    const global_clock = this.global_clock.load(.monotonic);
-    const delay_per_tick = this.virtual_speedup_delay.load(.monotonic);
-
-    const clock_delta = global_clock - clock;
-
-    const delay = clock_delta * delay_per_tick + clock_lag;
-    if (delay > 10 * std.time.us_per_s) {
-        this.fatalErr("Sleep exceeded 10s");
-        pool.freeEntry(work);
-        return;
-    }
+    const delay = sleep_work.delay.load(.monotonic);
+    TaskSleepPool.getPoolPtrFromEntryPtr(sleep_work).freeEntry(sleep_work);
 
     kernel.time.sleep.us(delay);
-
-    this.drift_registry.put(atomic_allocator, .ticks, current_tid, global_clock) catch |e| {
-        pool.freeEntry(work); // fatalErr will free the current engine
-        // if we keep holding the pool entry the deinit
-        // will spin forever
-        this.fatalErr(@errorName(e));
-        return;
-    };
-    this.drift_registry.put(atomic_allocator, .lag, current_tid, 0) catch |e| {
-        pool.freeEntry(work);
-        this.fatalErr(@errorName(e));
-        return;
-    };
-
-    pool.freeEntry(work);
 }

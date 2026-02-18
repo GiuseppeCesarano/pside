@@ -251,6 +251,11 @@ pub const Task = opaque {
         return c_current_task();
     }
 
+    extern fn c_get_task_from_tid(linux.pid_t) *@This();
+    pub fn fromTid(t: linux.pid_t) *@This() {
+        return c_get_task_from_tid(t);
+    }
+
     extern fn c_task_work_add(?*@This(), ?*Work, NotifyMode) c_int;
     pub fn findAddWork() WorkAddError!void {
         return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
@@ -310,6 +315,16 @@ pub const Task = opaque {
     pub fn findVma(this: *@This(), addr: usize) ?*Vma {
         return c_find_vma(this, addr);
     }
+
+    extern fn c_get_task_struct(*@This()) void;
+    pub fn incrementReferences(this: *@This()) void {
+        c_get_task_struct(this);
+    }
+
+    extern fn c_put_task_struct(*@This()) void;
+    pub fn decrementReferences(this: *@This()) void {
+        c_put_task_struct(this);
+    }
 };
 
 pub const rcu = struct {
@@ -358,24 +373,6 @@ pub const CharDevice = extern struct {
     }
 };
 
-pub const File = *opaque {
-    extern fn c_filp_open([*:0]const u8, c_int, c_ushort) *@This();
-    pub fn open(path: [*:0]const u8) *@This() {
-        // TODO: fix parameters
-        c_filp_open(path, 0, 0);
-    }
-
-    extern fn c_kernel_write(*@This(), *const anyopaque, usize, *usize) isize;
-    pub fn write(this: *@This(), buff: []const u8, offset: *usize) isize {
-        return c_kernel_write(this, @ptrCast(buff.ptr), buff.len, offset);
-    }
-
-    extern fn c_kernel_read(*@This(), *anyopaque, usize, *usize) isize;
-    pub fn read(this: *@This(), buff: []u8, offset: *usize) isize {
-        return c_kernel_read(this, @ptrCast(buff.ptr), buff.len, offset);
-    }
-};
-
 pub const PerfEvent = opaque {
     const PerfOverflowHandler = *const fn (*@This(), *anyopaque, *PtRegs) callconv(.c) void;
 
@@ -388,7 +385,8 @@ pub const PerfEvent = opaque {
         OutOfMemory,
         HardwareNotFound,
         InvalidAttributeSize,
-    } || error{Unexpected};
+        Unexpected,
+    };
 
     extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
     pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitErrors!*@This() {
