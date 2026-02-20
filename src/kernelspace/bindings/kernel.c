@@ -157,6 +157,9 @@ pid_t c_tid(struct task_struct *task) { return task_pid_nr(task); }
 int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }
+int c_task_is_dead(struct task_struct *task) {
+    return (task->flags & PF_EXITING) || (task->exit_state != 0);
+}
 struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;
 }

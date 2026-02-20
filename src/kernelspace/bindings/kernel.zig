@@ -280,6 +280,11 @@ pub const Task = opaque {
         return c_task_is_running(this) != 0;
     }
 
+    extern fn c_task_is_dead(*@This()) c_int;
+    pub fn isDead(this: *@This()) bool {
+        return c_task_is_dead(this) != 0;
+    }
+
     pub const Work = extern struct {
         pub const Callback = *const fn (*Work) callconv(.c) void;
         next: ?*Work align(@alignOf(usize)),

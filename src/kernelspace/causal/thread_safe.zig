@@ -279,7 +279,7 @@ pub const ThreadClocks = struct {
         defer this.ref.decrement();
 
         const tid_slot = this.getSlotUnsafe(tid, tid_hash);
-        tid_slot.key.fetchAnd(Key.empty_collided, .release);
+        _ = tid_slot.key.fetchAnd(Key.empty_collided, .release);
     }
 
     pub fn grow(this: *@This(), allocator: std.mem.Allocator) ![]Pair {
