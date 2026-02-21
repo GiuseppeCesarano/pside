@@ -1,4 +1,4 @@
-// For this file if a time variable has no posmonotonictfix indicating otherwise the default unit is us.
+// For this file if a time variable has no postfix indicating otherwise the default unit is us.
 
 const std = @import("std");
 const kernel = @import("kernel");
