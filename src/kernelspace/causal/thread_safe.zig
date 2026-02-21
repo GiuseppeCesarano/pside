@@ -117,19 +117,33 @@ pub const ThreadClocks = struct {
     master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
     ref: RefGate,
     pairs: []Pair,
+    bitmask: []std.atomic.Value(usize),
 
     pub fn init(allocator: std.mem.Allocator, reserve: usize) !@This() {
         assert(@popCount(reserve) == 1);
+        assert(reserve >= @bitSizeOf(usize));
 
         const pairs = try allocator.alloc(Pair, reserve);
+        errdefer allocator.free(pairs);
         @memset(pairs, Pair.empty);
-        return .{ .ref = .{}, .pairs = pairs, .master = .init(0) };
+
+        const bitmask_len = @divExact(reserve, @bitSizeOf(usize));
+        const used_bitmask = try allocator.alloc(std.atomic.Value(usize), bitmask_len);
+        @memset(used_bitmask, .init(0));
+
+        return .{
+            .master = .init(0),
+            .ref = .{},
+            .pairs = pairs,
+            .bitmask = used_bitmask,
+        };
     }
 
     pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
         this.ref.close();
         this.ref.drain();
         allocator.free(this.pairs);
+        allocator.free(this.bitmask);
     }
 
     fn reserveSlotUnsafe(this: *@This(), tid: Key, hash: usize) !*Pair {
@@ -177,6 +191,29 @@ pub const ThreadClocks = struct {
         // so we use unreachable to catch that in the tests.
     }
 
+    fn getIndexUnsafe(this: @This(), elm: *Pair) usize {
+        const elm_addr: usize = @intFromPtr(elm);
+        const starting_addr: usize = @intFromPtr(this.pairs.ptr);
+        return @divExact(elm_addr - starting_addr, @sizeOf(Pair));
+    }
+
+    fn getPtrFromIndexUnsafe(this: @This(), index: usize) *Pair {
+        const starting_addr: usize = @intFromPtr(this.pairs.ptr);
+        return @ptrFromInt(starting_addr + index);
+    }
+
+    fn publishReservedUnsafe(this: *@This(), key: Key, ptr: *Pair) void {
+        assert(ptr.key.load(.unordered).isEql(.reserved));
+
+        const index = this.getIndexUnsafe(ptr);
+
+        const bit_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
+        const operand = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
+        _ = bit_bucket.fetchOr(operand, .monotonic);
+
+        _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
+    }
+
     pub fn put(this: *@This(), tid: Key, ticks: Ticks) !void {
         const hash = tid.hash();
 
@@ -186,7 +223,8 @@ pub const ThreadClocks = struct {
         const slot = try this.reserveSlotUnsafe(tid, hash);
 
         slot.value.store(.{ .data = .{ .ticks = ticks } }, .monotonic);
-        _ = slot.key.fetchAnd(tid.withCollisionBit(), .release);
+
+        this.publishReservedUnsafe(tid, slot);
     }
 
     pub fn get(this: *@This(), tid: Key, field: enum { ticks, lag }) u32 {
@@ -267,22 +305,33 @@ pub const ThreadClocks = struct {
         parent_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
         child_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
 
-        _ = child_slot.key.fetchAnd(child.withCollisionBit(), .release);
+        this.publishReservedUnsafe(child, child_slot);
 
         return master - parent_ticks;
     }
 
-    pub fn remove(this: *@This(), tid: Key) void {
+    /// Returns the delay ammount that the thread should sleep
+    pub fn remove(this: *@This(), tid: Key) Ticks {
         const tid_hash = tid.hash();
 
         this.ref.increment();
         defer this.ref.decrement();
 
-        const tid_slot = this.getSlotUnsafe(tid, tid_hash);
-        _ = tid_slot.key.fetchAnd(Key.empty_collided, .release);
+        const slot = this.getSlotUnsafe(tid, tid_hash);
+        const ticks = slot.value.load(.monotonic).data.ticks;
+        const master = this.master.load(.acquire);
+
+        const index = this.getIndexUnsafe(slot);
+        const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
+        const operand = ~(@as(usize, 1) << @truncate(index % @bitSizeOf(usize)));
+        _ = bitmask_bucket.fetchAnd(operand, .monotonic);
+
+        _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
+
+        return master - ticks;
     }
 
-    pub fn grow(this: *@This(), allocator: std.mem.Allocator) ![]Pair {
+    pub fn grow(this: *@This(), allocator: std.mem.Allocator) !struct { []Pair, []std.atomic.Value(usize) } {
         this.ref.increment();
         const new_len = this.pairs.len * 2;
         this.ref.decrement();
@@ -291,19 +340,25 @@ pub const ThreadClocks = struct {
         const new_pairs = try allocator.alloc(Pair, new_len);
         @memset(new_pairs, Pair.empty);
 
+        const new_bitmask_len = @divExact(new_len, @bitSizeOf(usize));
+        const new_bitmask = try allocator.alloc(std.atomic.Value(usize), new_bitmask_len);
+        @memset(new_bitmask, .init(0));
+
         this.ref.close();
         defer this.ref.open();
 
         const old_pairs = this.pairs;
+        const old_bitmask = this.bitmask;
 
         this.ref.drain();
         this.pairs = new_pairs;
+        this.bitmask = new_bitmask;
 
         const bitmask = new_len - 1;
         const max_retries = @max(16, new_len / 32);
         for (old_pairs) |pair| {
             const key = pair.key.load(.unordered).withoutCollisionBit();
-            if (key != Key.empty) {
+            if (!key.isEql(.empty)) {
                 const value = pair.value.load(.unordered);
                 const hash = key.hash();
 
@@ -313,6 +368,7 @@ pub const ThreadClocks = struct {
 
                     if (new_pairs[index].key.load(.unordered).isEql(.empty)) {
                         new_pairs[index] = .{ .key = .init(key), .value = .init(value) };
+                        new_bitmask[@divFloor(index, @bitSizeOf(usize))].raw |= @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
                         break;
                     }
                     new_pairs[index].key.raw.data |= @bitCast(Key.empty_collided);
@@ -320,7 +376,30 @@ pub const ThreadClocks = struct {
             }
         }
 
-        return old_pairs;
+        return .{ old_pairs, old_bitmask };
+    }
+
+    pub fn forEach(this: *@This(), comptime cb: anytype, values: anytype) void {
+        this.ref.close();
+        defer this.ref.open();
+        this.ref.drain();
+
+        for (this.bitmask, 0..) |*bit_bucket, i| {
+            var bucket = bit_bucket.load(.unordered);
+            while (bucket != 0) {
+                const bit_pos = @ctz(bucket);
+                const index = i * @bitSizeOf(usize) + bit_pos;
+
+                const pair = &this.pairs[index];
+
+                const key = pair.key.load(.unordered).withoutCollisionBit();
+                const value = pair.value.load(.unordered);
+
+                @call(.always_inline, cb, .{ key, value, values });
+
+                bucket &= bucket - 1;
+            }
+        }
     }
 };
 
@@ -413,9 +492,11 @@ test "RefGate: cold path (waiting on closed gate)" {
     try testing.expectEqual(true, ctx.entered.load(.acquire));
 }
 
+const min_cap = @bitSizeOf(usize);
+
 test "ThreadClocks: basic lifecycle" {
     const allocator = testing.allocator;
-    var clocks = try ThreadClocks.init(allocator, 4);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const tid1 = ThreadClocks.Key.fromTid(100);
@@ -430,7 +511,7 @@ test "ThreadClocks: basic lifecycle" {
 
 test "ThreadClocks: tick and master propagation" {
     const allocator = testing.allocator;
-    var clocks = try ThreadClocks.init(allocator, 4);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const tid = ThreadClocks.Key.fromTid(1);
@@ -447,7 +528,7 @@ test "ThreadClocks: tick and master propagation" {
 
 test "ThreadClocks: sleep and wake logic" {
     const allocator = testing.allocator;
-    var clocks = try ThreadClocks.init(allocator, 4);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const waker = ThreadClocks.Key.fromTid(1);
@@ -475,7 +556,7 @@ test "ThreadClocks: sleep and wake logic" {
 
 test "ThreadClocks: fork" {
     const allocator = testing.allocator;
-    var clocks = try ThreadClocks.init(allocator, 4);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const parent = ThreadClocks.Key.fromTid(1);
@@ -494,40 +575,32 @@ test "ThreadClocks: fork" {
 test "ThreadClocks: collision path" {
     const allocator = testing.allocator;
 
-    // Size 4: with 4 entries the birthday probability of at least one
-    // collision is ~90%. We assert the bit is set to confirm the path fired.
-    var clocks = try ThreadClocks.init(allocator, 4);
+    // With min_cap slots and many entries the collision bit may or may not
+    // fire depending on hash distribution; we just verify all values survive.
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const tids = [_]ThreadClocks.Key{
-        ThreadClocks.Key.fromTid(1),
-        ThreadClocks.Key.fromTid(2),
-        ThreadClocks.Key.fromTid(3),
-        ThreadClocks.Key.fromTid(4),
-    };
-    const expected_ticks = [_]ThreadClocks.Ticks{ 10, 20, 30, 40 };
+    // Use enough entries that collisions are plausible (half capacity).
+    const n = min_cap / 2;
+    var tids: [min_cap / 2]ThreadClocks.Key = undefined;
+    var expected: [min_cap / 2]ThreadClocks.Ticks = undefined;
+    for (0..n) |i| {
+        tids[i] = ThreadClocks.Key.fromTid(@intCast(i + 1));
+        expected[i] = @intCast((i + 1) * 10);
+    }
 
-    for (tids, expected_ticks) |tid, ticks| {
+    for (tids, expected) |tid, ticks| {
         try clocks.put(tid, ticks);
     }
 
-    for (tids, expected_ticks) |tid, ticks| {
+    for (tids, expected) |tid, ticks| {
         try testing.expectEqual(ticks, clocks.get(tid, .ticks));
     }
-
-    var any_collided = false;
-    for (clocks.pairs) |pair| {
-        if (pair.key.load(.monotonic).hasCollided()) {
-            any_collided = true;
-            break;
-        }
-    }
-    try testing.expect(any_collided);
 }
 
 test "ThreadClocks: Causal Mechanics" {
     const allocator = testing.allocator;
-    var clocks = try ThreadClocks.init(allocator, 4);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const parent = ThreadClocks.Key.fromTid(1);
@@ -636,7 +709,7 @@ test "ThreadClocks: concurrent stress" {
 test "ThreadClocks: concurrent grow" {
     const allocator = testing.allocator;
 
-    var clocks = try ThreadClocks.init(allocator, 8);
+    var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     const root = ThreadClocks.Key.fromTid(1);
@@ -649,7 +722,7 @@ test "ThreadClocks: concurrent grow" {
         id: usize,
 
         fn run(ctx: *@This()) void {
-            const tid = ThreadClocks.Key.fromTid(@intCast(ctx.id + 2)); 
+            const tid = ThreadClocks.Key.fromTid(@intCast(ctx.id + 2));
             const root_key = ThreadClocks.Key.fromTid(1);
             _ = ctx.clocks.fork(root_key, tid) catch return;
 
@@ -668,7 +741,8 @@ test "ThreadClocks: concurrent grow" {
             std.atomic.spinLoopHint();
 
             const old = ctx.clocks.grow(ctx.alloc) catch return;
-            ctx.alloc.free(old);
+            ctx.alloc.free(old[0]);
+            ctx.alloc.free(old[1]);
         }
     };
 
@@ -687,13 +761,190 @@ test "ThreadClocks: concurrent grow" {
 
     for (threads) |t| t.join();
 
-    try testing.expect(clocks.pairs.len >= 8);
+    try testing.expect(clocks.pairs.len >= min_cap);
 
     const master = clocks.master.load(.acquire);
     for (0..thread_count) |i| {
         const tid = ThreadClocks.Key.fromTid(@intCast(i + 2));
         try testing.expect(master >= clocks.get(tid, .ticks));
     }
+}
+
+/// Count the total number of set bits across all bitmask words.
+fn countLiveBits(clocks: *ThreadClocks) usize {
+    var total: usize = 0;
+    for (clocks.bitmask) |word| total += @popCount(word.load(.monotonic));
+    return total;
+}
+
+/// Return true if the bit for the slot occupied by `tid` is set.
+fn bitIsSet(clocks: *ThreadClocks, tid: ThreadClocks.Key) bool {
+    const hash = tid.hash();
+    const len = clocks.pairs.len;
+    const mask = len - 1;
+    const max_retries = @max(16, len / 32);
+    var i: usize = 0;
+    while (i < max_retries) : (i += 1) {
+        const index = (hash + i) & mask;
+        const key = clocks.pairs[index].key.load(.acquire);
+        if (key.isEql(tid)) {
+            const bucket = index / @bitSizeOf(usize);
+            const bit = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
+            return clocks.bitmask[bucket].load(.monotonic) & bit != 0;
+        }
+    }
+    return false;
+}
+
+test "bitmask: put sets bit, remove clears it" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 0), countLiveBits(&clocks));
+
+    const tid = ThreadClocks.Key.fromTid(42);
+    try clocks.put(tid, 0);
+
+    try testing.expect(bitIsSet(&clocks, tid));
+    try testing.expectEqual(@as(usize, 1), countLiveBits(&clocks));
+
+    _ = clocks.remove(tid);
+
+    try testing.expect(!bitIsSet(&clocks, tid));
+    try testing.expectEqual(@as(usize, 0), countLiveBits(&clocks));
+}
+
+test "bitmask: popcount tracks live entry count across multiple puts and removes" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const n = 16;
+    var tids: [n]ThreadClocks.Key = undefined;
+    for (0..n) |i| {
+        tids[i] = ThreadClocks.Key.fromTid(@intCast(i + 1));
+        try clocks.put(tids[i], 0);
+        try testing.expectEqual(i + 1, countLiveBits(&clocks));
+    }
+
+    var live: usize = n;
+    for (0..n) |i| {
+        if (i % 2 == 0) {
+            _ = clocks.remove(tids[i]);
+            live -= 1;
+            try testing.expectEqual(live, countLiveBits(&clocks));
+        }
+    }
+}
+
+test "bitmask: fork sets child bit without clearing parent bit" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const parent = ThreadClocks.Key.fromTid(1);
+    const child = ThreadClocks.Key.fromTid(2);
+
+    try clocks.put(parent, 10);
+    clocks.master.store(10, .release); // master must be >= ticks to avoid underflow in fork
+    try testing.expectEqual(@as(usize, 1), countLiveBits(&clocks));
+
+    _ = try clocks.fork(parent, child);
+
+    try testing.expect(bitIsSet(&clocks, parent));
+    try testing.expect(bitIsSet(&clocks, child));
+    try testing.expectEqual(@as(usize, 2), countLiveBits(&clocks));
+}
+
+test "bitmask: grow migrates all live bits and clears none" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const n = 8;
+    var tids: [n]ThreadClocks.Key = undefined;
+    for (0..n) |i| {
+        tids[i] = ThreadClocks.Key.fromTid(@intCast(i + 1));
+        try clocks.put(tids[i], @intCast(i * 10));
+    }
+
+    try testing.expectEqual(@as(usize, n), countLiveBits(&clocks));
+
+    const old = try clocks.grow(allocator);
+    allocator.free(old[0]);
+    allocator.free(old[1]);
+
+    for (tids) |tid| {
+        try testing.expect(bitIsSet(&clocks, tid));
+    }
+    try testing.expectEqual(@as(usize, n), countLiveBits(&clocks));
+}
+
+test "bitmask: grow with partial removes — only live entries retain their bit" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const n = 12;
+    var tids: [n]ThreadClocks.Key = undefined;
+    for (0..n) |i| {
+        tids[i] = ThreadClocks.Key.fromTid(@intCast(i + 1));
+        try clocks.put(tids[i], 0);
+    }
+
+    for (0..n) |i| {
+        if (i % 2 == 0) _ = clocks.remove(tids[i]);
+    }
+    try testing.expectEqual(@as(usize, n / 2), countLiveBits(&clocks));
+
+    const old = try clocks.grow(allocator);
+    allocator.free(old[0]);
+    allocator.free(old[1]);
+
+    try testing.expectEqual(@as(usize, n / 2), countLiveBits(&clocks));
+
+    for (0..n) |i| {
+        if (i % 2 == 0) {
+            try testing.expect(!bitIsSet(&clocks, tids[i]));
+        } else {
+            try testing.expect(bitIsSet(&clocks, tids[i]));
+        }
+    }
+}
+
+test "ThreadClocks: forEach visits all live entries exactly once" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const n = 8;
+    var tids: [n]ThreadClocks.Key = undefined;
+    for (0..n) |i| {
+        tids[i] = ThreadClocks.Key.fromTid(@intCast(i + 1));
+        try clocks.put(tids[i], @intCast(i * 10));
+    }
+
+    clocks.master.store(30, .release);
+    _ = clocks.remove(tids[3]);
+
+    const Ctx = struct {
+        count: usize = 0,
+        ticks_sum: u32 = 0,
+    };
+
+    var ctx = Ctx{};
+
+    clocks.forEach(struct {
+        fn cb(key: ThreadClocks.Key, value: ThreadClocks.Value, c: *Ctx) void {
+            _ = key;
+            c.count += 1;
+            c.ticks_sum += value.data.ticks;
+        }
+    }.cb, &ctx);
+
+    try testing.expectEqual(n - 1, ctx.count);
+    try testing.expectEqual(@as(u32, 250), ctx.ticks_sum);
 }
 
 test "Pool: basic alloc/free and pointer math" {

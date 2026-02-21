@@ -249,7 +249,7 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
     // TODO: register sleep
-    this.clocks.remove(.fromTid(task.tid()));
+    _ = this.clocks.remove(.fromTid(task.tid()));
 }
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
