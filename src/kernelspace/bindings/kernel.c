@@ -49,6 +49,7 @@ struct task_struct *c_current_task(void);
 pid_t c_pid(struct task_struct *);
 pid_t c_tid(struct task_struct *);
 int c_task_is_running(struct task_struct *);
+int c_task_is_dead(struct task_struct *);
 struct callback_head **c_task_work_ptr(struct task_struct *);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
@@ -158,7 +159,7 @@ int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }
 int c_task_is_dead(struct task_struct *task) {
-    return (task->flags & PF_EXITING) || (task->exit_state != 0);
+  return (task->flags & PF_EXITING) || (task->exit_state != 0);
 }
 struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;

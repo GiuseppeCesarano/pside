@@ -383,6 +383,7 @@ pub const ThreadClocks = struct {
         defer this.ref.open();
         this.ref.drain();
 
+        const master = this.master.load(.unordered);
         for (this.bitmask, 0..) |*bit_bucket, i| {
             var bucket = bit_bucket.load(.unordered);
             while (bucket != 0) {
@@ -394,7 +395,7 @@ pub const ThreadClocks = struct {
                 const key = pair.key.load(.unordered).withoutCollisionBit();
                 const value = pair.value.load(.unordered);
 
-                @call(.always_inline, cb, .{ key, value, values });
+                @call(.always_inline, cb, .{ master, key, value, values });
 
                 bucket &= bucket - 1;
             }
@@ -933,7 +934,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     var ctx = Ctx{};
 
     clocks.forEach(struct {
-        fn cb(key: ThreadClocks.Key, value: ThreadClocks.Value, c: *Ctx) void {
+        fn cb(_: ThreadClocks.Ticks, key: ThreadClocks.Key, value: ThreadClocks.Value, c: *Ctx) void {
             _ = key;
             c.count += 1;
             c.ticks_sum += value.data.ticks;

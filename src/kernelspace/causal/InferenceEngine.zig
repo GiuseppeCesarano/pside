@@ -20,7 +20,7 @@ const SleepTaskWork = struct {
 
 const TaskSleepPool = thread_safe.Pool(SleepTaskWork);
 const ProfiledTasksPool = thread_safe.Pool(std.atomic.Value(?*kernel.Task));
-const ClockTick = u32;
+const ClockTicks = thread_safe.ThreadClocks.Ticks;
 
 const sampler_frequency = 999; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 
@@ -96,7 +96,9 @@ pub fn deinit(this: *@This()) void {
 }
 
 pub fn profilePid(this: *@This(), pid: Pid) !void {
-    try this.clocks.put(.fromTid(pid), 0);
+    const task = kernel.Task.fromTid(pid);
+
+    try this.clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
@@ -175,7 +177,7 @@ fn setExperimentParameters(this: *@This()) void {
     this.delay_per_tick.store(@truncate(delay), .monotonic);
 }
 
-fn registerForSleep(this: *@This(), task: *kernel.Task, global_ticks: ClockTick, delay_per_tick: usize) void {
+fn registerForSleep(this: *@This(), task: *kernel.Task, global_ticks: ClockTicks, delay_per_tick: usize) void {
     const ticks = if (task.isRunning())
         global_ticks - this.clocks.get(.clock(task.tid()), .ticks)
     else
@@ -198,14 +200,14 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     const this: *@This() = @ptrCast(@alignCast(event.context().?));
     const selected_line = this.selected_ip.load(.monotonic);
 
-    const tid = kernel.Task.current().tid();
+    const current_task = kernel.Task.current();
 
     if (selected_line == regs.ip)
-        this.clocks.tick(.fromTid(tid)) catch return
+        this.clocks.tick(.fromPtr(current_task)) catch return
     else if (selected_line == 0) {
         @branchHint(.unlikely);
         if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
-            this.clocks.tick(.fromTid(tid)) catch return;
+            this.clocks.tick(.fromPtr(current_task)) catch return;
     }
 }
 
@@ -220,8 +222,9 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     const this: *@This() = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
+    child.incrementReferences();
     // TODO: register sleep
-    _ = this.clocks.fork(.fromTid(parent.tid()), .fromTid(child.tid())) catch {}; // TODO: allocate atomically
+    _ = this.clocks.fork(.fromPtr(parent), .fromPtr(child)) catch {}; // TODO: allocate atomically
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
@@ -229,7 +232,7 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
 
     if (prev.pid() != this.profiled_pid.load(.monotonic) or prev.isDead()) return;
 
-    if (!prev.isRunning()) this.clocks.prepareForSleep(.fromTid(prev.tid()));
+    if (!prev.isRunning()) this.clocks.prepareForSleep(.fromPtr(prev));
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
@@ -241,7 +244,7 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     if (current.pid() != instrumented_pid or woke.pid() != instrumented_pid) return;
 
     // TODO: register sleesp
-    _ = this.clocks.wake(.fromTid(current.tid()), .fromTid(woke.tid()));
+    _ = this.clocks.wake(.fromPtr(current), .fromPtr(woke));
 }
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
@@ -249,7 +252,8 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
     // TODO: register sleep
-    _ = this.clocks.remove(.fromTid(task.tid()));
+    _ = this.clocks.remove(.fromPtr(task));
+    task.decrementReferences();
 }
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
