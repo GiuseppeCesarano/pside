@@ -161,7 +161,7 @@ pub const ThreadClocks = struct {
             assert(!current_key.isEql(key));
 
             if (current_key.isEql(.empty) and
-                this.pairs[index].key.cmpxchgStrong(.empty, .reserved, .acquire, .monotonic) == null)
+                this.pairs[index].key.cmpxchgStrong(current_key, .reserved, .acquire, .monotonic) == null)
                 return &this.pairs[index];
 
             if (!current_key.hasCollided())
