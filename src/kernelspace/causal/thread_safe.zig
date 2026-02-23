@@ -378,12 +378,13 @@ pub const ThreadClocks = struct {
         return .{ old_pairs, old_bitmask };
     }
 
-    pub fn forEach(this: *@This(), comptime cb: anytype, values: anytype) void {
+    pub fn forEach(this: *@This(), comptime cb: anytype, args: anytype) void {
         this.ref.close();
         defer this.ref.open();
         this.ref.drain();
 
         const master = this.master.load(.unordered);
+
         for (this.bitmask, 0..) |*bit_bucket, i| {
             var bucket = bit_bucket.load(.unordered);
             while (bucket != 0) {
@@ -392,10 +393,10 @@ pub const ThreadClocks = struct {
 
                 const pair = &this.pairs[index];
 
-                const key = pair.key.load(.unordered).withoutCollisionBit();
-                const value = pair.value.load(.unordered);
+                const key = &pair.key.raw;
+                const value = &pair.value.raw;
 
-                @call(.always_inline, cb, .{ master, key, value, values });
+                @call(.always_inline, cb, .{ master, key, value } ++ args);
 
                 bucket &= bucket - 1;
             }
@@ -926,23 +927,20 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     clocks.master.store(30, .release);
     _ = clocks.remove(keys[3]);
 
-    const Ctx = struct {
-        count: usize = 0,
-        ticks_sum: u32 = 0,
-    };
+    var count: usize = 0;
+    var ticks_sum: u32 = 0;
 
-    var ctx = Ctx{};
-
-    clocks.forEach(struct {
-        fn cb(_: ThreadClocks.Ticks, key: ThreadClocks.Key, value: ThreadClocks.Value, c: *Ctx) void {
-            _ = key;
-            c.count += 1;
-            c.ticks_sum += value.data.ticks;
+    const cb = struct {
+        fn cb(_: ThreadClocks.Ticks, _: *ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
+            c.* += 1;
+            sum.* += value.data.ticks;
         }
-    }.cb, &ctx);
+    }.cb;
 
-    try testing.expectEqual(n - 1, ctx.count);
-    try testing.expectEqual(@as(u32, 250), ctx.ticks_sum);
+    clocks.forEach(cb, .{ &count, &ticks_sum });
+
+    try testing.expectEqual(n - 1, count);
+    try testing.expectEqual(@as(u32, 250), ticks_sum);
 }
 
 test "Pool: basic alloc/free and pointer math" {
