@@ -800,18 +800,18 @@ test "bitmask: put sets bit, remove clears it" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    try testing.expectEqual(@as(usize, 0), countLiveBits(&clocks));
+    try testing.expectEqual(0, countLiveBits(&clocks));
 
     const key: ThreadClocks.Key = .{ .data = 42 };
     try clocks.put(key, 0);
 
     try testing.expect(bitIsSet(&clocks, key));
-    try testing.expectEqual(@as(usize, 1), countLiveBits(&clocks));
+    try testing.expectEqual(1, countLiveBits(&clocks));
 
     _ = clocks.remove(key);
 
     try testing.expect(!bitIsSet(&clocks, key));
-    try testing.expectEqual(@as(usize, 0), countLiveBits(&clocks));
+    try testing.expectEqual(0, countLiveBits(&clocks));
 }
 
 test "bitmask: popcount tracks live entry count across multiple puts and removes" {
@@ -847,13 +847,13 @@ test "bitmask: fork sets child bit without clearing parent bit" {
 
     try clocks.put(parent, 10);
     clocks.master.store(10, .release); // master must be >= ticks to avoid underflow in fork
-    try testing.expectEqual(@as(usize, 1), countLiveBits(&clocks));
+    try testing.expectEqual(1, countLiveBits(&clocks));
 
     _ = try clocks.fork(parent, child);
 
     try testing.expect(bitIsSet(&clocks, parent));
     try testing.expect(bitIsSet(&clocks, child));
-    try testing.expectEqual(@as(usize, 2), countLiveBits(&clocks));
+    try testing.expectEqual(2, countLiveBits(&clocks));
 }
 
 test "bitmask: grow migrates all live bits and clears none" {
@@ -868,7 +868,7 @@ test "bitmask: grow migrates all live bits and clears none" {
         try clocks.put(keys[i], @intCast(i * 10));
     }
 
-    try testing.expectEqual(@as(usize, n), countLiveBits(&clocks));
+    try testing.expectEqual(n, countLiveBits(&clocks));
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
@@ -877,7 +877,7 @@ test "bitmask: grow migrates all live bits and clears none" {
     for (keys) |key| {
         try testing.expect(bitIsSet(&clocks, key));
     }
-    try testing.expectEqual(@as(usize, n), countLiveBits(&clocks));
+    try testing.expectEqual(n, countLiveBits(&clocks));
 }
 
 test "bitmask: grow with partial removes — only live entries retain their bit" {
@@ -895,13 +895,13 @@ test "bitmask: grow with partial removes — only live entries retain their bit"
     for (0..n) |i| {
         if (i % 2 == 0) _ = clocks.remove(keys[i]);
     }
-    try testing.expectEqual(@as(usize, n / 2), countLiveBits(&clocks));
+    try testing.expectEqual(n / 2, countLiveBits(&clocks));
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
     allocator.free(old[1]);
 
-    try testing.expectEqual(@as(usize, n / 2), countLiveBits(&clocks));
+    try testing.expectEqual(n / 2, countLiveBits(&clocks));
 
     for (0..n) |i| {
         if (i % 2 == 0) {
@@ -940,7 +940,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     clocks.forEach(cb, .{ &count, &ticks_sum });
 
     try testing.expectEqual(n - 1, count);
-    try testing.expectEqual(@as(u32, 250), ticks_sum);
+    try testing.expectEqual(250, ticks_sum);
 }
 
 test "Pool: basic alloc/free and pointer math" {
