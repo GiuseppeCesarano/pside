@@ -264,7 +264,7 @@ pub const ThreadClocks = struct {
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
     /// Returns the delay amounts those threads should sleep
-    pub fn wake(this: *@This(), waker: Key, wakee: Key) struct { waker: Ticks, wakee: Ticks } {
+    pub fn wake(this: *@This(), waker: Key, wakee: Key) [2]Ticks {
         const waker_hash = waker.hash();
         const wakee_hash = wakee.hash();
 
@@ -283,7 +283,7 @@ pub const ThreadClocks = struct {
 
         const waker_lag = master - waker_ticks;
 
-        return .{ .waker = waker_lag, .wakee = waker_lag + wakee_lag };
+        return .{ waker_lag, waker_lag + wakee_lag };
     }
 
     /// Tracks a thread forking.
@@ -407,46 +407,37 @@ pub const ThreadClocks = struct {
 pub fn Pool(Type: type) type {
     return struct {
         const pool_len = @bitSizeOf(usize);
-        const alignment = @sizeOf(Type) * pool_len;
 
-        entries: [pool_len]Type align(alignment),
+        entries: [pool_len]Type,
         used_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
 
         pub const empty: @This() = .{ .entries = undefined, .used_bitmask = .init(0) };
 
-        pub fn getPoolPtrFromEntryPtr(entry_ptr: *Type) *@This() {
-            const aligned_addr = std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment);
-            const field_ptr: *[pool_len]Type align(alignment) = @ptrFromInt(aligned_addr);
-
-            return @alignCast(@fieldParentPtr("entries", field_ptr));
-        }
-
         pub fn getEntry(this: *@This()) ?*Type {
             var used = this.used_bitmask.load(.monotonic);
-            var first_free = @ctz(~used);
-            if (first_free == pool_len) return null;
-
-            var locking_bit = @as(usize, 1) << @truncate(first_free);
-            used = this.used_bitmask.fetchOr(locking_bit, .acquire);
-            while (used & locking_bit != 0) {
-                @branchHint(.unlikely);
-                first_free = @ctz(~used);
+            while (true) {
+                const first_free = @ctz(~used);
                 if (first_free == pool_len) return null;
 
-                locking_bit = @as(usize, 1) << @truncate(first_free);
-                used = this.used_bitmask.fetchOr(locking_bit, .acquire);
-            }
+                const locking_bit = @as(usize, 1) << @truncate(first_free);
+                const prev = this.used_bitmask.fetchOr(locking_bit, .acquire);
 
-            return &this.entries[first_free];
+                if (prev & locking_bit == 0) {
+                    @branchHint(.likely);
+                    return &this.entries[first_free];
+                }
+
+                used = prev;
+            }
         }
 
         pub fn freeEntry(this: *@This(), entry_ptr: *anyopaque) void {
             const entry_address = @intFromPtr(entry_ptr);
-            const position = @divExact(entry_address - std.mem.alignBackward(usize, @intFromPtr(entry_ptr), alignment), @sizeOf(Type));
+            const position = @divExact(entry_address - @intFromPtr(&this.entries), @sizeOf(Type));
 
-            const freeing_bit = ~(@as(usize, 1) << @truncate(position));
+            const freeing_mask = ~(@as(usize, 1) << @truncate(position));
 
-            assert(this.used_bitmask.fetchAnd(freeing_bit, .release) & (~freeing_bit) != 0);
+            assert(this.used_bitmask.fetchAnd(freeing_mask, .release) & (~freeing_mask) != 0);
         }
 
         pub fn inUse(this: *@This()) bool {
@@ -548,8 +539,8 @@ test "ThreadClocks: sleep and wake logic" {
 
     // waker_lag = master(20) - waker_ticks(10) = 10
     // wakee_lag = waker_lag(10) + wakee_lag(15) = 25
-    try testing.expectEqual(10, delays.waker);
-    try testing.expectEqual(25, delays.wakee);
+    try testing.expectEqual(10, delays[0]);
+    try testing.expectEqual(25, delays[1]);
 
     try testing.expectEqual(20, clocks.get(waker, .ticks));
     try testing.expectEqual(20, clocks.get(wakee, .ticks));
@@ -617,8 +608,8 @@ test "ThreadClocks: Causal Mechanics" {
     clocks.prepareForSleep(child);
 
     const d = clocks.wake(parent, child);
-    try testing.expectEqual(50, d.waker);
-    try testing.expectEqual(100, d.wakee);
+    try testing.expectEqual(50, d[0]);
+    try testing.expectEqual(100, d[1]);
 }
 
 test "ThreadClocks: concurrent stress" {
@@ -950,9 +941,6 @@ test "Pool: basic alloc/free and pointer math" {
     const ptr1 = pool.getEntry() orelse return error.TestUnexpectedFull;
     ptr1.* = 0xAAAA_BBBB;
 
-    const parent = P.getPoolPtrFromEntryPtr(ptr1);
-    try testing.expectEqual(&pool, parent);
-
     const ptr2 = pool.getEntry() orelse return error.TestUnexpectedFull;
     try testing.expect(ptr1 != ptr2);
 
@@ -974,19 +962,6 @@ test "Pool: exhaustion and capacity" {
 
     const new_ptr = pool.getEntry();
     try testing.expectEqual(ptrs[0], new_ptr.?);
-}
-
-test "Pool: power of 2 struct alignment" {
-    const Align16 = struct {
-        data: [16]u8,
-    };
-
-    const P = Pool(Align16);
-    var pool: P = .empty;
-
-    const ptr = pool.getEntry() orelse return error.TestUnexpectedFull;
-    const parent = P.getPoolPtrFromEntryPtr(ptr);
-    try testing.expectEqual(&pool, parent);
 }
 
 test "Pool: concurrent churn" {
