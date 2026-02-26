@@ -441,7 +441,7 @@ pub fn Pool(Type: type) type {
         }
 
         pub fn inUse(this: *@This()) bool {
-            return @popCount(this.used_bitmask.load(.monotonic)) != 0;
+            return this.used_bitmask.load(.monotonic) != 0;
         }
     };
 }

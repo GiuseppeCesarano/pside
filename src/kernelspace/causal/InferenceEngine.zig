@@ -54,7 +54,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !@This() {
 
     return .{
         .profiled_pid = .init(0),
-        .experiment_duration = 50 * std.time.us_per_ms,
+        .experiment_duration = 45 * std.time.us_per_ms,
         .delay_per_tick = .init(0),
         .selected_ip = .init(0),
 
@@ -144,10 +144,28 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         this.sampler.?.enable();
         kernel.time.sleep.us(this.experiment_duration);
+        while (this.progress.load(.monotonic) < 5 and !kernel.Thread.shouldThisStop()) {
+            @branchHint(.unlikely);
+            kernel.time.sleep.us(this.experiment_duration);
+            this.experiment_duration *= 2;
+        }
         this.sampler.?.disable();
+
+        this.clocks.forEach(signalSleep, .{this});
     }
 
     return 0;
+}
+
+fn signalSleep(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *@This()) void {
+    // We force collision bit since kernel pointer live in 0xffff8...
+    const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
+    if (!task.isRunning()) return;
+
+    const lag = master - value.data.ticks;
+    value.data.ticks = master;
+
+    this.registerForSleep(task, lag);
 }
 
 fn setExperimentParameters(this: *@This()) void {
@@ -176,14 +194,13 @@ fn registerForSleep(this: *@This(), task: *kernel.Task, lag: ClockTicks) void {
     const delay: usize = lag * this.delay_per_tick.load(.monotonic);
     if (delay == 0) return;
 
-    // const slot = this.task_sleep_pool.getEntry() orelse {
-    //     this.fatalErr("TODO");
-    //     return;
-    // };
+    const slot = this.task_sleep_pool.getEntry() orelse {
+        this.fatalErr("TODO");
+        return;
+    };
 
-    // slot.delay.store(delay, .monotonic);
-    // task.addWork(&slot.work, .signal_no_ipi) catch this.fatalErr("Could not register sleep work");
-    _ = task;
+    slot.delay.store(delay, .monotonic);
+    task.addWork(&slot.work, .@"resume") catch this.fatalErr("Could not register sleep work");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -196,6 +213,7 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
         this.clocks.tick(.fromPtr(current_task)) catch return;
     } else if (selected_line == 0) {
         @branchHint(.unlikely);
+
         if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
             this.clocks.tick(.fromPtr(current_task)) catch return;
     }
@@ -255,7 +273,6 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
     const sleep_work: *SleepTaskWork = @fieldParentPtr("work", work);
 
     const delay = sleep_work.delay.load(.monotonic);
-    std.log.info("i was called with: {}", .{delay});
     const this: *@This() = @ptrCast(@alignCast(sleep_work.this));
     this.task_sleep_pool.freeEntry(sleep_work);
 
