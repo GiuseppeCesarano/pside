@@ -62,7 +62,7 @@ fn OptionsImpl(ItType: type) type {
             type_tag: allowed_types.Tag,
             offset_in_parent: usize,
 
-            pub fn init(Parent: type, field: std.builtin.Type.StructField) @This() {
+            pub fn init(Parent: type, field: std.builtin.Type.StructField) FlagInfo {
                 return .{
                     .name = field.name,
                     .type_tag = allowed_types.tagFromType(field.type),
@@ -70,7 +70,7 @@ fn OptionsImpl(ItType: type) type {
                 };
             }
 
-            fn parseIntoField(this: @This(), parent_ptr: *anyopaque, parse_target: []const u8) !void {
+            fn parseIntoField(this: FlagInfo, parent_ptr: *anyopaque, parse_target: []const u8) !void {
                 const value: allowed_types.Union = switch (this.type_tag) {
                     .i32 => .{ .i32 = try std.fmt.parseInt(i32, parse_target, 0) },
                     .i64 => .{ .i64 = try std.fmt.parseInt(i64, parse_target, 0) },
@@ -98,14 +98,14 @@ fn OptionsImpl(ItType: type) type {
             args: ItType,
             mask: Mask.MaskInt,
 
-            pub fn next(this: *@This()) ?[]const u8 {
+            pub fn next(this: *Iterator) ?[]const u8 {
                 while (this.mask & 1 == 0 and this.args.next() != null) : (this.mask >>= 1) {}
 
                 this.mask >>= 1;
                 return this.args.next();
             }
 
-            pub fn count(this: @This()) usize {
+            pub fn count(this: Iterator) usize {
                 return @popCount(this.mask);
             }
         };

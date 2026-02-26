@@ -1,3 +1,4 @@
+const Program = @This();
 const std = @import("std");
 
 path: [*:0]const u8,
@@ -5,7 +6,7 @@ args: [*:null]const ?[*:0]const u8,
 enviroment_map: std.process.Environ,
 is_sudo: bool,
 
-pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
         if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
 
@@ -25,11 +26,11 @@ pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allo
     return error.UnspecifiedCommand;
 }
 
-pub fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
     return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' ') + 1, environ, allocator, io);
 }
 
-pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
     var it = iterator;
 
     var first_token = it.next().?;
@@ -86,7 +87,7 @@ fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, alloc
     } else break :file error.notFoundInPath;
 }
 
-pub fn deinit(this: @This(), allocator: std.mem.Allocator) void {
+pub fn deinit(this: Program, allocator: std.mem.Allocator) void {
     allocator.free(std.mem.span(this.path));
     const args_slice = std.mem.span(this.args);
     for (args_slice) |arg| {

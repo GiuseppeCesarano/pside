@@ -7,7 +7,7 @@ const RefGate = struct {
 
     reference: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
 
-    pub inline fn increment(this: *@This()) void {
+    pub inline fn increment(this: *RefGate) void {
         var ref = this.reference.fetchAdd(1, .acquire);
         assert((ref & references_mask) != references_mask);
 
@@ -23,7 +23,7 @@ const RefGate = struct {
         }
     }
 
-    pub inline fn tryIncrement(this: *@This()) !void {
+    pub inline fn tryIncrement(this: *RefGate) !void {
         const ref = this.reference.fetchAdd(1, .acquire);
         assert((ref & references_mask) != references_mask);
         if (ref & lock_bit != 0) {
@@ -32,23 +32,23 @@ const RefGate = struct {
         }
     }
 
-    pub inline fn decrement(this: *@This()) void {
+    pub inline fn decrement(this: *RefGate) void {
         assert(this.reference.fetchSub(1, .release) & references_mask != 0);
     }
 
-    pub inline fn close(this: *@This()) void {
+    pub inline fn close(this: *RefGate) void {
         while (this.reference.fetchOr(lock_bit, .acquire) & lock_bit != 0) {
             @branchHint(.cold);
             while (this.reference.load(.monotonic) & lock_bit != 0) std.atomic.spinLoopHint();
         }
     }
 
-    pub inline fn drain(this: *@This()) void {
+    pub inline fn drain(this: *RefGate) void {
         while ((this.reference.load(.acquire) & references_mask) != 0)
             std.atomic.spinLoopHint();
     }
 
-    pub inline fn open(this: *@This()) void {
+    pub inline fn open(this: *RefGate) void {
         assert(this.reference.fetchAnd(references_mask, .release) & lock_bit != 0);
     }
 };
@@ -60,13 +60,13 @@ pub const ThreadClocks = struct {
     pub const Key = packed struct(usize) {
         data: usize,
 
-        const bit_size = @bitSizeOf(@This());
+        const bit_size = @bitSizeOf(Key);
         const Unsigned = std.meta.Int(.unsigned, bit_size);
         const collided_bit: Unsigned = @bitCast(@as(Unsigned, 1 << bit_size - 1));
 
-        pub const empty: @This() = .{ .data = 0 };
-        pub const empty_collided: @This() = @bitCast(collided_bit);
-        pub const reserved: @This() = @bitCast(std.math.maxInt(Unsigned) & ~collided_bit);
+        pub const empty: Key = .{ .data = 0 };
+        pub const empty_collided: Key = @bitCast(collided_bit);
+        pub const reserved: Key = @bitCast(std.math.maxInt(Unsigned) & ~collided_bit);
 
         pub fn isEql(this: Key, other: Key) bool {
             const this_bits: Unsigned = @bitCast(this);
@@ -79,21 +79,21 @@ pub const ThreadClocks = struct {
             return (this_bits & collided_bit) != 0;
         }
 
-        pub fn fromPtr(ptr: *anyopaque) @This() {
+        pub fn fromPtr(ptr: *anyopaque) Key {
             return .{ .data = @intFromPtr(ptr) };
         }
 
-        pub fn hash(this: @This()) usize {
+        pub fn hash(this: Key) usize {
             const unsigned: Unsigned = @bitCast(this.data);
             return std.hash.int(unsigned);
         }
 
-        pub fn withCollisionBit(this: @This()) @This() {
+        pub fn withCollisionBit(this: Key) Key {
             const bits: Unsigned = @bitCast(this);
             return @bitCast(bits | collided_bit);
         }
 
-        pub fn withoutCollisionBit(this: @This()) @This() {
+        pub fn withoutCollisionBit(this: Key) Key {
             const bits: Unsigned = @bitCast(this);
             return @bitCast(bits & ~collided_bit);
         }
@@ -110,7 +110,7 @@ pub const ThreadClocks = struct {
         key: std.atomic.Value(Key),
         value: std.atomic.Value(Value),
 
-        const empty: @This() = .{ .key = .init(.empty), .value = undefined };
+        const empty: Pair = .{ .key = .init(.empty), .value = undefined };
     };
 
     master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
@@ -118,7 +118,7 @@ pub const ThreadClocks = struct {
     pairs: []Pair,
     bitmask: []std.atomic.Value(usize),
 
-    pub fn init(allocator: std.mem.Allocator, reserve: usize) !@This() {
+    pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
         assert(@popCount(reserve) == 1);
         assert(reserve >= @bitSizeOf(usize));
 
@@ -138,14 +138,14 @@ pub const ThreadClocks = struct {
         };
     }
 
-    pub fn deinit(this: *@This(), allocator: std.mem.Allocator) void {
+    pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
         this.ref.close();
         this.ref.drain();
         allocator.free(this.pairs);
         allocator.free(this.bitmask);
     }
 
-    fn reserveSlotUnsafe(this: *@This(), key: Key, hash: usize) !*Pair {
+    fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
         const len = this.pairs.len;
 
         assert(@popCount(len) == 1);
@@ -171,7 +171,7 @@ pub const ThreadClocks = struct {
         return error.NoSpace;
     }
 
-    fn getSlotUnsafe(this: *@This(), key: Key, hash: usize) *Pair {
+    fn getSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) *Pair {
         const len = this.pairs.len;
 
         assert(@popCount(len) == 1);
@@ -190,18 +190,18 @@ pub const ThreadClocks = struct {
         // so we use unreachable to catch that in the tests.
     }
 
-    fn getIndexUnsafe(this: @This(), elm: *Pair) usize {
+    fn getIndexUnsafe(this: ThreadClocks, elm: *Pair) usize {
         const elm_addr: usize = @intFromPtr(elm);
         const starting_addr: usize = @intFromPtr(this.pairs.ptr);
         return @divExact(elm_addr - starting_addr, @sizeOf(Pair));
     }
 
-    fn getPtrFromIndexUnsafe(this: @This(), index: usize) *Pair {
+    fn getPtrFromIndexUnsafe(this: ThreadClocks, index: usize) *Pair {
         const starting_addr: usize = @intFromPtr(this.pairs.ptr);
         return @ptrFromInt(starting_addr + index);
     }
 
-    fn publishReservedUnsafe(this: *@This(), key: Key, ptr: *Pair) void {
+    fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
         assert(ptr.key.load(.unordered).isEql(.reserved));
 
         const index = this.getIndexUnsafe(ptr);
@@ -213,7 +213,7 @@ pub const ThreadClocks = struct {
         _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
     }
 
-    pub fn put(this: *@This(), key: Key, ticks: Ticks) !void {
+    pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
         const hash = key.hash();
 
         this.ref.increment();
@@ -226,7 +226,7 @@ pub const ThreadClocks = struct {
         this.publishReservedUnsafe(key, slot);
     }
 
-    pub fn get(this: *@This(), key: Key, field: enum { ticks, lag }) u32 {
+    pub fn get(this: *ThreadClocks, key: Key, field: enum { ticks, lag }) u32 {
         const hash = key.hash();
 
         this.ref.increment();
@@ -238,7 +238,7 @@ pub const ThreadClocks = struct {
         return if (field == .ticks) value.data.ticks else value.data.lag;
     }
 
-    pub fn tick(this: *@This(), key: Key) !void {
+    pub fn tick(this: *ThreadClocks, key: Key) !void {
         const hash = key.hash();
 
         try this.ref.tryIncrement();
@@ -251,7 +251,7 @@ pub const ThreadClocks = struct {
         _ = this.master.fetchMax(ticks, .release);
     }
 
-    pub fn prepareForSleep(this: *@This(), key: Key) void {
+    pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
         this.ref.increment();
         defer this.ref.decrement();
 
@@ -264,7 +264,7 @@ pub const ThreadClocks = struct {
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
     /// Returns the delay amounts those threads should sleep
-    pub fn wake(this: *@This(), waker: Key, wakee: Key) [2]Ticks {
+    pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
         const waker_hash = waker.hash();
         const wakee_hash = wakee.hash();
 
@@ -288,7 +288,7 @@ pub const ThreadClocks = struct {
 
     /// Tracks a thread forking.
     /// Returns the delay ammount those threads should sleep
-    pub fn fork(this: *@This(), parent: Key, child: Key) !Ticks {
+    pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
         const parent_hash = parent.hash();
         const child_hash = child.hash();
 
@@ -310,7 +310,7 @@ pub const ThreadClocks = struct {
     }
 
     /// Returns the delay ammount that the thread should sleep
-    pub fn remove(this: *@This(), key: Key) Ticks {
+    pub fn remove(this: *ThreadClocks, key: Key) Ticks {
         const key_hash = key.hash();
 
         this.ref.increment();
@@ -330,7 +330,7 @@ pub const ThreadClocks = struct {
         return master - ticks;
     }
 
-    pub fn grow(this: *@This(), allocator: std.mem.Allocator) !struct { []Pair, []std.atomic.Value(usize) } {
+    pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair, []std.atomic.Value(usize) } {
         this.ref.increment();
         const new_len = this.pairs.len * 2;
         this.ref.decrement();
@@ -378,7 +378,7 @@ pub const ThreadClocks = struct {
         return .{ old_pairs, old_bitmask };
     }
 
-    pub fn forEach(this: *@This(), comptime cb: anytype, args: anytype) void {
+    pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
         this.ref.close();
         defer this.ref.open();
         this.ref.drain();

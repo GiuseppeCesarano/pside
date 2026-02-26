@@ -246,17 +246,17 @@ pub const time = struct {
 };
 
 pub const Task = opaque {
-    extern fn c_current_task() *@This();
-    pub fn current() *@This() {
+    extern fn c_current_task() *Task;
+    pub fn current() *Task {
         return c_current_task();
     }
 
-    extern fn c_get_task_from_tid(linux.pid_t) *@This();
-    pub fn fromTid(t: linux.pid_t) *@This() {
+    extern fn c_get_task_from_tid(linux.pid_t) *Task;
+    pub fn fromTid(t: linux.pid_t) *Task {
         return c_get_task_from_tid(t);
     }
 
-    extern fn c_task_work_add(?*@This(), ?*Work, NotifyMode) c_int;
+    extern fn c_task_work_add(?*Task, ?*Work, NotifyMode) c_int;
     pub fn findAddWork() WorkAddError!void {
         return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
             .SUCCESS => {},
@@ -265,23 +265,23 @@ pub const Task = opaque {
         };
     }
 
-    extern fn c_pid(*@This()) linux.pid_t;
-    pub fn pid(this: *@This()) linux.pid_t {
+    extern fn c_pid(*Task) linux.pid_t;
+    pub fn pid(this: *Task) linux.pid_t {
         return c_pid(this);
     }
 
-    extern fn c_tid(*@This()) linux.pid_t;
-    pub fn tid(this: *@This()) linux.pid_t {
+    extern fn c_tid(*Task) linux.pid_t;
+    pub fn tid(this: *Task) linux.pid_t {
         return c_tid(this);
     }
 
-    extern fn c_task_is_running(*@This()) c_int;
-    pub fn isRunning(this: *@This()) bool {
+    extern fn c_task_is_running(*Task) c_int;
+    pub fn isRunning(this: *Task) bool {
         return c_task_is_running(this) != 0;
     }
 
-    extern fn c_task_is_dead(*@This()) c_int;
-    pub fn isDead(this: *@This()) bool {
+    extern fn c_task_is_dead(*Task) c_int;
+    pub fn isDead(this: *Task) bool {
         return c_task_is_dead(this) != 0;
     }
 
@@ -306,7 +306,7 @@ pub const Task = opaque {
         Unknown,
     };
 
-    pub fn addWork(this: *@This(), work: *Work, notify_mode: NotifyMode) WorkAddError!void {
+    pub fn addWork(this: *Task, work: *Work, notify_mode: NotifyMode) WorkAddError!void {
         return switch (linux.errno(@intCast(c_task_work_add(this, work, notify_mode)))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFaild,
@@ -316,18 +316,18 @@ pub const Task = opaque {
         };
     }
 
-    extern fn c_find_vma(*@This(), usize) ?*Vma;
-    pub fn findVma(this: *@This(), addr: usize) ?*Vma {
+    extern fn c_find_vma(*Task, usize) ?*Vma;
+    pub fn findVma(this: *Task, addr: usize) ?*Vma {
         return c_find_vma(this, addr);
     }
 
-    extern fn c_get_task_struct(*@This()) void;
-    pub fn incrementReferences(this: *@This()) void {
+    extern fn c_get_task_struct(*Task) void;
+    pub fn incrementReferences(this: *Task) void {
         c_get_task_struct(this);
     }
 
-    extern fn c_put_task_struct(*@This()) void;
-    pub fn decrementReferences(this: *@This()) void {
+    extern fn c_put_task_struct(*Task) void;
+    pub fn decrementReferences(this: *Task) void {
         c_put_task_struct(this);
     }
 };
@@ -347,13 +347,13 @@ pub const rcu = struct {
 };
 
 pub const Vma = opaque {
-    extern fn c_vma_start(*@This()) usize;
-    pub fn start(this: *@This()) usize {
+    extern fn c_vma_start(*Vma) usize;
+    pub fn start(this: *Vma) usize {
         return c_vma_start(this);
     }
 
-    extern fn c_vma_filename(*@This()) ?[*:0]const u8;
-    pub fn filename(this: *@This()) ?[*:0]const u8 {
+    extern fn c_vma_filename(*Vma) ?[*:0]const u8;
+    pub fn filename(this: *Vma) ?[*:0]const u8 {
         return c_vma_filename(this);
     }
 };
@@ -362,24 +362,24 @@ pub const CharDevice = extern struct {
     _: [512]u8 = undefined,
     pub const IoctlHandler = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
 
-    extern fn c_chardev_register(*@This(), [*:0]const u8, IoctlHandler) c_int;
-    pub fn create(this: *@This(), file_name: [:0]const u8, handler: IoctlHandler) !void {
+    extern fn c_chardev_register(*CharDevice, [*:0]const u8, IoctlHandler) c_int;
+    pub fn create(this: *CharDevice, file_name: [:0]const u8, handler: IoctlHandler) !void {
         if (c_chardev_register(this, file_name.ptr, handler) != 0) return error.CouldNotRegisterChardev;
     }
 
-    extern fn c_chardev_unregister(*@This()) void;
-    pub fn remove(this: *@This()) void {
+    extern fn c_chardev_unregister(*CharDevice) void;
+    pub fn remove(this: *CharDevice) void {
         c_chardev_unregister(this);
     }
 
-    extern fn c_get_shared_buffer(*@This()) *[std.heap.page_size_min]u8;
-    pub fn shared_buffer(this: *@This()) *[std.heap.page_size_min]u8 {
+    extern fn c_get_shared_buffer(*CharDevice) *[std.heap.page_size_min]u8;
+    pub fn shared_buffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
         return c_get_shared_buffer(this);
     }
 };
 
 pub const PerfEvent = opaque {
-    const PerfOverflowHandler = *const fn (*@This(), *anyopaque, *PtRegs) callconv(.c) void;
+    const PerfOverflowHandler = *const fn (*PerfEvent, *anyopaque, *PtRegs) callconv(.c) void;
 
     pub const InitErrors = error{
         InvalidConfiguration,
@@ -394,7 +394,7 @@ pub const PerfEvent = opaque {
     };
 
     extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
-    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitErrors!*@This() {
+    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitErrors!*PerfEvent {
         const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, cntxt);
         return switch (linux.errno(rc)) {
             .SUCCESS => @ptrFromInt(rc),
@@ -410,36 +410,36 @@ pub const PerfEvent = opaque {
         };
     }
 
-    extern fn c_perf_event_enable(*@This()) void;
-    pub fn enable(this: *@This()) void {
+    extern fn c_perf_event_enable(*PerfEvent) void;
+    pub fn enable(this: *PerfEvent) void {
         c_perf_event_enable(this);
     }
 
-    extern fn c_perf_event_disable(*@This()) void;
-    pub fn disable(this: *@This()) void {
+    extern fn c_perf_event_disable(*PerfEvent) void;
+    pub fn disable(this: *PerfEvent) void {
         c_perf_event_disable(this);
     }
 
-    extern fn c_perf_event_release_kernel(*@This()) c_int;
-    pub fn deinit(this: ?*@This()) void {
+    extern fn c_perf_event_release_kernel(*PerfEvent) c_int;
+    pub fn deinit(this: ?*PerfEvent) void {
         if (this) |t| _ = c_perf_event_release_kernel(t);
     }
 
-    extern fn c_perf_event_context(*@This()) ?*anyopaque;
-    pub fn context(this: *@This()) ?*anyopaque {
+    extern fn c_perf_event_context(*PerfEvent) ?*anyopaque;
+    pub fn context(this: *PerfEvent) ?*anyopaque {
         return c_perf_event_context(this);
     }
 };
 
 pub const Thread = opaque {
     pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
-    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *@This();
-    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *@This() {
+    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *Thread;
+    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *Thread {
         return c_kthread_run(thread_handler, data, name);
     }
 
-    extern fn c_kthread_stop(*@This()) c_int;
-    pub fn stop(this: *@This()) void {
+    extern fn c_kthread_stop(*Thread) c_int;
+    pub fn stop(this: *Thread) void {
         _ = c_kthread_stop(this); //TODO: this should return errors
     }
 

@@ -68,26 +68,26 @@ pub const UserRegs = struct {
     fs: c_ulong,
     gs: c_ulong,
 
-    pub fn ip(this: @This()) c_ulong {
+    pub fn ip(this: UserRegs) c_ulong {
         return this.rip;
     }
 
-    pub fn setIp(this: *@This(), new_ip: c_ulong) void {
+    pub fn setIp(this: *UserRegs, new_ip: c_ulong) void {
         this.rip = new_ip;
     }
 
-    pub fn ret(this: @This()) c_ulong {
+    pub fn ret(this: UserRegs) c_ulong {
         return this.rax;
     }
 
-    pub fn prep_syscall(this: *@This(), syscall_id: std.os.linux.SYS, args: anytype) void {
+    pub fn prep_syscall(this: *UserRegs, syscall_id: std.os.linux.SYS, args: anytype) void {
         const fields = [_]usize{
-            @offsetOf(@This(), "rdi"),
-            @offsetOf(@This(), "rsi"),
-            @offsetOf(@This(), "rdx"),
-            @offsetOf(@This(), "r10"),
-            @offsetOf(@This(), "r8"),
-            @offsetOf(@This(), "r9"),
+            @offsetOf(UserRegs, "rdi"),
+            @offsetOf(UserRegs, "rsi"),
+            @offsetOf(UserRegs, "rdx"),
+            @offsetOf(UserRegs, "r10"),
+            @offsetOf(UserRegs, "r8"),
+            @offsetOf(UserRegs, "r9"),
         };
         std.debug.assert(args.len <= fields.len);
         const len = @min(args.len, fields.len);

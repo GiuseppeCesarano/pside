@@ -1,3 +1,4 @@
+const TracedProcess = @This();
 const std = @import("std");
 const linux = std.os.linux;
 const Program = @import("Program.zig");
@@ -16,7 +17,7 @@ pid: linux.pid_t,
 elf_entrypoint: usize,
 old_entry_ins: usize,
 
-pub fn spawn(tracee_exe: Program, io: std.Io) !@This() {
+pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
     const rc = linux.fork();
     const child_pid: linux.pid_t = switch (linux.errno(rc)) {
         .SUCCESS => @intCast(rc),
@@ -138,7 +139,7 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     return try reader.interface.takeInt(usize, .native);
 }
 
-pub fn start(this: @This()) !void {
+pub fn start(this: TracedProcess) !void {
     var regs = try ptrace.getRegs(this.pid);
     regs.setIp(this.elf_entrypoint);
     try ptrace.setRegs(this.pid, regs);
@@ -147,7 +148,7 @@ pub fn start(this: @This()) !void {
     try ptrace.detach(this.pid);
 }
 
-pub fn kill(this: @This()) !void {
+pub fn kill(this: TracedProcess) !void {
     return switch (linux.errno(linux.kill(this.pid, .KILL))) {
         .SUCCESS => {},
         .PERM => error.PermissionDenied,
@@ -156,14 +157,14 @@ pub fn kill(this: @This()) !void {
     };
 }
 
-pub fn wait(this: @This()) !u32 {
+pub fn wait(this: TracedProcess) !u32 {
     var status: u32 = undefined;
     if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
 
     return status;
 }
 
-pub fn patchProgressPoint(this: @This(), addr: usize) !void {
+pub fn patchProgressPoint(this: TracedProcess, addr: usize) !void {
     const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
@@ -182,7 +183,7 @@ pub fn patchProgressPoint(this: @This(), addr: usize) !void {
 }
 
 pub fn open(
-    this: @This(),
+    this: TracedProcess,
     file_path: *anyopaque,
     flags: linux.O,
     perm: linux.mode_t,
@@ -222,7 +223,7 @@ pub fn open(
 }
 
 fn mmap(
-    this: @This(),
+    this: TracedProcess,
     ptr: ?[*]align(std.heap.page_size_min) u8,
     length: usize,
     prot: u32,
@@ -261,7 +262,7 @@ fn mmap(
     }
 }
 
-pub fn syscall(this: @This(), syscall_id: linux.SYS, args: anytype) !usize {
+pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) !usize {
     const saved_regs = try ptrace.getRegs(this.pid);
     const ip = saved_regs.ip();
     const old_ins = try ptrace.peekWord(.text, this.pid, ip);
