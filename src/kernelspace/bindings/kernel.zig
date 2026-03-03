@@ -524,6 +524,18 @@ pub const tracepoint = struct {
     };
 };
 
+pub const preempt = struct {
+    extern fn c_preempt_disable() void;
+    extern fn c_preempt_enable() void;
+
+    pub inline fn disable() void {
+        c_preempt_disable();
+    }
+    pub inline fn enable() void {
+        c_preempt_enable();
+    }
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);

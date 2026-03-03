@@ -13,6 +13,7 @@
 #include <linux/namei.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
+#include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
@@ -120,6 +121,10 @@ void c_unregister_sched_exit(void *, void *);
 int c_register_sched_waking(void *, void *);
 void c_unregister_sched_waking(void *, void *);
 void c_tracepoint_sync(void);
+
+/* Preemept */
+void c_preempt_disable(void);
+void c_preempt_enable(void);
 
 /* Implementations */
 
@@ -443,3 +448,8 @@ void c_unregister_sched_waking(void *callback, void *data) {
 }
 
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
+
+/* Preemption */
+
+void c_preempt_disable(void) { preempt_disable(); }
+void c_preempt_enable(void) { preempt_enable(); }

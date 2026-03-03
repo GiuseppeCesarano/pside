@@ -136,28 +136,6 @@ pub fn profilePid(this: *InferenceEngine, pid: Pid) !void {
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
 
-// fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
-//     const this: *InferenceEngine = @ptrCast(@alignCast(ctx));
-
-//     while (!kernel.Thread.shouldThisStop()) {
-//         this.setExperimentParameters();
-//         this.progress.store(0, .monotonic);
-
-//         this.sampler.?.enable();
-//         kernel.time.sleep.us(this.experiment_duration);
-//         while (this.progress.load(.monotonic) < 5 and !kernel.Thread.shouldThisStop()) {
-//             @branchHint(.unlikely);
-//             kernel.time.sleep.us(this.experiment_duration);
-//             this.experiment_duration *= 2;
-//         }
-//         this.sampler.?.disable();
-
-//         this.clocks.forEach(signalSleep, .{this});
-//     }
-
-//     return 0;
-// }
-
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *InferenceEngine = @ptrCast(@alignCast(ctx));
 
@@ -181,7 +159,10 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         }
 
         this.sampler.?.disable();
+
+        kernel.preempt.disable();
         this.clocks.forEach(signalSleep, .{this});
+        kernel.preempt.enable();
 
         if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
             @branchHint(.unlikely);
@@ -198,11 +179,11 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const selected_ip = this.selected_ip.load(.monotonic);
         const v_ticks = this.clocks.master.load(.acquire) - baseline_vclock;
         const total_delay = v_ticks * delay_per_tick;
-        const adjusted = wall - total_delay;
+        const adjusted = wall -| total_delay;
         const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
 
         std.log.info("0x{x}: [{}, {}]", .{
-            selected_ip & 0xFFFF,
+            selected_ip & 0xFFF,
             delay_per_tick,
             throughput,
         });
@@ -328,7 +309,7 @@ fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
 
     const delay = sleep_work.delay.load(.monotonic);
     const this: *InferenceEngine = @ptrCast(@alignCast(sleep_work.this));
-    this.task_sleep_pool.freeEntry(sleep_work);
 
     kernel.time.sleep.us(delay);
+    this.task_sleep_pool.freeEntry(sleep_work);
 }
