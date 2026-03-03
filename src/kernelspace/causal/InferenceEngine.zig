@@ -136,23 +136,76 @@ pub fn profilePid(this: *InferenceEngine, pid: Pid) !void {
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
 }
 
+// fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
+//     const this: *InferenceEngine = @ptrCast(@alignCast(ctx));
+
+//     while (!kernel.Thread.shouldThisStop()) {
+//         this.setExperimentParameters();
+//         this.progress.store(0, .monotonic);
+
+//         this.sampler.?.enable();
+//         kernel.time.sleep.us(this.experiment_duration);
+//         while (this.progress.load(.monotonic) < 5 and !kernel.Thread.shouldThisStop()) {
+//             @branchHint(.unlikely);
+//             kernel.time.sleep.us(this.experiment_duration);
+//             this.experiment_duration *= 2;
+//         }
+//         this.sampler.?.disable();
+
+//         this.clocks.forEach(signalSleep, .{this});
+//     }
+
+//     return 0;
+// }
+
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *InferenceEngine = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop()) {
         this.setExperimentParameters();
-        this.progress.store(0, .monotonic);
+
+        const delay_per_tick = this.delay_per_tick.load(.monotonic);
+        const baseline_vclock = this.clocks.master.load(.acquire);
+        const baseline_prog = this.progress.load(.monotonic);
+        const start_wall = kernel.time.now.us();
 
         this.sampler.?.enable();
         kernel.time.sleep.us(this.experiment_duration);
-        while (this.progress.load(.monotonic) < 5 and !kernel.Thread.shouldThisStop()) {
-            @branchHint(.unlikely);
-            kernel.time.sleep.us(this.experiment_duration);
-            this.experiment_duration *= 2;
-        }
-        this.sampler.?.disable();
 
+        var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
+        while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog) {
+            @branchHint(.cold);
+            if (kernel.Thread.shouldThisStop()) return 0;
+            this.experiment_duration *= 2;
+            kernel.time.sleep.us(this.experiment_duration / 2);
+        }
+
+        this.sampler.?.disable();
         this.clocks.forEach(signalSleep, .{this});
+
+        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
+            @branchHint(.unlikely);
+            continue;
+        }
+
+        while (this.task_sleep_pool.inUse()) {
+            @branchHint(.cold);
+            kernel.time.sleep.us(100);
+        }
+
+        const end_wall = kernel.time.now.us();
+        const wall = end_wall - start_wall;
+        const selected_ip = this.selected_ip.load(.monotonic);
+        const v_ticks = this.clocks.master.load(.acquire) - baseline_vclock;
+        const total_delay = v_ticks * delay_per_tick;
+        const adjusted = wall - total_delay;
+        const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
+
+        std.log.info("0x{x}: [{}, {}]", .{
+            selected_ip & 0xFFFF,
+            delay_per_tick,
+            throughput,
+        });
     }
 
     return 0;
@@ -163,8 +216,8 @@ fn signalSleep(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *t
     const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
     if (!task.isRunning()) return;
 
-    const lag = master - value.data.ticks;
-    value.data.ticks = master;
+    const lag = master - value.ticks;
+    value.ticks = master;
 
     this.registerForSleep(task, lag);
 }
@@ -241,24 +294,24 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
     const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
+    const profiled_pid = this.profiled_pid.load(.monotonic);
+    if (prev.pid() != profiled_pid or prev.isRunning() or prev.isDead()) return;
 
-    if (prev.pid() != this.profiled_pid.load(.monotonic) or prev.isDead()) return;
-
-    if (!prev.isRunning()) this.clocks.prepareForSleep(.fromPtr(prev));
+    this.clocks.prepareForSleep(.fromPtr(prev));
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
     const instrumented_pid = this.profiled_pid.load(.monotonic);
 
+    if (woke.pid() != instrumented_pid or woke.isRunning()) return;
+
     const current = kernel.Task.current();
-
-    if (current.pid() != instrumented_pid or woke.pid() != instrumented_pid) return;
-
-    const waker_lag, const woke_lag = this.clocks.wake(.fromPtr(current), .fromPtr(woke));
-
-    this.registerForSleep(current, waker_lag);
-    this.registerForSleep(woke, woke_lag);
+    if (current.pid() == instrumented_pid) {
+        const waker_lag, const woke_lag = this.clocks.wake(.fromPtr(current), .fromPtr(woke));
+        this.registerForSleep(current, waker_lag);
+        this.registerForSleep(woke, woke_lag);
+    }
 }
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {

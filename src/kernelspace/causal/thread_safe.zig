@@ -99,11 +99,19 @@ pub const ThreadClocks = struct {
         }
     };
 
-    pub const Value = packed struct(Ticks) {
-        data: packed union {
-            ticks: Ticks,
-            lag: Ticks,
-        },
+    pub const Value = packed struct(u64) {
+        ticks: Ticks,
+        is_sleeping: bool,
+        master_at_sleep: u31,
+
+        pub fn ticksLsb() u64 {
+            const val = Value{
+                .ticks = 1,
+                .is_sleeping = false,
+                .master_at_sleep = 0,
+            };
+            return @bitCast(val);
+        }
     };
 
     const Pair = struct {
@@ -221,7 +229,7 @@ pub const ThreadClocks = struct {
 
         const slot = try this.reserveSlotUnsafe(key, hash);
 
-        slot.value.store(.{ .data = .{ .ticks = ticks } }, .monotonic);
+        slot.value.store(.{ .ticks = ticks, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
 
         this.publishReservedUnsafe(key, slot);
     }
@@ -235,7 +243,7 @@ pub const ThreadClocks = struct {
         const slot = this.getSlotUnsafe(key, hash);
         const value = slot.value.load(.monotonic);
 
-        return if (field == .ticks) value.data.ticks else value.data.lag;
+        return if (field == .ticks) value.ticks else value.master_at_sleep - value.ticks;
     }
 
     pub fn tick(this: *ThreadClocks, key: Key) !void {
@@ -245,10 +253,11 @@ pub const ThreadClocks = struct {
         defer this.ref.decrement();
 
         const slot = this.getSlotUnsafe(key, hash);
-        const value_as_ticks: *std.atomic.Value(Ticks) = @ptrCast(&slot.value);
-        const ticks = value_as_ticks.fetchAdd(1, .monotonic) + 1;
+        const value_as_ticks: *std.atomic.Value(u64) = @ptrCast(&slot.value);
 
-        _ = this.master.fetchMax(ticks, .release);
+        const ticks: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticksLsb(), .monotonic));
+
+        _ = this.master.fetchMax(ticks.ticks + 1, .release);
     }
 
     pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
@@ -256,10 +265,10 @@ pub const ThreadClocks = struct {
         defer this.ref.decrement();
 
         const slot = this.getSlotUnsafe(key, key.hash());
-        const ticks = slot.value.load(.monotonic).data.ticks;
+        const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
-        slot.value.store(.{ .data = .{ .lag = master - ticks } }, .monotonic);
+        slot.value.store(.{ .ticks = ticks, .is_sleeping = true, .master_at_sleep = @truncate(master) }, .monotonic);
     }
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
@@ -271,23 +280,37 @@ pub const ThreadClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const waker_slot = this.getSlotUnsafe(waker, waker_hash);
         const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash);
+        const wakee_value = wakee_slot.value.load(.monotonic);
 
-        const waker_ticks = waker_slot.value.load(.monotonic).data.ticks;
-        const wakee_lag = wakee_slot.value.load(.monotonic).data.lag;
-        const master = this.master.load(.acquire);
+        // Handle spurious wakeups: if the scheduler selects an instrumented
+        // thread to run after another thread triggered preemption, but
+        // the target isn't actually asleep, return early.
+        if (!wakee_value.is_sleeping) return .{ 0, 0 };
 
-        waker_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
-        wakee_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
+        const waker_slot = this.getSlotUnsafe(waker, waker_hash);
+
+        const waker_ticks = waker_slot.value.load(.monotonic).ticks;
+
+        // calling tick() while blocked is legal behavior, a sleeping thread may
+        // still advance it's clock if the sleeping line is actually the one
+        // selected for the experiment. In such case, it's ticks may be > than
+        // the master's value when going to sleep.
+        const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
+        const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
+
+        const master: u31 = @truncate(this.master.load(.acquire));
+
+        waker_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        wakee_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
 
         const waker_lag = master - waker_ticks;
 
-        return .{ waker_lag, waker_lag + wakee_lag };
+        return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
     }
 
     /// Tracks a thread forking.
-    /// Returns the delay ammount those threads should sleep
+    /// Returns the delay amount those threads should sleep
     pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
         const parent_hash = parent.hash();
         const child_hash = child.hash();
@@ -298,18 +321,18 @@ pub const ThreadClocks = struct {
         const parent_slot = this.getSlotUnsafe(parent, parent_hash);
         const child_slot = try this.reserveSlotUnsafe(child, child_hash);
 
-        const parent_ticks = parent_slot.value.load(.monotonic).data.ticks;
+        const parent_ticks = parent_slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
-        parent_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
-        child_slot.value.store(.{ .data = .{ .ticks = master } }, .monotonic);
+        parent_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        child_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
 
         this.publishReservedUnsafe(child, child_slot);
 
         return master - parent_ticks;
     }
 
-    /// Returns the delay ammount that the thread should sleep
+    /// Returns the delay amount that the thread should sleep
     pub fn remove(this: *ThreadClocks, key: Key) Ticks {
         const key_hash = key.hash();
 
@@ -317,7 +340,7 @@ pub const ThreadClocks = struct {
         defer this.ref.decrement();
 
         const slot = this.getSlotUnsafe(key, key_hash);
-        const ticks = slot.value.load(.monotonic).data.ticks;
+        const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
         const index = this.getIndexUnsafe(slot);
@@ -691,7 +714,7 @@ test "ThreadClocks: concurrent stress" {
     for (clocks.pairs) |pair| {
         const key = pair.key.load(.acquire);
         if (key.isEql(.empty) or key.isEql(.reserved)) continue;
-        const ticks = pair.value.load(.monotonic).data.ticks;
+        const ticks = pair.value.load(.monotonic).ticks;
         try testing.expect(master >= ticks);
     }
 }
@@ -924,7 +947,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     const cb = struct {
         fn cb(_: ThreadClocks.Ticks, _: *ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
             c.* += 1;
-            sum.* += value.data.ticks;
+            sum.* += value.ticks;
         }
     }.cb;
 

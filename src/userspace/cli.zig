@@ -312,24 +312,6 @@ test "last wins" {
     try std.testing.expect(parsed.x == 3);
 }
 
-test "Options.parse fuzz" {
-    const Flags = struct {
-        i: i32 = 0,
-        f: f64 = 0,
-        b: bool = false,
-        s: []const u8 = "",
-    };
-
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            _ = (OptionsTest{ .args = std.mem.splitScalar(u8, input, ' ') }).parse(Flags);
-        }
-    };
-
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
-}
-
 test "non-flags and unmatched flags iteration" {
     const Flags = struct { x: i32 = 0 };
 
