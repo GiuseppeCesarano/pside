@@ -1,6 +1,6 @@
 // For this file if a time variable has no postfix indicating otherwise the default unit is us.
 
-const InferenceEngine = @This();
+const CausalEngine = @This();
 const std = @import("std");
 const kernel = @import("kernel");
 const thread_safe = @import("thread_safe.zig");
@@ -12,13 +12,13 @@ const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
 const clocks_starting_len = 1024;
 
-const SleepTaskWork = struct {
+const DelayWork = struct {
     work: kernel.Task.Work,
     delay: std.atomic.Value(usize),
     this: *anyopaque,
 };
 
-const TaskSleepPool = thread_safe.Pool(SleepTaskWork);
+const DelayWorkPool = thread_safe.Pool(DelayWork);
 const ProfiledTasksPool = thread_safe.Pool(std.atomic.Value(?*kernel.Task));
 const ClockTicks = thread_safe.ThreadClocks.Ticks;
 
@@ -31,19 +31,19 @@ profiler_thread: ?*kernel.Thread,
 sampler: ?*kernel.PerfEvent,
 
 delay_per_tick: std.atomic.Value(u16),
-selected_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
+target_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
 
 progress: *std.atomic.Value(usize),
-clocks: thread_safe.ThreadClocks,
-task_sleep_pool: *TaskSleepPool,
+virtual_clocks: thread_safe.ThreadClocks,
+delay_pool: *DelayWorkPool,
 
 error_has_occurred: std.atomic.Value(bool),
 
-pub fn init(progress_ptr: *std.atomic.Value(usize)) !InferenceEngine {
+pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
-    const sleep_pool = try allocator.create(TaskSleepPool);
+    const sleep_pool = try allocator.create(DelayWorkPool);
     errdefer allocator.destroy(sleep_pool);
     sleep_pool.* = .empty;
 
@@ -57,11 +57,11 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !InferenceEngine {
         .profiled_pid = .init(0),
         .experiment_duration = 45 * std.time.us_per_ms,
         .delay_per_tick = .init(0),
-        .selected_ip = .init(0),
+        .target_ip = .init(0),
 
         .progress = progress_ptr,
-        .clocks = try .init(allocator, clocks_starting_len),
-        .task_sleep_pool = sleep_pool,
+        .virtual_clocks = try .init(allocator, clocks_starting_len),
+        .delay_pool = sleep_pool,
         .error_has_occurred = .init(false),
 
         .profiler_thread = null,
@@ -69,10 +69,10 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !InferenceEngine {
     };
 }
 
-pub fn deinit(this: *InferenceEngine) void {
+pub fn deinit(this: *CausalEngine) void {
     const pid = this.profiled_pid.load(.monotonic);
-    const deinitted = std.math.maxInt(Pid);
-    if (pid == deinitted or this.profiled_pid.cmpxchgStrong(pid, deinitted, .monotonic, .monotonic) != null) return;
+    const deinit_sentinel = std.math.maxInt(Pid);
+    if (pid == deinit_sentinel or this.profiled_pid.cmpxchgStrong(pid, deinit_sentinel, .monotonic, .monotonic) != null) return;
 
     this.profiled_pid.store(0, .monotonic);
     this.error_has_occurred.store(true, .monotonic);
@@ -87,23 +87,23 @@ pub fn deinit(this: *InferenceEngine) void {
 
     kernel.tracepoint.sync();
 
-    while (this.task_sleep_pool.inUse()) kernel.time.sleep.us(100);
+    while (this.delay_pool.inUse()) kernel.time.sleep.us(100);
 
-    this.clocks.ref.increment();
-    const drift_len = this.clocks.pairs.len;
-    this.clocks.ref.decrement();
-    this.clocks.deinit(if (drift_len == clocks_starting_len) allocator else atomic_allocator);
+    this.virtual_clocks.ref.increment();
+    const drift_len = this.virtual_clocks.pairs.len;
+    this.virtual_clocks.ref.decrement();
+    this.virtual_clocks.deinit(if (drift_len == clocks_starting_len) allocator else atomic_allocator);
 
-    allocator.destroy(this.task_sleep_pool);
+    allocator.destroy(this.delay_pool);
 }
 
-pub fn profilePid(this: *InferenceEngine, pid: Pid) !void {
+pub fn profilePid(this: *CausalEngine, pid: Pid) !void {
     const task = kernel.Task.fromTid(pid);
 
-    try this.clocks.put(.fromPtr(task), 0);
+    try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
 
-    for (&this.task_sleep_pool.entries) |*e| e.this = this;
+    for (&this.delay_pool.entries) |*e| e.this = this;
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
@@ -137,13 +137,13 @@ pub fn profilePid(this: *InferenceEngine, pid: Pid) !void {
 }
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
-    const this: *InferenceEngine = @ptrCast(@alignCast(ctx));
+    const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop()) {
         this.setExperimentParameters();
 
         const delay_per_tick = this.delay_per_tick.load(.monotonic);
-        const baseline_vclock = this.clocks.master.load(.acquire);
+        const baseline_vclock = this.virtual_clocks.master.load(.acquire);
         const baseline_prog = this.progress.load(.monotonic);
         const start_wall = kernel.time.now.us();
 
@@ -166,18 +166,18 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         }
 
         kernel.preempt.disable();
-        this.clocks.forEach(signalSleep, .{this});
+        this.virtual_clocks.forEach(applyVirtualDelay, .{this});
         kernel.preempt.enable();
 
-        while (this.task_sleep_pool.inUse()) {
+        while (this.delay_pool.inUse()) {
             @branchHint(.cold);
             kernel.time.sleep.us(100);
         }
 
         const end_wall = kernel.time.now.us();
         const wall = end_wall - start_wall;
-        const selected_ip = this.selected_ip.load(.monotonic);
-        const v_ticks = this.clocks.master.load(.acquire) - baseline_vclock;
+        const selected_ip = this.target_ip.load(.monotonic);
+        const v_ticks = this.virtual_clocks.master.load(.acquire) - baseline_vclock;
         const total_delay = v_ticks * delay_per_tick;
         const adjusted = wall -| total_delay;
         const throughput = @as(u64, prog_delta) * 1_000_000 / @as(u64, adjusted);
@@ -192,18 +192,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-fn signalSleep(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *InferenceEngine) void {
-    // We force collision bit since kernel pointer live in 0xffff8...
-    const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
-    if (!task.isRunning()) return;
-
-    const lag = master - value.ticks;
-    value.ticks = master;
-
-    this.registerForSleep(task, lag);
-}
-
-fn setExperimentParameters(this: *InferenceEngine) void {
+fn setExperimentParameters(this: *CausalEngine) void {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
         var generator: std.Random = undefined;
@@ -215,101 +204,113 @@ fn setExperimentParameters(this: *InferenceEngine) void {
         random.generator = random.context.?.random();
     }
 
-    this.selected_ip.store(0, .monotonic);
+    this.target_ip.store(0, .monotonic);
 
     // Like coz, ~25% bias twards 0% speedup, then linear distribution on 5% increments.
     const roll = random.generator.uintLessThan(usize, 27);
     const speedup_percent = (roll -| 6) * 5;
-    const delay = (speedup_percent * (1_000_000 / sampler_frequency)) / 100;
+    const sampler_period = 1_000_000 / sampler_frequency;
+    const delay = (speedup_percent * sampler_period) / 100;
 
     this.delay_per_tick.store(@truncate(delay), .monotonic);
 }
 
-fn fatalErr(this: *InferenceEngine, s: []const u8) void {
+fn applyVirtualDelay(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
+    // We force collision bit since kernel pointer live in 0xffff8...
+    const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
+    if (!task.isRunning()) return;
+
+    const lag = master - value.ticks;
+    value.ticks = master;
+
+    this.registerForSleep(task, lag);
+}
+
+fn abort(this: *CausalEngine, s: []const u8) void {
     @branchHint(.cold);
     std.log.err("{s}", .{s});
     this.error_has_occurred.store(true, .monotonic);
     this.deinit();
 }
 
-fn registerForSleep(this: *InferenceEngine, task: *kernel.Task, lag: ClockTicks) void {
+fn registerForSleep(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
     const delay: usize = lag * this.delay_per_tick.load(.monotonic);
     if (delay == 0) return;
 
-    const slot = this.task_sleep_pool.getEntry() orelse {
-        this.fatalErr("TODO");
+    const slot = this.delay_pool.getEntry() orelse {
+        this.abort("TODO");
         return;
     };
 
     slot.delay.store(delay, .monotonic);
-    task.addWork(&slot.work, .@"resume") catch this.fatalErr("Could not register sleep work");
+    task.addWork(&slot.work, .@"resume") catch this.abort("Could not register sleep work");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *InferenceEngine = @ptrCast(@alignCast(event.context().?));
-    const selected_line = this.selected_ip.load(.monotonic);
+    const this: *CausalEngine = @ptrCast(@alignCast(event.context().?));
+    const selected_line = this.target_ip.load(.monotonic);
 
     const current_task = kernel.Task.current();
 
     if (selected_line == regs.ip) {
-        this.clocks.tick(.fromPtr(current_task)) catch return;
+        this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
     } else if (selected_line == 0) {
         @branchHint(.unlikely);
 
-        if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
-            this.clocks.tick(.fromPtr(current_task)) catch return;
+        if (this.target_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
+            this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
     }
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
-    const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
+    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
     child.incrementReferences();
 
-    const lag = this.clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate atomically
+    const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate atomically
 
     this.registerForSleep(parent, lag);
     this.registerForSleep(child, lag);
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
-    const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
+    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
     if (prev.pid() != profiled_pid or prev.isRunning() or prev.isDead()) return;
 
-    this.clocks.prepareForSleep(.fromPtr(prev));
+    this.virtual_clocks.prepareForSleep(.fromPtr(prev));
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
-    const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
+    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     const instrumented_pid = this.profiled_pid.load(.monotonic);
 
     if (woke.pid() != instrumented_pid or woke.isRunning()) return;
 
     const current = kernel.Task.current();
     if (current.pid() == instrumented_pid) {
-        const waker_lag, const woke_lag = this.clocks.wake(.fromPtr(current), .fromPtr(woke));
+        const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
         this.registerForSleep(current, waker_lag);
         this.registerForSleep(woke, woke_lag);
     }
 }
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
-    const this: *InferenceEngine = @ptrCast(@alignCast(data.?));
+    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    const lag = this.clocks.remove(.fromPtr(task));
+    const lag = this.virtual_clocks.remove(.fromPtr(task));
     this.registerForSleep(task, lag);
     task.decrementReferences();
 }
 
 fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
-    const sleep_work: *SleepTaskWork = @fieldParentPtr("work", work);
+    const sleep_work: *DelayWork = @fieldParentPtr("work", work);
 
     const delay = sleep_work.delay.load(.monotonic);
-    const this: *InferenceEngine = @ptrCast(@alignCast(sleep_work.this));
+    const this: *CausalEngine = @ptrCast(@alignCast(sleep_work.this));
 
     kernel.time.sleep.us(delay);
-    this.task_sleep_pool.freeEntry(sleep_work);
+    this.delay_pool.freeEntry(sleep_work);
 }

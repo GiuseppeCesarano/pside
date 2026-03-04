@@ -1,7 +1,7 @@
 const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("kernel");
-const CausalInfereceEngine = @import("causal/InferenceEngine.zig");
+const CausalEngine = @import("causal/CausalEngine.zig");
 
 const name = "pside";
 
@@ -13,7 +13,7 @@ pub const std_options: std.Options = .{
 };
 
 var chardev: kernel.CharDevice = undefined;
-var engine: CausalInfereceEngine = undefined;
+var engine: CausalEngine = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
     chardev.create(name, ioctlHandler) catch return 1;
@@ -21,7 +21,7 @@ export fn init_module() linksection(".init.text") c_int {
 
     const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
     progress_points_ptr.* = .init(0);
-    engine = CausalInfereceEngine.init(progress_points_ptr) catch return 1;
+    engine = CausalEngine.init(progress_points_ptr) catch return 1;
 
     return 0;
 }
