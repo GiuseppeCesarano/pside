@@ -47,7 +47,9 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         if (address != 0) try traced_process.patchProgressPoint(address);
 
     try traced_process.start();
-    std.log.info("setup time: {}", .{std.Io.Timestamp.untilNow(start, io, .real)});
+
+    std.log.info("Setup time {}ms", .{std.Io.Timestamp.untilNow(start, io, .real).toMilliseconds()});
+
     _ = traced_process.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
 }
 
