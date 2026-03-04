@@ -22,7 +22,7 @@ const TaskSleepPool = thread_safe.Pool(SleepTaskWork);
 const ProfiledTasksPool = thread_safe.Pool(std.atomic.Value(?*kernel.Task));
 const ClockTicks = thread_safe.ThreadClocks.Ticks;
 
-const sampler_frequency = 999; //Hz, ~1ms; not round to avoid harmonics with the scheduler
+const sampler_frequency = 997; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 profiled_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: usize,
