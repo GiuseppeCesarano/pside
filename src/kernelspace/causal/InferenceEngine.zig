@@ -160,14 +160,14 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         this.sampler.?.disable();
 
-        kernel.preempt.disable();
-        this.clocks.forEach(signalSleep, .{this});
-        kernel.preempt.enable();
-
         if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
             @branchHint(.unlikely);
             continue;
         }
+
+        kernel.preempt.disable();
+        this.clocks.forEach(signalSleep, .{this});
+        kernel.preempt.enable();
 
         while (this.task_sleep_pool.inUse()) {
             @branchHint(.cold);
@@ -225,6 +225,13 @@ fn setExperimentParameters(this: *InferenceEngine) void {
     this.delay_per_tick.store(@truncate(delay), .monotonic);
 }
 
+fn fatalErr(this: *InferenceEngine, s: []const u8) void {
+    @branchHint(.cold);
+    std.log.err("{s}", .{s});
+    this.error_has_occurred.store(true, .monotonic);
+    this.deinit();
+}
+
 fn registerForSleep(this: *InferenceEngine, task: *kernel.Task, lag: ClockTicks) void {
     const delay: usize = lag * this.delay_per_tick.load(.monotonic);
     if (delay == 0) return;
@@ -252,13 +259,6 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
         if (this.selected_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
             this.clocks.tick(.fromPtr(current_task)) catch return;
     }
-}
-
-fn fatalErr(this: *InferenceEngine, s: []const u8) void {
-    @branchHint(.cold);
-    std.log.err("{s}", .{s});
-    this.error_has_occurred.store(true, .monotonic);
-    this.deinit();
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
