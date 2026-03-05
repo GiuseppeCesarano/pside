@@ -536,6 +536,30 @@ pub const preempt = struct {
     }
 };
 
+pub const Completion = extern struct {
+    _: [64]u8 = undefined,
+
+    extern fn c_init_completion(*Completion) void;
+    pub fn init(this: *Completion) void {
+        c_init_completion(this);
+    }
+
+    extern fn c_wait_for_completion(*Completion) void;
+    pub fn wait(this: *Completion) void {
+        c_wait_for_completion(this);
+    }
+
+    extern fn c_complete(*Completion) void;
+    pub fn signal(this: *Completion) void {
+        c_complete(this);
+    }
+
+    extern fn c_reinit_completion(*Completion) void;
+    pub fn reinit(this: *Completion) void {
+        c_reinit_completion(this);
+    }
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);

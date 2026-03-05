@@ -432,39 +432,52 @@ pub fn Pool(Type: type) type {
         const pool_len = @bitSizeOf(usize);
 
         entries: [pool_len]Type,
-        used_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
+        free_bitmask: std.atomic.Value(usize) align(std.atomic.cache_line),
+        next: std.atomic.Value(?*@This()),
 
-        pub const empty: @This() = .{ .entries = undefined, .used_bitmask = .init(0) };
+        pub const empty: @This() = .{ .entries = undefined, .free_bitmask = .init(std.math.maxInt(usize)), .next = .init(null) };
+
+        fn tryClaimEntry(this: *@This()) ?*Type {
+            return for (0..5) |_| {
+                const free = this.free_bitmask.load(.monotonic);
+                const slot = @ctz(free);
+
+                if (slot == pool_len) return null;
+
+                const old = this.free_bitmask.fetchAnd(~(@as(usize, 1) << @truncate(slot)), .monotonic);
+
+                if (old >> @truncate(slot) & 1 == 1) {
+                    @branchHint(.likely);
+                    break &this.entries[slot];
+                }
+            } else null;
+        }
 
         pub fn getEntry(this: *@This()) ?*Type {
-            var used = this.used_bitmask.load(.monotonic);
-            while (true) {
-                const first_free = @ctz(~used);
-                if (first_free == pool_len) return null;
+            var pool: ?*@This() = this;
 
-                const locking_bit = @as(usize, 1) << @truncate(first_free);
-                const prev = this.used_bitmask.fetchOr(locking_bit, .acquire);
-
-                if (prev & locking_bit == 0) {
-                    @branchHint(.likely);
-                    return &this.entries[first_free];
-                }
-
-                used = prev;
-            }
+            return while (pool) |p| : (pool = p.next.load(.monotonic)) {
+                if (p.tryClaimEntry()) |entry| break entry;
+            } else null;
         }
 
         pub fn freeEntry(this: *@This(), entry_ptr: *anyopaque) void {
+            var pool: ?*@This() = this;
             const entry_address = @intFromPtr(entry_ptr);
-            const position = @divExact(entry_address - @intFromPtr(&this.entries), @sizeOf(Type));
 
-            const freeing_mask = ~(@as(usize, 1) << @truncate(position));
+            const position = while (pool) |p| : (pool = p.next.load(.monotonic)) {
+                const pos = @divExact(entry_address -% @intFromPtr(&p.entries), @sizeOf(Type));
+                if (pos < pool_len) break pos;
+            } else unreachable;
 
-            assert(this.used_bitmask.fetchAnd(freeing_mask, .release) & (~freeing_mask) != 0);
+            const freeing_bit = @as(usize, 1) << @truncate(position);
+
+            assert(pool.?.free_bitmask.fetchOr(freeing_bit, .monotonic) & freeing_bit == 0);
         }
 
-        pub fn inUse(this: *@This()) bool {
-            return this.used_bitmask.load(.monotonic) != 0;
+        pub fn appendPool(this: *@This(), new_pool: *@This()) void {
+            var pool: ?*@This() = this;
+            while (pool) |p| pool = p.next.cmpxchgStrong(null, new_pool, .monotonic, .monotonic) orelse null;
         }
     };
 }
@@ -1024,5 +1037,5 @@ test "Pool: concurrent churn" {
 
     for (threads) |t| t.join();
 
-    try testing.expectEqual(0, pool.used_bitmask.load(.monotonic));
+    try testing.expectEqual(std.math.maxInt(usize), pool.free_bitmask.load(.monotonic));
 }

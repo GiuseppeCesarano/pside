@@ -10,19 +10,88 @@ const Tid = Pid;
 
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
-const clocks_starting_len = 1024;
 
-const DelayWork = struct {
-    work: kernel.Task.Work,
-    delay: std.atomic.Value(usize),
-    this: *anyopaque,
+const DelayPool = struct {
+    const DelayWork = struct {
+        work: kernel.Task.Work,
+        delay_time: std.atomic.Value(usize),
+        data: *anyopaque,
+    };
+    const Pool = thread_safe.Pool(DelayWork);
+
+    pools: *Pool,
+    users_count: std.atomic.Value(u32),
+    completation: kernel.Completion,
+
+    pub fn init() !DelayPool {
+        const pool = try allocator.create(Pool);
+        pool.* = .empty;
+        return .{ .pools = pool, .users_count = .init(0), .completation = undefined };
+    }
+
+    pub fn settlePointers(this: *@This()) void {
+        for (&this.pools.entries) |*e| e.* = .{ .work = .{ .func = payDelay, .next = undefined }, .data = this, .delay_time = undefined };
+        this.completation.init();
+    }
+
+    pub fn deinit(this: *@This()) void {
+        this.waitAllDelays();
+
+        var pool: ?*Pool = this.pools.next.load(.monotonic);
+
+        while (pool) |p| {
+            pool = p.next.load(.monotonic);
+            atomic_allocator.destroy(p);
+        }
+
+        allocator.destroy(this.pools);
+    }
+
+    pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
+        if (delay_time == 0) return;
+
+        _ = this.users_count.fetchAdd(1, .monotonic);
+        errdefer _ = this.users_count.fetchSub(1, .monotonic);
+
+        const slot = this.pools.getEntry() orelse s: {
+            const new_pool = try atomic_allocator.create(Pool);
+            errdefer atomic_allocator.destroy(new_pool);
+            new_pool.* = .empty;
+            for (&new_pool.entries) |*e| e.* = .{ .work = .{ .func = payDelay, .next = undefined }, .data = this, .delay_time = undefined };
+
+            const entry = new_pool.getEntry().?;
+            this.pools.appendPool(new_pool);
+
+            break :s entry;
+        };
+
+        slot.delay_time.store(delay_time, .release);
+        try task.addWork(&slot.work, .@"resume");
+    }
+
+    pub fn waitAllDelays(this: *DelayPool) void {
+        this.completation.reinit();
+        if (this.users_count.load(.monotonic) != 0) this.completation.wait();
+    }
+
+    fn payDelay(work: *kernel.Task.Work) callconv(.c) void {
+        const sleep_work: *DelayWork = @fieldParentPtr("work", work);
+        const delay_time = sleep_work.delay_time.load(.acquire);
+        const this: *DelayPool = @ptrCast(@alignCast(sleep_work.data));
+
+        this.pools.freeEntry(sleep_work);
+
+        kernel.time.sleep.us(delay_time);
+
+        const prev = this.users_count.fetchSub(1, .monotonic);
+        if (prev == 1) this.completation.signal();
+    }
 };
 
-const DelayWorkPool = thread_safe.Pool(DelayWork);
-const ProfiledTasksPool = thread_safe.Pool(std.atomic.Value(?*kernel.Task));
 const ClockTicks = thread_safe.ThreadClocks.Ticks;
 
 const sampler_frequency = 997; //Hz, ~1ms; not round to avoid harmonics with the scheduler
+const clocks_starting_len = 1024;
 
 profiled_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
 experiment_duration: usize,
@@ -35,23 +104,13 @@ target_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
 
 progress: *std.atomic.Value(usize),
 virtual_clocks: thread_safe.ThreadClocks,
-delay_pool: *DelayWorkPool,
+delay_pool: DelayPool,
 
 error_has_occurred: std.atomic.Value(bool),
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
-
-    const sleep_pool = try allocator.create(DelayWorkPool);
-    errdefer allocator.destroy(sleep_pool);
-    sleep_pool.* = .empty;
-
-    for (&sleep_pool.entries) |*entry| entry.work.func = doSleep;
-
-    const tid_pools = try allocator.alloc(ProfiledTasksPool, 4);
-    errdefer allocator.free(tid_pools);
-    @memset(tid_pools, .{ .used_bitmask = .init(0), .entries = @splat(.init(null)) });
 
     return .{
         .profiled_pid = .init(0),
@@ -61,7 +120,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 
         .progress = progress_ptr,
         .virtual_clocks = try .init(allocator, clocks_starting_len),
-        .delay_pool = sleep_pool,
+        .delay_pool = try .init(),
         .error_has_occurred = .init(false),
 
         .profiler_thread = null,
@@ -84,17 +143,14 @@ pub fn deinit(this: *CausalEngine) void {
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
     kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
-
     kernel.tracepoint.sync();
 
-    while (this.delay_pool.inUse()) kernel.time.sleep.us(100);
+    this.delay_pool.deinit();
 
     this.virtual_clocks.ref.increment();
     const drift_len = this.virtual_clocks.pairs.len;
     this.virtual_clocks.ref.decrement();
     this.virtual_clocks.deinit(if (drift_len == clocks_starting_len) allocator else atomic_allocator);
-
-    allocator.destroy(this.delay_pool);
 }
 
 pub fn profilePid(this: *CausalEngine, pid: Pid) !void {
@@ -103,7 +159,7 @@ pub fn profilePid(this: *CausalEngine, pid: Pid) !void {
     try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
 
-    for (&this.delay_pool.entries) |*e| e.this = this;
+    this.delay_pool.settlePointers(); //TODO: not happy about that
 
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
@@ -166,13 +222,10 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         }
 
         kernel.preempt.disable();
-        this.virtual_clocks.forEach(applyVirtualDelay, .{this});
+        this.virtual_clocks.forEach(applyDelayCb, .{this});
         kernel.preempt.enable();
 
-        while (this.delay_pool.inUse()) {
-            @branchHint(.cold);
-            kernel.time.sleep.us(100);
-        }
+        this.delay_pool.waitAllDelays();
 
         const end_wall = kernel.time.now.us();
         const wall = end_wall - start_wall;
@@ -215,7 +268,7 @@ fn setExperimentParameters(this: *CausalEngine) void {
     this.delay_per_tick.store(@truncate(delay), .monotonic);
 }
 
-fn applyVirtualDelay(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
+fn applyDelayCb(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
     // We force collision bit since kernel pointer live in 0xffff8...
     const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
     if (!task.isRunning()) return;
@@ -223,7 +276,15 @@ fn applyVirtualDelay(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, val
     const lag = master - value.ticks;
     value.ticks = master;
 
-    this.registerForSleep(task, lag);
+    this.applyDelay(task, lag);
+}
+
+fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
+    const time = lag * this.delay_per_tick.load(.monotonic);
+    this.delay_pool.delay(task, time) catch {
+        this.abort("Could not apply delay");
+        return;
+    };
 }
 
 fn abort(this: *CausalEngine, s: []const u8) void {
@@ -231,19 +292,6 @@ fn abort(this: *CausalEngine, s: []const u8) void {
     std.log.err("{s}", .{s});
     this.error_has_occurred.store(true, .monotonic);
     this.deinit();
-}
-
-fn registerForSleep(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
-    const delay: usize = lag * this.delay_per_tick.load(.monotonic);
-    if (delay == 0) return;
-
-    const slot = this.delay_pool.getEntry() orelse {
-        this.abort("TODO");
-        return;
-    };
-
-    slot.delay.store(delay, .monotonic);
-    task.addWork(&slot.work, .@"resume") catch this.abort("Could not register sleep work");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -270,8 +318,8 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
 
     const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate atomically
 
-    this.registerForSleep(parent, lag);
-    this.registerForSleep(child, lag);
+    this.applyDelay(parent, lag);
+    this.applyDelay(child, lag);
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
@@ -291,8 +339,8 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const current = kernel.Task.current();
     if (current.pid() == instrumented_pid) {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
-        this.registerForSleep(current, waker_lag);
-        this.registerForSleep(woke, woke_lag);
+        this.applyDelay(current, waker_lag);
+        this.applyDelay(woke, woke_lag);
     }
 }
 
@@ -301,16 +349,6 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
     const lag = this.virtual_clocks.remove(.fromPtr(task));
-    this.registerForSleep(task, lag);
+    this.applyDelay(task, lag);
     task.decrementReferences();
-}
-
-fn doSleep(work: *kernel.Task.Work) callconv(.c) void {
-    const sleep_work: *DelayWork = @fieldParentPtr("work", work);
-
-    const delay = sleep_work.delay.load(.monotonic);
-    const this: *CausalEngine = @ptrCast(@alignCast(sleep_work.this));
-
-    kernel.time.sleep.us(delay);
-    this.delay_pool.freeEntry(sleep_work);
 }

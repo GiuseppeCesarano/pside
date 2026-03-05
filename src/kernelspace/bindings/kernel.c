@@ -1,4 +1,5 @@
 #include <linux/cdev.h>
+#include <linux/completion.h>
 #include <linux/dcache.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -111,6 +112,7 @@ bool c_kthread_should_stop(void);
 void c_sleep(unsigned long);
 
 /* Tracepoints */
+
 void c_tracepoint_init(void);
 int c_register_sched_fork(void *, void *);
 void c_unregister_sched_fork(void *, void *);
@@ -123,8 +125,16 @@ void c_unregister_sched_waking(void *, void *);
 void c_tracepoint_sync(void);
 
 /* Preemept */
+
 void c_preempt_disable(void);
 void c_preempt_enable(void);
+
+/* Completion */
+
+void c_init_completion(struct completion *);
+void c_wait_for_completion(struct completion *);
+void c_complete(struct completion *);
+void c_reinit_completion(struct completion *);
 
 /* Implementations */
 
@@ -453,3 +463,10 @@ void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
 
 void c_preempt_disable(void) { preempt_disable(); }
 void c_preempt_enable(void) { preempt_enable(); }
+
+/* Completion */
+
+void c_init_completion(struct completion *c) { init_completion(c); }
+void c_wait_for_completion(struct completion *c) { wait_for_completion(c); }
+void c_complete(struct completion *c) { complete(c); }
+void c_reinit_completion(struct completion *c) { reinit_completion(c); }
