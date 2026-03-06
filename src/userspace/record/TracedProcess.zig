@@ -3,7 +3,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Program = @import("Program.zig");
 
-const chardev_path = @import("KernelInterface.zig").chardev_path;
+const chardev_progress_path = @import("KernelInterface.zig").chardev_progress_path;
 const arch_specific = switch (@import("builtin").cpu.arch) {
     .x86_64 => @import("traced/x86_64.zig"),
 
@@ -169,7 +169,7 @@ pub fn patchProgressPoint(this: TracedProcess, addr: usize) !void {
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
     // We use the code_page to temporally store the path on the child memory
-    const path = chardev_path.ptr[0 .. chardev_path.len + 1]; // Include the null terminator
+    const path = chardev_progress_path.ptr[0 .. chardev_progress_path.len + 1]; // Include the null terminator
     try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), path);
 
     const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);

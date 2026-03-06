@@ -3,7 +3,7 @@ const communications = @import("communications");
 const kernel = @import("kernel");
 const CausalEngine = @import("causal/CausalEngine.zig");
 
-const name = "pside_progress";
+const name = "pside";
 
 export const license linksection(".modinfo") = "license=GPL".*;
 
@@ -12,15 +12,18 @@ pub const std_options: std.Options = .{
     .page_size_min = 4096,
 };
 
-var chardev: kernel.CharDevice = undefined;
+var ctl: kernel.CharDevice = undefined;
+var progress: kernel.CharDevice = undefined;
 var engine: CausalEngine = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
-    chardev.create(name, ioctlHandler) catch return 1;
+    progress.create(name ++ "_progress", null) catch return 1;
+    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
+    progress_points_ptr.* = .init(0);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
 
-    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(chardev.shared_buffer()));
-    progress_points_ptr.* = .init(0);
+    ctl.create(name, ioctlHandler) catch return 1;
+
     engine = CausalEngine.init(progress_points_ptr) catch return 1;
 
     return 0;
@@ -28,7 +31,8 @@ export fn init_module() linksection(".init.text") c_int {
 
 export fn cleanup_module() linksection(".exit.text") void {
     engine.deinit();
-    chardev.remove();
+    progress.remove();
+    ctl.remove();
 }
 
 fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_long {

@@ -4,7 +4,8 @@ const communications = @import("communications");
 const linux = std.os.linux;
 
 pub const name = "pside";
-pub const chardev_path: [:0]const u8 = "/dev/" ++ name ++ "_progress";
+pub const chardev_ctl_path: [:0]const u8 = "/dev/" ++ name;
+pub const chardev_progress_path: [:0]const u8 = chardev_ctl_path ++ "_progress";
 
 pub const ChardevOwner = struct { uid: u32, gid: u32 };
 
@@ -32,25 +33,28 @@ pub const DeleteModuleError = error{
     Unknown,
 };
 
-file: std.Io.File,
-chardev: std.Io.File,
+module: std.Io.File,
+ctl: std.Io.File,
 
 pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
     var rt: @This() = .{
-        .file = try std.Io.Dir.cwd().openFile(io, path, .{}),
-        .chardev = undefined,
+        .module = try std.Io.Dir.cwd().openFile(io, path, .{}),
+        .ctl = undefined,
     };
 
-    try fInitModule(rt.file.handle);
+    try fInitModule(rt.module.handle);
     errdefer deleteModule() catch |err| std.log.err("Could not unload kernel module: {s}", .{@errorName(err)});
 
-    rt.chardev = try std.Io.Dir.openFileAbsolute(io, chardev_path, .{ .mode = .read_write });
+    rt.ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write });
+
     if (chardev_owner) |owner| {
-        try rt.chardev.setOwner(io, owner.uid, owner.gid);
-        try rt.chardev.setPermissions(io, .fromMode(0o644));
+        const progress = try std.Io.Dir.openFileAbsolute(io, chardev_progress_path, .{ .mode = .read_write });
+        try progress.setOwner(io, owner.uid, owner.gid);
+        try progress.setPermissions(io, .fromMode(0o644));
+        progress.close(io);
     }
 
     return rt;
@@ -118,8 +122,8 @@ fn deleteModule() DeleteModuleError!void {
 }
 
 pub fn unload(this: @This(), io: std.Io) !void {
-    this.chardev.close(io);
-    this.file.close(io);
+    this.ctl.close(io);
+    this.module.close(io);
 
     // If child gets killed but it's fds aren't closed yet this function
     // will return an error, in such case we just need to wait for the
@@ -139,7 +143,7 @@ pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t) !void {
     const data = communications.Data{ .pid = pid };
 
     const rc = linux.ioctl(
-        this.chardev.handle,
+        this.ctl.handle,
         @intFromEnum(communications.Commands.start_profiler),
         @intFromPtr(&data),
     );
