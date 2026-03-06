@@ -4,7 +4,7 @@ const communications = @import("communications");
 const linux = std.os.linux;
 
 pub const name = "pside";
-pub const chardev_path: [:0]const u8 = "/dev/" ++ name;
+pub const chardev_path: [:0]const u8 = "/dev/" ++ name ++ "_progress";
 
 pub const ChardevOwner = struct { uid: u32, gid: u32 };
 

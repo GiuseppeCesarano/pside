@@ -3,7 +3,7 @@ const communications = @import("communications");
 const kernel = @import("kernel");
 const CausalEngine = @import("causal/CausalEngine.zig");
 
-const name = "pside";
+const name = "pside_progress";
 
 export const license linksection(".modinfo") = "license=GPL".*;
 

@@ -376,6 +376,11 @@ pub const CharDevice = extern struct {
     pub fn shared_buffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
         return c_get_shared_buffer(this);
     }
+
+    extern fn c_chardev_wake(*CharDevice) void;
+    pub fn wake(this: *CharDevice) void {
+        c_chardev_wake(this);
+    }
 };
 
 pub const PerfEvent = opaque {

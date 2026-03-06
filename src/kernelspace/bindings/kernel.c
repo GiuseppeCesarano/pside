@@ -14,12 +14,14 @@
 #include <linux/namei.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
+#include <linux/poll.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
+#include <linux/wait.h>
 
 /* Forward declarations */
 
@@ -78,12 +80,14 @@ struct chardev {
   struct device *device;
   struct file_operations fops;
   void *shared_buffer;
+  wait_queue_head_t wq;
 };
 
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
 int c_chardev_register(struct chardev *, const char *, ioctl_fn);
 void c_chardev_unregister(struct chardev *);
 void *c_get_shared_buffer(struct chardev *);
+void c_chardev_wake(struct chardev *);
 
 /* Perf */
 struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
@@ -257,28 +261,35 @@ static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
   return 0;
 }
 
+static __poll_t internal_poll(struct file *filp, poll_table *wait) {
+  struct chardev *d = filp->private_data;
+  poll_wait(filp, &d->wq, wait);
+  u32 *heads = d->shared_buffer;
+  if (heads[0] != heads[1])
+    return EPOLLIN;
+  return 0;
+}
+
 int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
   d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
   if (!d->shared_buffer)
     return -ENOMEM;
-
   if (alloc_chrdev_region(&d->dev, 0, 1, name) < 0) {
     free_page((unsigned long)d->shared_buffer);
     return -1;
   }
-
+  init_waitqueue_head(&d->wq);
   d->fops.owner = THIS_MODULE;
   d->fops.open = internal_open;
   d->fops.mmap = internal_mmap;
+  d->fops.poll = internal_poll;
   d->fops.unlocked_ioctl = callback;
-
   cdev_init(&d->cdev, &d->fops);
   if (cdev_add(&d->cdev, d->dev, 1) < 0) {
     unregister_chrdev_region(d->dev, 1);
     free_page((unsigned long)d->shared_buffer);
     return -1;
   }
-
   d->class = class_create(name);
   if (IS_ERR(d->class)) {
     cdev_del(&d->cdev);
@@ -286,7 +297,6 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
     free_page((unsigned long)d->shared_buffer);
     return -1;
   }
-
   d->device = device_create(d->class, NULL, d->dev, NULL, name);
   if (IS_ERR(d->device)) {
     class_destroy(d->class);
@@ -295,7 +305,6 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
     free_page((unsigned long)d->shared_buffer);
     return -1;
   }
-
   return 0;
 }
 
@@ -312,6 +321,8 @@ void c_chardev_unregister(struct chardev *d) {
 }
 
 void *c_get_shared_buffer(struct chardev *d) { return d->shared_buffer; }
+
+void c_chardev_wake(struct chardev *d) { wake_up_interruptible(&d->wq); }
 
 /* Perf */
 struct perf_event *
