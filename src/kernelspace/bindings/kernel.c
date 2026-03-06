@@ -85,12 +85,6 @@ int c_chardev_register(struct chardev *, const char *, ioctl_fn);
 void c_chardev_unregister(struct chardev *);
 void *c_get_shared_buffer(struct chardev *);
 
-/* File */
-
-struct file *c_filp_open(const char *, int, umode_t);
-ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
-ssize_t c_kernel_read(struct file *, void *, size_t, loff_t *);
-
 /* Perf */
 struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
                                                       int, pid_t,
@@ -318,21 +312,6 @@ void c_chardev_unregister(struct chardev *d) {
 }
 
 void *c_get_shared_buffer(struct chardev *d) { return d->shared_buffer; }
-
-/* File */
-
-struct file *c_filp_open(const char *path, int permissions, umode_t mode) {
-  return filp_open(path, permissions, mode);
-}
-
-ssize_t c_kernel_write(struct file *fd, const void *buff, size_t len,
-                       loff_t *off) {
-  return kernel_write(fd, buff, len, off);
-}
-
-ssize_t c_kernel_read(struct file *fd, void *buff, size_t len, loff_t *off) {
-  return kernel_read(fd, buff, len, off);
-}
 
 /* Perf */
 struct perf_event *
