@@ -58,7 +58,10 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/userspace/report/report.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "cli", .module = cli_mod }},
+        .imports = &.{
+            .{ .name = "cli", .module = cli_mod },
+            .{ .name = "communications", .module = communications_mod },
+        },
     });
 
     const executable_options: std.Build.ExecutableOptions = .{
