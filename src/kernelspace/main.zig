@@ -8,7 +8,7 @@ const name = "pside";
 export const license linksection(".modinfo") = "license=GPL".*;
 
 pub const std_options: std.Options = .{
-    .logFn = kernel.LogWithName(name).logFn,
+    .logFn = kernel.logWithName(name),
     .page_size_min = 4096,
 };
 

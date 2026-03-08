@@ -163,14 +163,14 @@ pub const heap = struct {
     };
 };
 
-pub fn LogWithName(comptime module_name: []const u8) type {
+pub fn logWithName(comptime module_name: []const u8) fn (comptime std.log.Level, comptime @EnumLiteral(), comptime fmt: []const u8, anytype) void {
     return struct {
         extern fn c_pr_err([*:0]const u8) void;
         extern fn c_pr_warn([*:0]const u8) void;
         extern fn c_pr_info([*:0]const u8) void;
         extern fn c_pr_debug([*:0]const u8) void;
 
-        pub fn logFn(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime fmt: []const u8, args: anytype) void {
+        pub fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime fmt: []const u8, args: anytype) void {
             var buf: [128]u8 = undefined;
             const scope_name = if (scope == .default) module_name else @tagName(scope);
             const scoped_fmt = scope_name ++ ": " ++ fmt ++ "\n";
@@ -186,7 +186,7 @@ pub fn LogWithName(comptime module_name: []const u8) type {
                 .debug => c_pr_debug(string),
             }
         }
-    };
+    }.log;
 }
 
 pub const time = struct {
