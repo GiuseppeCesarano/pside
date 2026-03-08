@@ -40,8 +40,17 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const traced_process = &global_traced_process.?;
     errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
+    const output_file = blk: {
+        const exe_name = std.fs.path.basename(std.mem.span(user_program.path));
+        const out_name = try std.mem.concat(allocator, u8, &.{ exe_name, ".pside" });
+        defer allocator.free(out_name);
+        
+        break :blk try std.Io.Dir.cwd().createFile(io, out_name, .{.truncate = false});
+    };
+    defer output_file.close(io);
+
     var module = try future_module.await(io);
-    try module.startProfilerOnPid(traced_process.pid);
+    try module.startProfilerOnPid(traced_process.pid, output_file.handle);
 
     for (try future_patch_addresses.await(io)) |address|
         if (address != 0) try traced_process.patchProgressPoint(address);

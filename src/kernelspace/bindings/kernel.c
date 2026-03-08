@@ -132,6 +132,7 @@ void c_reinit_completion(struct completion *);
 struct file *c_fget(int);
 void c_fput(struct file *);
 ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
+ssize_t c_file_size(struct file *);
 
 /* Implementations */
 
@@ -452,3 +453,4 @@ ssize_t c_kernel_write(struct file *f, const void *buf, size_t count,
                        loff_t *pos) {
   return kernel_write(f, buf, count, pos);
 }
+ssize_t c_file_size(struct file *f) { return i_size_read(file_inode(f)); }

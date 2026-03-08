@@ -42,7 +42,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
     if (copied.len != @sizeOf(communications.Data)) return code(.FAULT);
 
     switch (@as(communications.Commands, @enumFromInt(command))) {
-        .start_profiler => engine.profilePid(data.pid) catch return code(.IO), //TODO: change to a error list
+        .start_profiler => engine.profilePid(data.start.pid, data.start.output_fd) catch return code(.IO), //TODO: change to a error list
         else => return code(.INVAL),
     }
 

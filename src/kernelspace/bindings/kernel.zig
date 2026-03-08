@@ -580,6 +580,11 @@ pub const File = opaque {
     pub fn write(this: *File, buf: []const u8, offset: *i64) isize {
         return c_kernel_write(this, buf.ptr, buf.len, offset);
     }
+
+    extern fn c_file_size(*File) isize;
+    pub fn size(this: *File) isize {
+        return c_file_size(this);
+    }
 };
 
 test "Allocator" {

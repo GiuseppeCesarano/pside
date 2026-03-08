@@ -139,8 +139,8 @@ pub fn unload(this: @This(), io: std.Io) !void {
     } else return DeleteModuleError.FdOpen;
 }
 
-pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t) !void {
-    const data = communications.Data{ .pid = pid };
+pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t) !void {
+    const data: communications.Data = .{.start = .{ .pid = pid, .output_fd = fd }};
 
     const rc = linux.ioctl(
         this.ctl.handle,
