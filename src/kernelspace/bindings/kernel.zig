@@ -565,6 +565,23 @@ pub const Completion = extern struct {
     }
 };
 
+pub const File = opaque {
+    extern fn c_fget(linux.fd_t) *File;
+    pub fn get(fd: linux.fd_t) *File {
+        return c_fget(fd);
+    }
+
+    extern fn c_fput(*File) void;
+    pub fn put(this: *File) void {
+        c_fput(this);
+    }
+
+    extern fn c_kernel_write(*File, [*]const u8, usize, *i64) isize;
+    pub fn write(this: *File, buf: []const u8, offset: *i64) isize {
+        return c_kernel_write(this, buf.ptr, buf.len, offset);
+    }
+};
+
 test "Allocator" {
     try std.heap.testAllocator(heap.allocator);
     try std.heap.testAllocatorAligned(heap.allocator);

@@ -80,7 +80,6 @@ struct chardev {
   struct device *device;
   struct file_operations fops;
   void *shared_buffer;
-  wait_queue_head_t wq;
 };
 
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
@@ -100,17 +99,14 @@ int c_perf_event_release_kernel(struct perf_event *);
 void *c_perf_event_context(struct perf_event *);
 
 /* Kthread */
-
 struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
 int c_kthread_stop(struct task_struct *);
 bool c_kthread_should_stop(void);
 
 /* Sleep */
-
 void c_sleep(unsigned long);
 
 /* Tracepoints */
-
 void c_tracepoint_init(void);
 int c_register_sched_fork(void *, void *);
 void c_unregister_sched_fork(void *, void *);
@@ -123,16 +119,19 @@ void c_unregister_sched_waking(void *, void *);
 void c_tracepoint_sync(void);
 
 /* Preemept */
-
 void c_preempt_disable(void);
 void c_preempt_enable(void);
 
 /* Completion */
-
 void c_init_completion(struct completion *);
 void c_wait_for_completion(struct completion *);
 void c_complete(struct completion *);
 void c_reinit_completion(struct completion *);
+
+/* File */
+struct file *c_fget(int);
+void c_fput(struct file *);
+ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
 
 /* Implementations */
 
@@ -261,15 +260,6 @@ static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
   return 0;
 }
 
-static __poll_t internal_poll(struct file *filp, poll_table *wait) {
-  struct chardev *d = filp->private_data;
-  poll_wait(filp, &d->wq, wait);
-  u32 *heads = d->shared_buffer;
-  if (heads[0] != heads[1])
-    return EPOLLIN;
-  return 0;
-}
-
 int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
   d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
   if (!d->shared_buffer)
@@ -278,11 +268,9 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
     free_page((unsigned long)d->shared_buffer);
     return -1;
   }
-  init_waitqueue_head(&d->wq);
   d->fops.owner = THIS_MODULE;
   d->fops.open = internal_open;
   d->fops.mmap = internal_mmap;
-  d->fops.poll = internal_poll;
   d->fops.unlocked_ioctl = callback;
   cdev_init(&d->cdev, &d->fops);
   if (cdev_add(&d->cdev, d->dev, 1) < 0) {
@@ -321,8 +309,6 @@ void c_chardev_unregister(struct chardev *d) {
 }
 
 void *c_get_shared_buffer(struct chardev *d) { return d->shared_buffer; }
-
-void c_chardev_wake(struct chardev *d) { wake_up_interruptible(&d->wq); }
 
 /* Perf */
 struct perf_event *
@@ -450,13 +436,19 @@ void c_unregister_sched_waking(void *callback, void *data) {
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
 
 /* Preemption */
-
 void c_preempt_disable(void) { preempt_disable(); }
 void c_preempt_enable(void) { preempt_enable(); }
 
 /* Completion */
-
 void c_init_completion(struct completion *c) { init_completion(c); }
 void c_wait_for_completion(struct completion *c) { wait_for_completion(c); }
 void c_complete(struct completion *c) { complete(c); }
 void c_reinit_completion(struct completion *c) { reinit_completion(c); }
+
+/* File */
+struct file *c_fget(int fd) { return fget(fd); }
+void c_fput(struct file *f) { fput(f); }
+ssize_t c_kernel_write(struct file *f, const void *buf, size_t count,
+                       loff_t *pos) {
+  return kernel_write(f, buf, count, pos);
+}
