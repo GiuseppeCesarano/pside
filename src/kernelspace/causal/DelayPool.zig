@@ -19,7 +19,11 @@ completion: kernel.Completion,
 pub fn init() !DelayPool {
     const pool = try allocator.create(Pool);
     pool.* = .empty;
-    return .{ .pools = pool, .users_count = .init(0), .completion = undefined };
+    return .{
+        .pools = pool,
+        .users_count = .init(0),
+        .completion = undefined,
+    };
 }
 
 pub fn initEntries(this: *@This()) void {

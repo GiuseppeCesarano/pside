@@ -63,12 +63,8 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     };
 }
 
-// TODO: check this sequence
 pub fn deinit(this: *CausalEngine) void {
-    if (this.deinit_guard.swap(true, .acq_rel)) return;
-
-    this.profiled_pid.store(0, .monotonic);
-    this.error_has_occurred.store(true, .monotonic);
+    if (this.deinit_guard.swap(true, .seq_cst)) return;
 
     if (this.profiler_thread) |t| t.stop();
     if (this.sampler) |s| s.deinit();
@@ -83,10 +79,8 @@ pub fn deinit(this: *CausalEngine) void {
     this.disk_writer.deinit();
     this.vma_ranges.deinit();
 
-    this.virtual_clocks.ref.increment();
-    const drift_len = this.virtual_clocks.pairs.len;
-    this.virtual_clocks.ref.decrement();
-    this.virtual_clocks.deinit(if (drift_len == clocks_starting_len) allocator else atomic_allocator);
+    const clocks_len = this.virtual_clocks.pairs.len;
+    this.virtual_clocks.deinit(if (clocks_len == clocks_starting_len) allocator else atomic_allocator);
 }
 
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t) !void {
@@ -139,7 +133,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         this.setExperimentParameters();
 
         const delay_per_tick = this.delay_per_tick.load(.monotonic);
-        const baseline_vclock = this.virtual_clocks.master.load(.acquire);
+        const vclock_start = this.virtual_clocks.master.load(.acquire);
         const baseline_prog = this.progress.load(.monotonic);
         const start_wall = kernel.time.now.us();
 
@@ -175,18 +169,17 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         this.delay_pool.waitAllDelays();
 
-        const v_ticks = this.virtual_clocks.master.load(.acquire) - baseline_vclock;
-        const total_delay = v_ticks * delay_per_tick;
+        const vclock_delta = this.virtual_clocks.master.load(.acquire) - vclock_start;
+        const total_delay = vclock_delta * delay_per_tick;
         const wall = kernel.time.now.us() - start_wall;
 
-        if (target_ip != 0 and target_ip >= vma_begin)
-            this.disk_writer.push(ThroughputRecord{
-                .ip = this.target_ip.load(.monotonic) - vma_begin,
-                .prog_delta = prog_delta,
-                .wall = wall,
-                .total_delay = total_delay,
-                .delay_per_tick = delay_per_tick,
-            }) catch {}; //We just drop the sample
+        this.disk_writer.push(ThroughputRecord{
+            .ip = this.target_ip.load(.monotonic) - vma_begin,
+            .prog_delta = prog_delta,
+            .wall = wall,
+            .total_delay = total_delay,
+            .delay_per_tick = delay_per_tick,
+        }) catch {}; //We just drop the sample
     }
 
     return 0;
@@ -248,12 +241,12 @@ fn abort(this: *CausalEngine, s: []const u8) void {
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(event.context().?));
 
-    const selected_line = this.target_ip.load(.monotonic);
+    const target_ip = this.target_ip.load(.monotonic);
     const current_task = kernel.Task.current();
 
-    if (selected_line == regs.ip) {
+    if (target_ip == regs.ip) {
         this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
-    } else if (selected_line == 0) {
+    } else if (target_ip == 0) {
         if (this.vma_ranges.findBegin(regs.ip)) |vma_begin| {
             @branchHint(.unlikely);
 
@@ -269,9 +262,8 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    child.incrementReferences();
-
     const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate atomically
+    child.incrementReferences();
 
     this.applyDelay(parent, lag);
     this.applyDelay(child, lag);
@@ -287,12 +279,12 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
-    const instrumented_pid = this.profiled_pid.load(.monotonic);
+    const profiled_pid = this.profiled_pid.load(.monotonic);
 
-    if (woke.pid() != instrumented_pid or woke.isRunning()) return;
+    if (woke.pid() != profiled_pid or woke.isRunning()) return;
 
     const current = kernel.Task.current();
-    if (current.pid() == instrumented_pid) {
+    if (current.pid() == profiled_pid) {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
         this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);

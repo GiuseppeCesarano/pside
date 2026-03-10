@@ -51,7 +51,7 @@ pub fn push(this: *DiskWriter, record: anytype) !void {
     const bytes = std.mem.asBytes(&record);
     const len = this.buffer.len;
     const end = this.buffer_end.load(.monotonic);
-    const begin = this.buffer_begin.load(.acquire);
+    const begin = this.buffer_begin.load(.monotonic);
 
     const free = if (end >= begin)
         len - (end - begin) - 1
