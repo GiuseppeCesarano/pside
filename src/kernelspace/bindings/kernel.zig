@@ -316,11 +316,6 @@ pub const Task = opaque {
         };
     }
 
-    extern fn c_find_vma(*Task, usize) ?*Vma;
-    pub fn findVma(this: *Task, addr: usize) ?*Vma {
-        return c_find_vma(this, addr);
-    }
-
     extern fn c_get_task_struct(*Task) void;
     pub fn incrementReferences(this: *Task) void {
         c_get_task_struct(this);
@@ -344,18 +339,6 @@ pub const rcu = struct {
             c_rcu_read_unlock();
         }
     };
-};
-
-pub const Vma = opaque {
-    extern fn c_vma_start(*Vma) usize;
-    pub fn start(this: *Vma) usize {
-        return c_vma_start(this);
-    }
-
-    extern fn c_vma_filename(*Vma) ?[*:0]const u8;
-    pub fn filename(this: *Vma) ?[*:0]const u8 {
-        return c_vma_filename(this);
-    }
 };
 
 pub const CharDevice = extern struct {

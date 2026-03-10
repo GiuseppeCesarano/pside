@@ -67,9 +67,13 @@ void c_rcu_read_lock(void);
 void c_rcu_read_unlock(void);
 
 /* VMA */
-struct vm_area_struct *c_find_vma(struct task_struct *, unsigned long);
-unsigned long c_vma_start(struct vm_area_struct *);
-const char *c_vma_filename(struct vm_area_struct *);
+struct VmaRange {
+  unsigned long begin;
+  unsigned long end;
+};
+
+int c_snapshot_executable_vmas(struct task_struct *, const char *,
+                               struct VmaRange *, int);
 
 /* Chardev */
 
@@ -223,27 +227,30 @@ void c_rcu_read_lock(void) { rcu_read_lock(); }
 void c_rcu_read_unlock(void) { rcu_read_unlock(); }
 
 /* VMA */
-struct vm_area_struct *c_find_vma(struct task_struct *task,
-                                  unsigned long addr) {
-  if (!task || !task->mm)
-    return NULL;
-
-  return vma_lookup(task->mm, addr);
-}
-
-unsigned long c_vma_start(struct vm_area_struct *vma) {
-  return vma ? vma->vm_start : 0;
-}
-
-const char *c_vma_filename(struct vm_area_struct *vma) {
-  if (vma && vma->vm_file) {
-    return (const char *)vma->vm_file->f_path.dentry->d_name.name;
+int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
+                               struct VmaRange *ranges, int max) {
+  if (!task->mm)
+    return 0;
+  int count = 0;
+  mmap_read_lock(task->mm);
+  struct vm_area_struct *vma = find_vma(task->mm, 0);
+  while (vma && count < max) {
+    if (vma->vm_flags & VM_EXEC) {
+      if (!filter || !*filter) {
+        ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
+      } else if (vma->vm_file) {
+        const char *name = vma->vm_file->f_path.dentry->d_name.name;
+        if (strcmp(name, filter) == 0)
+          ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
+      }
+    }
+    vma = find_vma(task->mm, vma->vm_end);
   }
-  return NULL;
+  mmap_read_unlock(task->mm);
+  return count;
 }
 
 /* Chardev */
-
 static int internal_open(struct inode *inode, struct file *filp) {
   filp->private_data = container_of(inode->i_cdev, struct chardev, cdev);
   return 0;

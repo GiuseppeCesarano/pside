@@ -5,6 +5,7 @@ const std = @import("std");
 const kernel = @import("kernel");
 const thread_safe = @import("thread_safe.zig");
 const ThroughputRecord = @import("communications").ThroughputRecord;
+const VmaRanges = @import("VmaRanges.zig").VmaRanges;
 
 const Pid = std.os.linux.pid_t;
 const Tid = Pid;
@@ -31,7 +32,12 @@ const DelayPool = struct {
     }
 
     pub fn initEntries(this: *@This()) void {
-        for (&this.pools.entries) |*e| e.* = .{ .work = .{ .func = executeDelay, .next = undefined }, .pool = this, .delay_time = undefined };
+        for (&this.pools.entries) |*e| e.* = .{
+            .work = .{ .func = executeDelay, .next = undefined },
+            .pool = this,
+            .delay_time = undefined,
+        };
+
         this.completion.init();
     }
 
@@ -125,6 +131,8 @@ const DiskWriter = struct {
     }
 
     pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) void {
+        if (this.file != null) return;
+
         this.completion.init(); // init before thread spawns
         this.file = .get(fd);
         this.file_offset = this.file.?.size();
@@ -196,37 +204,43 @@ const ClockTicks = thread_safe.ThreadClocks.Ticks;
 const sampler_frequency = 997; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 const clocks_starting_len = 1024;
 
+deinit_guard: std.atomic.Value(bool),
 profiled_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
-experiment_duration: usize,
+error_has_occurred: std.atomic.Value(bool),
 
-profiler_thread: ?*kernel.Thread,
-sampler: ?*kernel.PerfEvent,
-disk_writer: DiskWriter,
-
-delay_per_tick: std.atomic.Value(u16),
 target_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
+vma_ranges: VmaRanges,
+vma_begin: std.atomic.Value(usize),
+delay_per_tick: std.atomic.Value(u16),
 
+experiment_duration: usize,
 progress: *std.atomic.Value(usize),
 virtual_clocks: thread_safe.ThreadClocks,
 delay_pool: DelayPool,
 
-error_has_occurred: std.atomic.Value(bool),
-deinit_guard: std.atomic.Value(bool),
+profiler_thread: ?*kernel.Thread,
+sampler: ?*kernel.PerfEvent,
+disk_writer: DiskWriter,
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
     return .{
+        .deinit_guard = .init(false),
         .profiled_pid = .init(0),
-        .experiment_duration = 45 * std.time.us_per_ms,
-        .delay_per_tick = .init(0),
+        .error_has_occurred = .init(false),
+
         .target_ip = .init(0),
+        .vma_ranges = .empty,
+        .vma_begin = .init(0),
+        .delay_per_tick = .init(0),
+
+        .experiment_duration = 45 * std.time.us_per_ms,
         .progress = progress_ptr,
         .virtual_clocks = try .init(allocator, clocks_starting_len),
         .delay_pool = try .init(),
-        .error_has_occurred = .init(false),
-        .deinit_guard = .init(false),
+
         .profiler_thread = null,
         .sampler = null,
         .disk_writer = try .init(),
@@ -234,7 +248,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 }
 
 // TODO: check this sequence
-pub fn deinit(this: *CausalEngine) void { 
+pub fn deinit(this: *CausalEngine) void {
     if (this.deinit_guard.swap(true, .acq_rel)) return;
 
     this.profiled_pid.store(0, .monotonic);
@@ -251,6 +265,7 @@ pub fn deinit(this: *CausalEngine) void {
 
     this.delay_pool.deinit();
     this.disk_writer.deinit();
+    this.vma_ranges.deinit();
 
     this.virtual_clocks.ref.increment();
     const drift_len = this.virtual_clocks.pairs.len;
@@ -260,6 +275,8 @@ pub fn deinit(this: *CausalEngine) void {
 
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t) !void {
     const task = kernel.Task.fromTid(pid);
+
+    this.vma_ranges = try .snapshot(task, "pc");
 
     this.disk_writer.start(fd);
 
@@ -323,13 +340,21 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         this.sampler.?.disable();
 
-        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic)) {
+        const vma_begin = this.vma_begin.load(.monotonic);
+        const target_ip = this.target_ip.load(.monotonic);
+
+        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic) or target_ip == 0 or target_ip < vma_begin) {
             @branchHint(.unlikely);
+
+            kernel.preempt.disable();
+            this.virtual_clocks.forEach(clearThreadDelay, .{});
+            kernel.preempt.enable();
+
             continue;
         }
 
         kernel.preempt.disable();
-        this.virtual_clocks.forEach(applyDelayForThread, .{this});
+        this.virtual_clocks.forEach(applyDelayToThread, .{this});
         kernel.preempt.enable();
 
         this.delay_pool.waitAllDelays();
@@ -338,13 +363,14 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const total_delay = v_ticks * delay_per_tick;
         const wall = kernel.time.now.us() - start_wall;
 
-        this.disk_writer.push(ThroughputRecord{
-            .ip = this.target_ip.load(.monotonic),
-            .prog_delta = prog_delta,
-            .wall = wall,
-            .total_delay = total_delay,
-            .delay_per_tick = delay_per_tick,
-        }) catch {}; //We just drop the sample
+        if (target_ip != 0 and target_ip >= vma_begin)
+            this.disk_writer.push(ThroughputRecord{
+                .ip = this.target_ip.load(.monotonic) - vma_begin,
+                .prog_delta = prog_delta,
+                .wall = wall,
+                .total_delay = total_delay,
+                .delay_per_tick = delay_per_tick,
+            }) catch {}; //We just drop the sample
     }
 
     return 0;
@@ -373,7 +399,11 @@ fn setExperimentParameters(this: *CausalEngine) void {
     this.delay_per_tick.store(@truncate(delay), .monotonic);
 }
 
-fn applyDelayForThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
+fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value) void {
+    value.ticks = master;
+}
+
+fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
     // We force collision bit since kernel pointer live in 0xffff8...
     const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
     if (!task.isRunning()) return;
@@ -401,17 +431,21 @@ fn abort(this: *CausalEngine, s: []const u8) void {
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(event.context().?));
-    const selected_line = this.target_ip.load(.monotonic);
 
+    const selected_line = this.target_ip.load(.monotonic);
     const current_task = kernel.Task.current();
 
     if (selected_line == regs.ip) {
         this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
     } else if (selected_line == 0) {
-        @branchHint(.unlikely);
+        if (this.vma_ranges.findBegin(regs.ip)) |vma_begin| {
+            @branchHint(.unlikely);
 
-        if (this.target_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null)
-            this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
+            if (this.target_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null) {
+                this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
+                this.vma_begin.store(vma_begin, .monotonic);
+            }
+        }
     }
 }
 
