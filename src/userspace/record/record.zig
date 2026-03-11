@@ -31,7 +31,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
     defer if (future_patch_addresses.cancel(io)) |addresses| allocator.free(addresses) else |_| {};
 
-    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ try getChardevOwner(init.minimal.environ), allocator, io });
+    const calling_user = try getCallingUser(init.minimal.environ);
+    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ calling_user, allocator, io });
     defer if (future_module.cancel(io)) |module| module.unload(io) catch |err| {
         std.log.warn("Could not remove the kernel module ({s}), please try manually with:\n\n\tsudo rmmod pside\n", .{@errorName(err)});
     } else |_| {};
@@ -40,13 +41,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const traced_process = &global_traced_process.?;
     errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
-    const output_file = blk: {
-        const exe_name = std.fs.path.basename(std.mem.span(user_program.path));
-        const out_name = try std.mem.concat(allocator, u8, &.{ exe_name, ".pside" });
-        defer allocator.free(out_name);
-        
-        break :blk try std.Io.Dir.cwd().createFile(io, out_name, .{.truncate = false});
-    };
+    const output_file = try openOutputFile(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
 
     var module = try future_module.await(io);
@@ -74,10 +69,6 @@ fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const
     }
 }
 
-fn removeModuleOnSig(sig: linux.SIG) callconv(.c) void {
-    if (sig == .INT) if (global_traced_process) |*t| t.kill() catch {};
-}
-
 fn setIntHandler() void {
     const sa = linux.Sigaction{
         .flags = 0,
@@ -94,9 +85,24 @@ fn setIntHandler() void {
         , .{KernelInterface.name});
 }
 
-fn getChardevOwner(env: std.process.Environ) !?KernelInterface.ChardevOwner {
+fn removeModuleOnSig(sig: linux.SIG) callconv(.c) void {
+    if (sig == .INT) if (global_traced_process) |*t| t.kill() catch {};
+}
+
+fn getCallingUser(env: std.process.Environ) !?KernelInterface.ChardevOwner {
     const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return null, 10);
     const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return null, 10);
 
     return .{ .uid = uid, .gid = gid };
+}
+
+fn openOutputFile(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, owner: ?KernelInterface.ChardevOwner) !std.Io.File {
+    const exe_name = std.fs.path.basename(program_path);
+    const out_name = try std.mem.concat(allocator, u8, &.{ exe_name, ".pside" });
+    defer allocator.free(out_name);
+
+    const file = try std.Io.Dir.cwd().createFile(io, out_name, .{ .truncate = false });
+    if (owner) |o| try file.setOwner(io, o.uid, o.gid);
+
+    return file;
 }
