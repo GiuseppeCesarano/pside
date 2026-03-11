@@ -239,20 +239,27 @@ fn abort(this: *CausalEngine, s: []const u8) void {
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(event.context().?));
+    const ctx = event.context() orelse return;
+    const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
-    const target_ip = this.target_ip.load(.monotonic);
-    const current_task = kernel.Task.current();
+    const ip = regs.ip;
+    const target = this.target_ip.load(.monotonic);
 
-    if (target_ip == regs.ip) {
-        this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
-    } else if (target_ip == 0) {
-        if (this.vma_ranges.findBegin(regs.ip)) |vma_begin| {
+    if (target == ip) {
+        const current_task = kernel.Task.current();
+        this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
+        return;
+    }
+
+    if (target == 0) {
+        @branchHint(.unlikely);
+        if (this.vma_ranges.findBegin(ip)) |vma_begin| {
             @branchHint(.unlikely);
-
-            if (this.target_ip.cmpxchgStrong(0, regs.ip, .monotonic, .monotonic) == null) {
-                this.virtual_clocks.tick(.fromPtr(current_task)) catch return;
-                this.vma_begin.store(vma_begin, .monotonic);
+            if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic) == null) {
+                @branchHint(.likely);
+                this.vma_begin.store(vma_begin, .release);
+                const current_task = kernel.Task.current();
+                this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
             }
         }
     }
@@ -262,7 +269,7 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate atomically
+    const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate
     child.incrementReferences();
 
     this.applyDelay(parent, lag);
