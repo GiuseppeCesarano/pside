@@ -137,7 +137,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const baseline_prog = this.progress.load(.monotonic);
         const start_wall = kernel.time.now.us();
 
-        this.sampler.?.enable();
+        if (delay_per_tick != 0) this.sampler.?.enable();
         kernel.time.sleep.us(this.experiment_duration);
 
         var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
@@ -148,7 +148,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
             kernel.time.sleep.us(this.experiment_duration / 2);
         }
 
-        this.sampler.?.disable();
+        if (delay_per_tick != 0) this.sampler.?.disable();
 
         const vma_begin = this.vma_begin.load(.monotonic);
         const target_ip = this.target_ip.load(.monotonic);
@@ -163,11 +163,13 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
             continue;
         }
 
-        kernel.preempt.disable();
-        this.virtual_clocks.forEach(applyDelayToThread, .{this});
-        kernel.preempt.enable();
+        if (delay_per_tick != 0) {
+            kernel.preempt.disable();
+            this.virtual_clocks.forEach(applyDelayToThread, .{this});
+            kernel.preempt.enable();
 
-        this.delay_pool.waitAllDelays();
+            this.delay_pool.waitAllDelays();
+        }
 
         const vclock_delta = this.virtual_clocks.master.load(.acquire) - vclock_start;
         const total_delay = vclock_delta * delay_per_tick;

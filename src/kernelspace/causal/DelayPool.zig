@@ -92,11 +92,11 @@ pub fn waitAllDelays(this: *DelayPool) void {
 }
 
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
-    const sleep_work: *DelayWork = @fieldParentPtr("work", work);
-    const delay_time = sleep_work.data.load(.acquire).u.time;
-    const this: *DelayPool = @ptrCast(@alignCast(sleep_work.pool));
+    const slot: *DelayWork = @fieldParentPtr("work", work);
+    const delay_time = slot.data.load(.acquire).u.time;
+    const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
 
-    this.pools.freeEntry(sleep_work);
+    this.pools.freeEntry(slot);
 
     kernel.time.sleep.us(delay_time);
 
@@ -130,6 +130,7 @@ fn executeRemove(work: *kernel.Task.Work) callconv(.c) void {
     kernel.time.sleep.us(total_delay);
 
     slot.work.func = executeDelay;
+    this.pools.freeEntry(slot);
 
     const prev = this.users_count.fetchSub(1, .monotonic);
     if (prev == 1) this.completion.signal();
