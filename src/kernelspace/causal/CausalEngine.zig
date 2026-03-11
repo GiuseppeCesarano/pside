@@ -302,7 +302,8 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    const lag = this.virtual_clocks.remove(.fromPtr(task));
-    this.applyDelay(task, lag);
-    task.decrementReferences();
+    this.delay_pool.remove(task, this) catch {
+        this.abort("Error while registering task remove");
+        return;
+    };
 }

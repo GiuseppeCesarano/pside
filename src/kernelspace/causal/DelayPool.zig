@@ -1,16 +1,25 @@
 const std = @import("std");
 const thread_safe = @import("thread_safe.zig");
 const kernel = @import("kernel");
-const allocator = kernel.heap.allocator;
-const atomic_allocator = kernel.heap.atomic_allocator;
+const CausalEngine = @import("CausalEngine.zig");
 const DelayPool = @This();
+
+const Data = packed struct {
+    u: packed union {
+        time: usize,
+        engine: *CausalEngine,
+    },
+};
 
 const DelayWork = struct {
     work: kernel.Task.Work,
-    delay_time: std.atomic.Value(usize),
+    data: std.atomic.Value(Data),
     pool: *DelayPool,
 };
 const Pool = thread_safe.Pool(DelayWork);
+
+const allocator = kernel.heap.allocator;
+const atomic_allocator = kernel.heap.atomic_allocator;
 
 pools: *Pool,
 users_count: std.atomic.Value(u32),
@@ -30,7 +39,7 @@ pub fn initEntries(this: *@This()) void {
     for (&this.pools.entries) |*e| e.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
         .pool = this,
-        .delay_time = undefined,
+        .data = undefined,
     };
 
     this.completion.init();
@@ -55,20 +64,26 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
     _ = this.users_count.fetchAdd(1, .monotonic);
     errdefer _ = this.users_count.fetchSub(1, .monotonic);
 
-    const slot = this.pools.getEntry() orelse s: {
-        const new_pool = try atomic_allocator.create(Pool);
-        errdefer atomic_allocator.destroy(new_pool);
-        new_pool.* = .empty;
-        for (&new_pool.entries) |*e| e.* = .{ .work = .{ .func = executeDelay, .next = undefined }, .pool = this, .delay_time = undefined };
+    const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
 
-        const entry = new_pool.getEntry().?;
-        this.pools.appendPool(new_pool);
+    slot.data.store(.{ .u = .{ .time = delay_time } }, .release);
+    try task.addWork(&slot.work, .@"resume");
+}
 
-        break :s entry;
+fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {
+    const new_pool = try atomic_allocator.create(Pool);
+    errdefer atomic_allocator.destroy(new_pool);
+    new_pool.* = .empty;
+    for (&new_pool.entries) |*e| e.* = .{
+        .work = .{ .func = executeDelay, .next = undefined },
+        .pool = this,
+        .data = undefined,
     };
 
-    slot.delay_time.store(delay_time, .release);
-    try task.addWork(&slot.work, .@"resume");
+    const entry = new_pool.getEntry().?;
+    this.pools.appendPool(new_pool);
+
+    return entry;
 }
 
 pub fn waitAllDelays(this: *DelayPool) void {
@@ -78,12 +93,43 @@ pub fn waitAllDelays(this: *DelayPool) void {
 
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const sleep_work: *DelayWork = @fieldParentPtr("work", work);
-    const delay_time = sleep_work.delay_time.load(.acquire);
+    const delay_time = sleep_work.data.load(.acquire).u.time;
     const this: *DelayPool = @ptrCast(@alignCast(sleep_work.pool));
 
     this.pools.freeEntry(sleep_work);
 
     kernel.time.sleep.us(delay_time);
+
+    const prev = this.users_count.fetchSub(1, .monotonic);
+    if (prev == 1) this.completion.signal();
+}
+
+pub fn remove(this: *DelayPool, task: *kernel.Task, engine: *CausalEngine) !void {
+    _ = this.users_count.fetchAdd(1, .monotonic);
+    errdefer _ = this.users_count.fetchSub(1, .monotonic);
+
+    const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
+
+    slot.work.func = executeRemove;
+    slot.data.store(.{ .u = .{ .engine = engine } }, .release);
+    try task.addWork(&slot.work, .@"resume");
+}
+
+fn executeRemove(work: *kernel.Task.Work) callconv(.c) void {
+    const slot: *DelayWork = @fieldParentPtr("work", work);
+
+    const engine = slot.data.load(.acquire).u.engine;
+    const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
+
+    const task = kernel.Task.current();
+    const lag = engine.virtual_clocks.remove(.fromPtr(task));
+    const total_delay = lag * engine.delay_per_tick.load(.monotonic);
+
+    task.decrementReferences();
+
+    kernel.time.sleep.us(total_delay);
+
+    slot.work.func = executeDelay;
 
     const prev = this.users_count.fetchSub(1, .monotonic);
     if (prev == 1) this.completion.signal();
