@@ -1,13 +1,18 @@
 const std = @import("std");
-const thread_safe = @import("thread_safe.zig");
+
 const kernel = @import("kernel");
+const allocator = kernel.heap.allocator;
+const atomic_allocator = kernel.heap.atomic_allocator;
+
 const CausalEngine = @import("CausalEngine.zig");
+const thread_safe = @import("thread_safe.zig");
+
 const DelayPool = @This();
 
-const Data = packed struct {
+const Data = packed struct(usize) {
     u: packed union {
         time: usize,
-        engine: *CausalEngine,
+        engine: usize,
     },
 };
 
@@ -17,9 +22,6 @@ const DelayWork = struct {
     pool: *DelayPool,
 };
 const Pool = thread_safe.Pool(DelayWork);
-
-const allocator = kernel.heap.allocator;
-const atomic_allocator = kernel.heap.atomic_allocator;
 
 pools: *Pool,
 users_count: std.atomic.Value(u32),
@@ -111,14 +113,14 @@ pub fn remove(this: *DelayPool, task: *kernel.Task, engine: *CausalEngine) !void
     const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
 
     slot.work.func = executeRemove;
-    slot.data.store(.{ .u = .{ .engine = engine } }, .release);
+    slot.data.store(.{ .u = .{ .engine = @intFromPtr(engine) } }, .release);
     try task.addWork(&slot.work, .@"resume");
 }
 
 fn executeRemove(work: *kernel.Task.Work) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
 
-    const engine = slot.data.load(.acquire).u.engine;
+    const engine: *CausalEngine = @ptrFromInt(slot.data.load(.acquire).u.engine);
     const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
 
     const task = kernel.Task.current();
