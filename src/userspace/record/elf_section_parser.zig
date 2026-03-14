@@ -1,6 +1,7 @@
 const std = @import("std");
-const Program = @import("Program.zig");
 const elf = std.elf;
+
+const Program = @import("Program.zig");
 
 pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const usize {
     const path = std.mem.span(user_program.path);

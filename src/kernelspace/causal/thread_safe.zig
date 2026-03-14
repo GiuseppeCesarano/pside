@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const testing = std.testing;
 
 const RefGate = struct {
     const lock_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
@@ -481,8 +482,6 @@ pub fn Pool(Type: type) type {
         }
     };
 }
-
-const testing = std.testing;
 
 test "RefGate: basic usage" {
     var gate = RefGate{};

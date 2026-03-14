@@ -1,22 +1,21 @@
 // For this file if a time variable has no postfix indicating otherwise the default unit is us.
 
-const CausalEngine = @This();
 const std = @import("std");
-const kernel = @import("kernel");
-const thread_safe = @import("thread_safe.zig");
-const ThroughputRecord = @import("communications").ThroughputRecord;
-const DiskWriter = @import("DiskWriter.zig");
-const DelayPool = @import("DelayPool.zig");
-const VmaRanges = @import("VmaRanges.zig");
-
 const Pid = std.os.linux.pid_t;
 const Tid = Pid;
 
+const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
+const ThroughputRecord = @import("communications").ThroughputRecord;
 
+const DelayPool = @import("DelayPool.zig");
+const DiskWriter = @import("DiskWriter.zig");
+const thread_safe = @import("thread_safe.zig");
 const ClockTicks = thread_safe.ThreadClocks.Ticks;
+const VmaRanges = @import("VmaRanges.zig");
 
+const CausalEngine = @This();
 const sampler_frequency = 997; //Hz, ~1ms; not round to avoid harmonics with the scheduler
 const clocks_starting_len = 1024;
 

@@ -1,11 +1,12 @@
 const std = @import("std");
+const linux = std.os.linux;
+
 const cli = @import("cli");
+
+const elf_section_parser = @import("elf_section_parser.zig");
 const KernelInterface = @import("KernelInterface.zig");
 const Program = @import("Program.zig");
 const TracedProcess = @import("TracedProcess.zig");
-const elf_section_parser = @import("elf_section_parser.zig");
-
-const linux = std.os.linux;
 
 // Needs to be global so we can kill it inside SIGINT handler
 var global_traced_process: ?TracedProcess = null;

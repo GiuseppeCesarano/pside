@@ -1,6 +1,6 @@
-const Program = @This();
 const std = @import("std");
 
+const Program = @This();
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
 enviroment_map: std.process.Environ,

@@ -1,9 +1,10 @@
-const TracedProcess = @This();
 const std = @import("std");
 const linux = std.os.linux;
-const Program = @import("Program.zig");
 
 const chardev_progress_path = @import("KernelInterface.zig").chardev_progress_path;
+const Program = @import("Program.zig");
+
+const TracedProcess = @This();
 const arch_specific = switch (@import("builtin").cpu.arch) {
     .x86_64 => @import("traced/x86_64.zig"),
 
@@ -11,7 +12,14 @@ const arch_specific = switch (@import("builtin").cpu.arch) {
 };
 
 const UserRegs = arch_specific.UserRegs;
-const SpawnError = error{ ChildDead, ParentDead, UnexpectedSignal, NoSudoUserID, NoSudoGroupID, CouldNotSetGroups };
+const SpawnError = error{
+    ChildDead,
+    ParentDead,
+    UnexpectedSignal,
+    NoSudoUserID,
+    NoSudoGroupID,
+    CouldNotSetGroups,
+};
 
 pid: linux.pid_t,
 elf_entrypoint: usize,

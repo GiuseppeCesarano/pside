@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const cli = @import("cli");
 const ThroughputRecord = @import("communications").ThroughputRecord;
 

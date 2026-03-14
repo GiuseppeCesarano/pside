@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const iow = std.os.linux.IOCTL.IOW;
 
 pub const Commands = enum(c_uint) {

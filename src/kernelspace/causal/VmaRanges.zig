@@ -1,6 +1,8 @@
 const std = @import("std");
+
 const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
+
 const VmaRanges = @This();
 
 pub const Range = extern struct {

@@ -1,8 +1,9 @@
 const std = @import("std");
-const native_endianess = @import("builtin").target.cpu.arch.endian();
-const communications = @import("communications");
 const linux = std.os.linux;
 
+const communications = @import("communications");
+
+const native_endianess = @import("builtin").target.cpu.arch.endian();
 pub const name = "pside";
 pub const chardev_ctl_path: [:0]const u8 = "/dev/" ++ name;
 pub const chardev_progress_path: [:0]const u8 = chardev_ctl_path ++ "_progress";
