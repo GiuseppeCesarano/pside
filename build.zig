@@ -21,6 +21,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const serialization_mod = b.addModule("serialization", .{
+        .root_source_file = b.path("src/common/serialization.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const hash_mod = b.addModule("hash", .{
+        .root_source_file = b.path("src/common/hash.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const bindings_mod = b.addModule("kernel_bidings", .{
         .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
@@ -28,7 +40,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod }, check), is_release_bundle);
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod, serialization_mod }, check), is_release_bundle);
 
     const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
         " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -51,6 +63,8 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
+            .{ .name = "serialization", .module = serialization_mod },
+            .{ .name = "hash", .module = hash_mod },
         },
     });
 
@@ -146,6 +160,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .imports = &.{
                 .{ .name = "communications", .module = deps[0] },
                 .{ .name = "kernel", .module = deps[1] },
+                .{ .name = "serialization", .module = deps[2] },
             },
         }),
     };

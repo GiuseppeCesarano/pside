@@ -8,8 +8,6 @@ pub const name = "pside";
 pub const chardev_ctl_path: [:0]const u8 = "/dev/" ++ name;
 pub const chardev_progress_path: [:0]const u8 = chardev_ctl_path ++ "_progress";
 
-pub const ChardevOwner = struct { uid: u32, gid: u32 };
-
 pub const FInitModuleError = error{
     SignatureMisformatted,
     SymbolResolutionTimeout,
@@ -37,7 +35,7 @@ pub const DeleteModuleError = error{
 module: std.Io.File,
 ctl: std.Io.File,
 
-pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn loadModuleFromDefaultPath(chardev_owner: ?[2]u32, allocator: std.mem.Allocator, io: std.Io) !@This() {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
@@ -53,7 +51,7 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?ChardevOwner, allocator: std.me
 
     if (chardev_owner) |owner| {
         const progress = try std.Io.Dir.openFileAbsolute(io, chardev_progress_path, .{ .mode = .read_write });
-        try progress.setOwner(io, owner.uid, owner.gid);
+        try progress.setOwner(io, owner[0], owner[1]);
         try progress.setPermissions(io, .fromMode(0o644));
         progress.close(io);
     }
@@ -141,7 +139,7 @@ pub fn unload(this: @This(), io: std.Io) !void {
 }
 
 pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t) !void {
-    const data: communications.Data = .{.start = .{ .pid = pid, .output_fd = fd }};
+    const data: communications.Data = .{ .start = .{ .pid = pid, .output_fd = fd } };
 
     const rc = linux.ioctl(
         this.ctl.handle,

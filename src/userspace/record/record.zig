@@ -5,6 +5,7 @@ const cli = @import("cli");
 
 const elf_section_parser = @import("elf_section_parser.zig");
 const KernelInterface = @import("KernelInterface.zig");
+const OutputFile = @import("OutputFile.zig");
 const Program = @import("Program.zig");
 const TracedProcess = @import("TracedProcess.zig");
 
@@ -42,11 +43,11 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const traced_process = &global_traced_process.?;
     errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
-    const output_file = try openOutputFile(allocator, io, std.mem.span(user_program.path), calling_user);
+    const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
 
     var module = try future_module.await(io);
-    try module.startProfilerOnPid(traced_process.pid, output_file.handle);
+    try module.startProfilerOnPid(traced_process.pid, output_file.file.handle);
 
     for (try future_patch_addresses.await(io)) |address|
         if (address != 0) try traced_process.patchProgressPoint(address);
@@ -90,20 +91,9 @@ fn removeModuleOnSig(sig: linux.SIG) callconv(.c) void {
     if (sig == .INT) if (global_traced_process) |*t| t.kill() catch {};
 }
 
-fn getCallingUser(env: std.process.Environ) !?KernelInterface.ChardevOwner {
+fn getCallingUser(env: std.process.Environ) !?[2]u32 {
     const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return null, 10);
     const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return null, 10);
 
-    return .{ .uid = uid, .gid = gid };
-}
-
-fn openOutputFile(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, owner: ?KernelInterface.ChardevOwner) !std.Io.File {
-    const exe_name = std.fs.path.basename(program_path);
-    const out_name = try std.mem.concat(allocator, u8, &.{ exe_name, ".pside" });
-    defer allocator.free(out_name);
-
-    const file = try std.Io.Dir.cwd().createFile(io, out_name, .{ .truncate = false });
-    if (owner) |o| try file.setOwner(io, o.uid, o.gid);
-
-    return file;
+    return .{ uid, gid };
 }

@@ -7,7 +7,7 @@ const Tid = Pid;
 const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
-const ThroughputRecord = @import("communications").ThroughputRecord;
+const ThroughputRecord = @import("serialization").record.Throughput;
 
 const DelayPool = @import("DelayPool.zig");
 const DiskWriter = @import("DiskWriter.zig");
@@ -175,13 +175,20 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const wall = kernel.time.now.us() - start_wall;
 
         this.disk_writer.push(ThroughputRecord{
-            .ip = this.target_ip.load(.monotonic) - vma_begin,
-            .prog_delta = prog_delta,
+            .relative_ip = this.target_ip.load(.monotonic) - vma_begin,
+            .progress_delta = prog_delta,
             .wall = wall,
-            .total_delay = total_delay,
+            .injected_delay = total_delay,
             .delay_per_tick = delay_per_tick,
         }) catch {}; //We just drop the sample
     }
+
+    this.disk_writer.push(ThroughputRecord.empty) catch {
+        for (0..3) |_| {
+            kernel.time.sleep.us(50);
+            this.disk_writer.push(ThroughputRecord.empty) catch continue;
+        } else std.log.err("Could not emit last empty record, file corrupted", .{});
+    };
 
     return 0;
 }

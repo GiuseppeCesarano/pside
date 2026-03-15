@@ -13,12 +13,3 @@ pub const Data = union {
         output_fd: std.os.linux.fd_t,
     },
 };
-
-pub const ThroughputRecord = extern struct {
-    ip: u64,
-    prog_delta: u64,
-    wall: u64,
-    total_delay: u64,
-    delay_per_tick: u16,
-    _pad: [6]u8 = .{0} ** 6,
-};
