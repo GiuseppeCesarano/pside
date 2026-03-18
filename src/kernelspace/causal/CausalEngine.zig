@@ -7,7 +7,7 @@ const Tid = Pid;
 const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
-const ThroughputRecord = @import("serialization").record.Throughput;
+const serialization = @import("serialization");
 
 const DelayPool = @import("DelayPool.zig");
 const DiskWriter = @import("DiskWriter.zig");
@@ -85,9 +85,12 @@ pub fn deinit(this: *CausalEngine) void {
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t) !void {
     const task = kernel.Task.fromTid(pid);
 
+    //TODO: those shall not be hardcoded
     this.vma_ranges = try .snapshot(task, "pc");
 
     this.disk_writer.start(fd);
+    this.disk_writer.push(serialization.SectionHeader{ .kind = .throughput }) catch {};
+    this.disk_writer.push("pc".*) catch {};
 
     try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
@@ -174,7 +177,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const total_delay = vclock_delta * delay_per_tick;
         const wall = kernel.time.now.us() - start_wall;
 
-        this.disk_writer.push(ThroughputRecord{
+        this.disk_writer.push(serialization.record.Throughput{
             .relative_ip = this.target_ip.load(.monotonic) - vma_begin,
             .progress_delta = prog_delta,
             .wall = wall,
@@ -183,10 +186,11 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         }) catch {}; //We just drop the sample
     }
 
-    this.disk_writer.push(ThroughputRecord.empty) catch {
+    this.disk_writer.push(serialization.record.Throughput.empty) catch {
         for (0..3) |_| {
             kernel.time.sleep.us(50);
-            this.disk_writer.push(ThroughputRecord.empty) catch continue;
+            this.disk_writer.push(serialization.record.Throughput.empty) catch continue;
+            break;
         } else std.log.err("Could not emit last empty record, file corrupted", .{});
     };
 

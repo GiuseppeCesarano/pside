@@ -1,8 +1,10 @@
 const std = @import("std");
 
 const cli = @import("cli");
+const OutputFileParserResult = @import("OutputFileParserResult");
 
 pub fn report(options: cli.Options, init: std.process.Init) !void {
+    const allocator = init.gpa;
     const io = init.io;
 
     const parsed_options = options.parse(struct {});
@@ -14,9 +16,13 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
         return error.MissingArgument;
     };
     const path = positional.next().?;
+    const path_null = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_null);
 
-    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
-    defer file.close(io);
+    var map: OutputFileParserResult = try .parse(allocator, io, path_null);
+    defer map.deinit(allocator);
+
+    std.log.info("{any}", .{map});
 }
 
 fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
