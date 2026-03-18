@@ -3,7 +3,7 @@ const serialization = @import("serialization");
 
 const ParseResult = @This();
 
-const ThroughputNoIP = struct {
+const ThroughputNoIP = extern struct {
     progress_delta: u64,
     wall: u64,
     injected_delay: u64,
@@ -89,11 +89,8 @@ pub fn parse(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !Pars
         switch (next_section.kind) {
             .throughput => {
                 const pair = try result.throughput_map.getOrPut(allocator, vma_dupe);
-                if (pair.found_existing) {
-                    allocator.free(vma_dupe);
-                } else {
-                    pair.value_ptr.* = .empty;
-                }
+                if (pair.found_existing) allocator.free(vma_dupe) else pair.value_ptr.* = .empty;
+
                 result.throughput_map.lockPointers();
                 defer result.throughput_map.unlockPointers();
 
@@ -148,14 +145,14 @@ fn appendThroughputSection(
     reader: *std.Io.File.Reader,
     section: *ThroughputIpMap,
 ) !void {
-    while (true) {
-        const next_record = try reader.interface.takeStructPointer(serialization.record.Throughput);
-        if (std.mem.eql(u8, std.mem.asBytes(next_record), std.mem.asBytes(&serialization.record.Throughput.empty))) return;
-
+    var next_record = try reader.interface.takeStructPointer(serialization.record.Throughput);
+    while (!next_record.isEmpty()) : (next_record = try reader.interface.takeStructPointer(serialization.record.Throughput)) {
         const slot = try section.getOrPut(allocator, next_record.relative_ip);
         if (!slot.found_existing) slot.value_ptr.* = try .initCapacity(allocator, 10);
+
         section.lockPointers();
         defer section.unlockPointers();
+
         try slot.value_ptr.append(allocator, .fromThroughputRecord(next_record.*));
     }
 }

@@ -70,6 +70,10 @@ pub const record = struct {
         _: [6]u8 = .{0} ** 6,
 
         pub const empty = std.mem.zeroes(Throughput);
+
+        pub fn isEmpty(this: Throughput) bool {
+            return std.mem.eql(u8, std.mem.asBytes(&this), std.mem.asBytes(&Throughput.empty));
+        }
     };
 
     pub const Latency = extern struct {
