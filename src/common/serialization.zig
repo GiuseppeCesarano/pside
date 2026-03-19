@@ -26,6 +26,7 @@
 // version.minor bumps on additive changes (new MeasurementKind, new field appended to a record).
 // Parsers should reject files where major != their own known major.
 // TODO: handle endianness
+// TODO: Those files shall be aligned to be readable by chunks of 2MiB 
 
 const std = @import("std");
 

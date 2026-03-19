@@ -3,6 +3,8 @@ const std = @import("std");
 const cli = @import("cli");
 const OutputFileParserResult = @import("OutputFileParserResult");
 
+const Server = @import("Server.zig");
+
 pub fn report(options: cli.Options, init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -19,10 +21,15 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     const path_null = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_null);
 
-    var map: OutputFileParserResult = try .parse(allocator, io, path_null);
-    defer map.deinit(allocator);
+    var parsed_results: OutputFileParserResult = try .parse(allocator, io, path_null);
+    defer parsed_results.deinit(allocator);
 
-    std.log.info("{any}", .{map});
+    var server: Server = try .init(io);
+    defer server.deinit(io);
+
+    server.openInBrowser(io);
+    std.log.info("Server running: http://[::1]:{}", .{server.port()});
+    try server.run(allocator, io);
 }
 
 fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {

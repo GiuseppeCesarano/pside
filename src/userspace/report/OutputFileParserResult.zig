@@ -30,26 +30,6 @@ latency_map: LatencyMap,
 binary_hash: [32]u8,
 binary_path: []const u8,
 
-fn deinitMaps(throughput_map: *ThroughputMap, latency_map: *LatencyMap, allocator: std.mem.Allocator) void {
-    var tp_it = throughput_map.iterator();
-    while (tp_it.next()) |ip_map_pair| {
-        allocator.free(ip_map_pair.key_ptr.*);
-        var ip_it = ip_map_pair.value_ptr.iterator();
-        while (ip_it.next()) |record_list| record_list.value_ptr.deinit(allocator);
-        ip_map_pair.value_ptr.deinit(allocator);
-    }
-    throughput_map.deinit(allocator);
-
-    var lat_it = latency_map.iterator();
-    while (lat_it.next()) |ip_map_pair| {
-        allocator.free(ip_map_pair.key_ptr.*);
-        var ip_it = ip_map_pair.value_ptr.iterator();
-        while (ip_it.next()) |record_list| record_list.value_ptr.deinit(allocator);
-        ip_map_pair.value_ptr.deinit(allocator);
-    }
-    latency_map.deinit(allocator);
-}
-
 pub fn deinit(this: *ParseResult, allocator: std.mem.Allocator) void {
     allocator.free(this.binary_path);
     deinitMaps(&this.throughput_map, &this.latency_map, allocator);
@@ -138,6 +118,26 @@ fn openFile(path: [:0]const u8) !std.Io.File {
             }
         },
     };
+}
+
+fn deinitMaps(throughput_map: *ThroughputMap, latency_map: *LatencyMap, allocator: std.mem.Allocator) void {
+    var tp_it = throughput_map.iterator();
+    while (tp_it.next()) |ip_map_pair| {
+        allocator.free(ip_map_pair.key_ptr.*);
+        var ip_it = ip_map_pair.value_ptr.iterator();
+        while (ip_it.next()) |record_list| record_list.value_ptr.deinit(allocator);
+        ip_map_pair.value_ptr.deinit(allocator);
+    }
+    throughput_map.deinit(allocator);
+
+    var lat_it = latency_map.iterator();
+    while (lat_it.next()) |ip_map_pair| {
+        allocator.free(ip_map_pair.key_ptr.*);
+        var ip_it = ip_map_pair.value_ptr.iterator();
+        while (ip_it.next()) |record_list| record_list.value_ptr.deinit(allocator);
+        ip_map_pair.value_ptr.deinit(allocator);
+    }
+    latency_map.deinit(allocator);
 }
 
 fn appendThroughputSection(
