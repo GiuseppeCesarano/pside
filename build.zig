@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) void {
     };
     const executable = b.addExecutable(executable_options);
     b.installArtifact(executable);
+    installWebAssets(b);
 
     // Zls check without emitting object
     const check_exe = b.addExecutable(executable_options);
@@ -245,4 +246,23 @@ fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Bu
     install.step.dependOn(&compile.step);
 
     b.getInstallStep().dependOn(&install.step);
+}
+
+fn installWebAssets(b: *std.Build) void {
+    const uplot = b.dependency("uplot", .{});
+
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        b.path("src/userspace/report/web/index.html"),
+        "share/pside/index.html",
+    ).step);
+
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        uplot.path("dist/uPlot.iife.min.js"),
+        "share/pside/uplot.min.js",
+    ).step);
+
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        uplot.path("dist/uPlot.min.css"),
+        "share/pside/uplot.min.css",
+    ).step);
 }

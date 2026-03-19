@@ -7,45 +7,49 @@ const Server = @This();
 
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
+share_path: []const u8, // owned, allocated at init
 
-pub fn init(io: Io) !Server {
+pub fn init(allocator: std.mem.Allocator, io: Io) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
     errdefer net_server.deinit(io);
+
+    const share_path = try resolveSharePath(allocator, io);
+    errdefer allocator.free(share_path);
 
     return .{
         .server = net_server,
         .should_shut_down = undefined,
+        .share_path = share_path,
     };
 }
 
-pub fn deinit(this: *Server, io: Io) void {
+pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
     this.stop(io);
     this.server.deinit(io);
+    allocator.free(this.share_path);
 }
 
-pub fn port(self: Server) u16 {
-    return self.server.socket.address.getPort();
+pub fn port(this: Server) u16 {
+    return this.server.socket.address.getPort();
 }
 
 pub fn openInBrowser(this: *const Server, io: Io) void {
     const partial_url = "http://[::1]:";
     const max_port: u16 = std.math.maxInt(u16);
     var buf: [partial_url.len + std.math.log10_int(max_port) + 1]u8 = undefined;
-
     const full_url = std.fmt.bufPrint(&buf, partial_url ++ "{}", .{this.port()}) catch unreachable;
-
     _ = std.process.spawn(io, .{
         .argv = &.{ "xdg-open", full_url },
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
-    }) catch {}; // If spawing fails, user will read msg, and open the url by hand
+    }) catch {};
 }
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
     const page_size = std.heap.defaultQueryPageSize();
-    this.should_shut_down.store(false, .monotonic);
 
+    this.should_shut_down.store(false, .monotonic);
     while (!this.should_shut_down.load(.monotonic)) {
         const recv_buffer = try allocator.alloc(u8, page_size);
         defer allocator.free(recv_buffer);
@@ -67,37 +71,73 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
                 error.HttpConnectionClosing => break,
                 else => |e| return e,
             };
-            try handleRequest(&request);
+            this.handleRequest(allocator, io, &request) catch |err| {
+                std.log.err("handleRequest: {s}", .{@errorName(err)});
+            };
         }
     }
 }
 
 pub fn stop(this: *Server, io: Io) void {
     if (this.should_shut_down.swap(true, .monotonic)) return;
-
-    // Force last connection to unlock the .accept() call;
     var stream = this.server.socket.address.connect(io, .{ .mode = .stream }) catch
         @panic("Server shutdown failed");
     stream.close(io);
 }
 
-fn handleRequest(request: *http.Server.Request) !void {
+fn handleRequest(this: *const Server, allocator: std.mem.Allocator, io: Io, request: *http.Server.Request) !void {
     const target = request.head.target;
     std.log.debug("{s} {s}", .{ @tagName(request.head.method), target });
 
     if (std.mem.eql(u8, target, "/")) {
-        try request.respond("Hello, World!\n", .{
-            .extra_headers = &.{
-                .{ .name = "content-type", .value = "text/plain" },
-            },
-        });
-    } else if (std.mem.eql(u8, target, "/stream")) {
-        var response = try request.respondStreaming(&.{}, .{});
-        try response.writer.writeAll("chunk one\n");
-        try response.flush();
-        try response.writer.writeAll("chunk two\n");
-        try response.end();
+        try this.serveFile(allocator, io, request, "index.html", "text/html");
+    } else if (std.mem.eql(u8, target, "/uplot.min.js")) {
+        try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript");
+    } else if (std.mem.eql(u8, target, "/uplot.min.css")) {
+        try this.serveFile(allocator, io, request, "uplot.min.css", "text/css");
     } else {
-        try request.respond("Not Found\n", .{ .status = .not_found });
+        try request.respond("", .{ .status = .not_found });
     }
+}
+
+fn serveFile(
+    this: *const Server,
+    allocator: std.mem.Allocator,
+    io: Io,
+    request: *http.Server.Request,
+    filename: []const u8,
+    content_type: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ this.share_path, filename });
+    defer allocator.free(path);
+
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+
+    const file = std.Io.Dir.openFileAbsolute(io, path_z, .{}) catch |err| {
+        std.log.err("could not open {s}: {s}", .{ path, @errorName(err) });
+        try request.respond("", .{ .status = .not_found });
+        return;
+    };
+    defer file.close(io);
+
+    var reader = file.reader(io, &.{});
+
+    const body = try reader.interface.allocRemaining(allocator, .unlimited);
+    defer allocator.free(body);
+
+    try request.respond(body, .{
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = content_type },
+        },
+    });
+}
+
+fn resolveSharePath(allocator: std.mem.Allocator, io: Io) ![]const u8 {
+    const bin_dir = try std.process.executableDirPathAlloc(io, allocator);
+    defer allocator.free(bin_dir);
+
+    const prefix = std.fs.path.dirname(bin_dir) orelse "/usr";
+
+    return std.fs.path.join(allocator, &.{ prefix, "share", "pside" });
 }

@@ -3,7 +3,12 @@
     .version = "0.0.0",
     .fingerprint = 0x3d35d37bd337b3dd,
     .minimum_zig_version = "0.16.0-dev.747+493ad58ff",
-    .dependencies = .{},
+    .dependencies = .{
+        .uplot = .{
+            .url = "https://github.com/leeoniya/uPlot/archive/refs/tags/1.6.32.tar.gz",
+            .hash = "N-V-__8AAA-cUgBEyg1mUIml5FmAYP1vAHKiERdzBGnItpZd",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
