@@ -221,7 +221,6 @@ fn resolveSharePath(allocator: std.mem.Allocator, io: Io) ![]const u8 {
     const bin_dir = try std.process.executableDirPathAlloc(io, allocator);
     defer allocator.free(bin_dir);
     const prefix = std.fs.path.dirname(bin_dir) orelse return error.empty;
-    std.log.info("prefix: {s}", .{prefix});
 
     const suffix = if (std.mem.endsWith(u8, prefix, "usr/share"))
         "pside"
