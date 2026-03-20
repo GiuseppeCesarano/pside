@@ -3,23 +3,23 @@ const serialization = @import("serialization");
 
 const ParseResult = @This();
 
-const ThroughputNoIP = extern struct {
+pub const ThroughputNoIP = extern struct {
     progress_delta: u64,
     wall: u64,
     injected_delay: u64,
-    delay_per_tick: u16,
+    speedup_percent: u8,
 
     pub fn fromThroughputRecord(record: serialization.record.Throughput) ThroughputNoIP {
         return .{
             .progress_delta = record.progress_delta,
             .wall = record.wall,
             .injected_delay = record.injected_delay,
-            .delay_per_tick = record.delay_per_tick,
+            .speedup_percent = record.speedup_percent,
         };
     }
 };
 
-const ThroughputIpMap = std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(ThroughputNoIP));
+pub const ThroughputIpMap = std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(ThroughputNoIP));
 const ThroughputMap = std.StringHashMapUnmanaged(ThroughputIpMap);
 
 const LatencyIpMap = std.AutoHashMapUnmanaged(u64, std.ArrayListUnmanaged(ThroughputNoIP));

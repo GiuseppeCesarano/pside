@@ -3,7 +3,7 @@
     <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>pside</title>
+	<title>PSIDE</title>
 	<script src="/uplot.min.js"></script>
 	<link rel="stylesheet" href="/uplot.min.css">
 	<style>
@@ -34,241 +34,317 @@ html, body {
     overflow: hidden;
 }
 
-    #app {
-	display: grid;
-	grid-template-rows: 40px 1fr;
-	grid-template-columns: 260px 1fr;
-	height: 100vh;
-    }
+#app {
+    display: grid;
+    grid-template-rows: 40px 1fr;
+    grid-template-columns: 260px 1fr;
+    height: 100vh;
+    overflow: hidden;
+}
 
-    /* ── Topbar ── */
-    #topbar {
-	grid-column: 1 / -1;
-	display: flex;
-	align-items: center;
-	gap: 16px;
-	padding: 0 16px;
-	background: var(--bg2);
-	border-bottom: 1px solid var(--border);
-    }
+/* ── Topbar ── */
+#topbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
 
-    .logo {
-	font-weight: 600;
-	font-size: 14px;
-	letter-spacing: 0.12em;
-	color: var(--accent);
-	text-transform: uppercase;
-    }
-    .logo span { color: var(--text-dim); font-weight: 300; }
+.logo {
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    text-transform: uppercase;
+}
+.logo span { color: var(--text-dim); font-weight: 300; }
 
-    .sep { width: 1px; height: 18px; background: var(--border2); }
+.sep { width: 1px; height: 18px; background: var(--border2); }
 
-    #top-meta {
-	font-size: 11px;
-	color: var(--text-dim);
-	display: flex;
-	gap: 20px;
-    }
-    #top-meta b { color: var(--text-mid); font-weight: 400; }
+#top-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 20px;
+}
+#top-meta b { color: var(--text-mid); font-weight: 400; }
 
-    .status {
-	margin-left: auto;
-	font-size: 11px;
-	color: var(--text-dim);
-	display: flex;
-	align-items: center;
-	gap: 6px;
-    }
-    .status .dot {
-	width: 6px; height: 6px;
-	border-radius: 50%;
-	background: var(--accent);
-	box-shadow: 0 0 6px var(--accent);
-	animation: pulse 2.4s ease-in-out infinite;
-    }
-    @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.3} }
+.status {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.status .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+    animation: pulse 2.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1}50%{opacity:.3} }
 
-    /* ── Sidebar ── */
-    #sidebar {
-	background: var(--bg2);
-	border-right: 1px solid var(--border);
-	display: flex;
-	flex-direction: column;
-	overflow: hidden;
-    }
+/* ── Sidebar ── */
+#sidebar {
+    background: var(--bg2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
 
-    #sidebar-header {
-	padding: 12px 14px 10px;
-	border-bottom: 1px solid var(--border);
-	display: flex;
-	flex-direction: column;
-	gap: 8px;
-	flex-shrink: 0;
-    }
-    #sidebar-header .label {
-	font-size: 10px;
-	letter-spacing: 0.15em;
-	text-transform: uppercase;
-	color: var(--text-dim);
-    }
+#sidebar-header {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+}
+#sidebar-header .label {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+}
 
-    #search {
-	width: 100%;
-	background: var(--bg3);
-	border: 1px solid var(--border2);
-	border-radius: 3px;
-	color: var(--text);
-	font-family: var(--mono);
-	font-size: 12px;
-	padding: 5px 8px;
-	outline: none;
-	transition: border-color 0.15s;
-    }
-    #search::placeholder { color: var(--text-dim); }
-    #search:focus { border-color: var(--accent); }
+#search {
+    width: 100%;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 5px 8px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+#search::placeholder { color: var(--text-dim); }
+#search:focus { border-color: var(--accent); }
 
-    #section-list {
-	flex: 1;
-	overflow-y: auto;
-	padding: 4px 0;
-    }
-    #section-list::-webkit-scrollbar { width: 4px; }
-    #section-list::-webkit-scrollbar-track { background: transparent; }
-    #section-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+#section-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+    min-height: 0;
+}
+#section-list::-webkit-scrollbar { width: 4px; }
+#section-list::-webkit-scrollbar-track { background: transparent; }
+#section-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
-    .section-item {
-	padding: 7px 14px;
-	cursor: pointer;
-	border-left: 2px solid transparent;
-	transition: background 0.1s, border-color 0.1s;
-	display: flex;
-	flex-direction: column;
-	gap: 2px;
-    }
-    .section-item:hover  { background: var(--bg3); border-left-color: var(--border2); }
-    .section-item.active { background: var(--bg3); border-left-color: var(--accent); }
+.section-item {
+    padding: 7px 14px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: background 0.1s, border-color 0.1s;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.section-item:hover  { background: var(--bg3); border-left-color: var(--border2); }
+.section-item.active { background: var(--bg3); border-left-color: var(--accent); }
 
-    .section-item .name {
-	color: var(--text);
-	font-size: 12px;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-    }
-    .section-item.active .name { color: var(--accent); }
+.section-item .name {
+    color: var(--text);
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.section-item.active .name { color: var(--accent); }
 
-    .section-item .stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
-    .section-item .stats .pill {
-	background: var(--bg);
-	border: 1px solid var(--border);
-	border-radius: 2px;
-	padding: 0 4px;
-    }
+.section-item .stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
+.section-item .stats .pill {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 0 4px;
+}
 
-    /* ── Main ── */
-    #main {
-	display: flex;
-	flex-direction: column;
-	overflow: hidden;
-    }
+/* ── Main ── */
+#main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+}
 
-    #section-header {
-	padding: 11px 20px;
-	border-bottom: 1px solid var(--border);
-	flex-shrink: 0;
-	display: flex;
-	align-items: baseline;
-	gap: 14px;
-    }
-    #section-title {
-	font-size: 14px;
-	font-weight: 500;
-	color: var(--text);
-	flex: 1;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-    }
-    #section-title.placeholder { color: var(--text-dim); font-weight: 300; font-size: 13px; }
-    #section-summary { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
-    #section-summary b { color: var(--text-mid); font-weight: 400; }
+#section-header {
+    padding: 11px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+}
+#section-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#section-title.placeholder { color: var(--text-dim); font-weight: 300; font-size: 13px; }
+#section-summary { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+#section-summary b { color: var(--text-mid); font-weight: 400; }
 
-    /* ── Empty / loading ── */
-    #empty-state {
-	flex: 1;
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	justify-content: center;
-	gap: 10px;
-	color: var(--text-dim);
-	font-size: 12px;
-    }
-    #empty-state .big { font-size: 36px; opacity: .12; letter-spacing: .25em; }
-    #empty-state.hidden { display: none; }
+/* ── Empty / loading ── */
+#empty-state {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+#empty-state .big { font-size: 36px; opacity: .12; letter-spacing: .25em; }
+#empty-state.hidden { display: none; }
 
-    /* ── Chart scroll area ── */
-    #charts-scroll {
-	flex: 1;
-	overflow-y: auto;
-	padding: 16px 20px 24px;
-	display: flex;
-	flex-direction: column;
-	gap: 16px;
-    }
-    #charts-scroll::-webkit-scrollbar { width: 6px; }
-    #charts-scroll::-webkit-scrollbar-track { background: transparent; }
-    #charts-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+/* ── Filter bar ── */
+#filter-bar {
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+}
+#filter-bar.hidden { display: none; }
 
-    /* ── IP card ── */
-    .ip-card {
-	background: var(--bg2);
-	border: 1px solid var(--border);
-	border-radius: 4px;
-	overflow: hidden;
-	opacity: 0;
-	transform: translateY(6px);
-	animation: cardIn 0.18s ease forwards;
-    }
-    @keyframes cardIn { to { opacity:1; transform:none; } }
+#filter-bar label { white-space: nowrap; }
+#filter-bar b { color: var(--text-mid); font-weight: 400; min-width: 2ch; display: inline-block; }
 
-    .ip-card-header {
-	padding: 8px 14px;
-	border-bottom: 1px solid var(--border);
-	display: flex;
-	align-items: center;
-	gap: 12px;
-    }
-    .ip-addr {
-	font-size: 12px;
-	font-weight: 500;
-	letter-spacing: .04em;
-    }
-    .ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
-    .ip-pills .pill {
-	background: var(--bg3);
-	border: 1px solid var(--border);
-	border-radius: 2px;
-	padding: 0 5px;
-    }
-    .ip-pills .pill.warn { border-color: var(--warn); color: var(--warn); }
+#min-points-slider {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--border2);
+    outline: none;
+    cursor: pointer;
+}
+#min-points-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 4px var(--accent);
+    cursor: pointer;
+}
+#min-points-slider::-moz-range-thumb {
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    border: none;
+    background: var(--accent);
+    box-shadow: 0 0 4px var(--accent);
+    cursor: pointer;
+}
 
-    .ip-chart-wrap { padding: 8px 8px 4px; }
+#filter-count { color: var(--text-dim); white-space: nowrap; }
+#filter-count b { color: var(--text-mid); font-weight: 400; }
 
-    /* uPlot */
-    .u-legend { display: none !important; }
-    .u-wrap   { background: transparent !important; }
-    .u-over   { cursor: crosshair; }
+/* ── Chart scroll area ── */
+#charts-scroll {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+}
+#charts-scroll::-webkit-scrollbar { width: 6px; }
+#charts-scroll::-webkit-scrollbar-track { background: transparent; }
+#charts-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
-    /* spinner */
-    .spinner {
-	width: 18px; height: 18px;
-	border: 2px solid var(--border2);
-	border-top-color: var(--accent);
-	border-radius: 50%;
-	animation: spin .75s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
+/* ── IP card ── */
+.ip-card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    opacity: 0;
+    transform: translateY(6px);
+    animation: cardIn 0.18s ease forwards;
+    flex-shrink: 0;
+}
+@keyframes cardIn { to { opacity:1; transform:none; } }
+
+.ip-card-header {
+    padding: 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.1s;
+}
+.ip-card-header:hover { background: var(--bg3); }
+.ip-card.expanded .ip-card-header {
+    border-bottom: 1px solid var(--border);
+    background: var(--bg3);
+}
+
+.ip-addr {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: .04em;
+    flex: 1;
+}
+.ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
+.ip-pills .pill {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 0 5px;
+}
+.ip-pills .pill.warn { border-color: var(--warn); color: var(--warn); }
+
+.ip-expand-icon {
+    font-size: 10px;
+    color: var(--text-dim);
+    transition: transform 0.15s;
+    flex-shrink: 0;
+}
+.ip-card.expanded .ip-expand-icon { transform: rotate(90deg); }
+
+/* chart body — hidden by default, expands on click */
+.ip-chart-body {
+    display: none;
+    padding: 8px 8px 4px;
+}
+.ip-card.expanded .ip-chart-body { display: block; }
+
+/* uPlot */
+.u-legend { display: none !important; }
+.u-wrap   { background: transparent !important; }
+.u-over   { cursor: crosshair; }
+
+/* spinner */
+.spinner {
+    width: 18px; height: 18px;
+    border: 2px solid var(--border2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 	</style>
     </head>
     <body>
@@ -298,6 +374,12 @@ html, body {
 		    <div id="section-summary"></div>
 		</div>
 
+		<div id="filter-bar" class="hidden">
+		    <label>min points &nbsp;<b id="min-points-val">1</b></label>
+		    <input id="min-points-slider" type="range" min="1" max="21" value="1" step="1">
+		    <span id="filter-count"></span>
+		</div>
+
 		<div id="empty-state">
 		    <div class="big">∅</div>
 		    <span id="empty-msg">no section selected</span>
@@ -314,11 +396,14 @@ html, body {
 		'#60a5fa','#fb923c',
 	    ];
 
+	    const CHART_H = 220;
+
 	    let sections  = [];
 	    let activeVma = null;
-	    let plots     = [];
+	    let allSeries = [];
+	    const cardState = new Map();
 
-	    // ── Boot ─────────────────────────────────────────────────────────────────────
+	    // ── Boot ──────────────────────────────────────────────────────────────────────
 	    (async () => {
 		try {
 		    sections = await (await fetch('/api/sections')).json();
@@ -333,7 +418,7 @@ html, body {
 		}
 	    })();
 
-	    // ── Sidebar ──────────────────────────────────────────────────────────────────
+	    // ── Sidebar ───────────────────────────────────────────────────────────────────
 	    function renderSidebar(items) {
 		const list = document.getElementById('section-list');
 		list.innerHTML = '';
@@ -346,11 +431,11 @@ html, body {
 		    el.className = 'section-item' + (s.vma === activeVma ? ' active' : '');
 		    el.dataset.vma = s.vma;
 		    el.innerHTML = `
-      <div class="name" title="${esc(s.vma)}">${esc(s.vma)}</div>
-      <div class="stats">
-	<span class="pill">${s.sample_count} samples</span>
-	<span class="pill">${s.ip_count} IPs</span>
-      </div>`;
+		      <div class="name" title="${esc(s.vma)}">${esc(s.vma)}</div>
+		      <div class="stats">
+			<span class="pill">${s.sample_count} samples</span>
+			<span class="pill">${s.ip_count} IPs</span>
+		      </div>`;
 		    el.addEventListener('click', () => loadSection(s.vma));
 		    list.appendChild(el);
 		});
@@ -361,7 +446,7 @@ html, body {
 		renderSidebar(sections.filter(s => s.vma.toLowerCase().includes(q)));
 	    });
 
-	    // ── Load section ─────────────────────────────────────────────────────────────
+	    // ── Load section ──────────────────────────────────────────────────────────────
 	    async function loadSection(vma) {
 		if (vma === activeVma) return;
 		activeVma = vma;
@@ -374,6 +459,12 @@ html, body {
 		titleEl.classList.remove('placeholder');
 		document.getElementById('section-summary').innerHTML = '';
 
+		// destroy old plots
+		cardState.forEach(s => s.plot?.destroy());
+		cardState.clear();
+		allSeries = [];
+		document.getElementById('filter-bar').classList.add('hidden');
+
 		showEmpty(null, true);
 
 		try {
@@ -385,63 +476,125 @@ html, body {
 	    }
 
 	    // ── Render section ────────────────────────────────────────────────────────────
-	    function renderSection(data) {
-		plots.forEach(p => p.destroy());
-		plots = [];
 
+	    function renderSection(data) {
 		const scroll = document.getElementById('charts-scroll');
 		scroll.innerHTML = '';
+		cardState.forEach(s => s.plot?.destroy());
+		cardState.clear();
 
-		document.getElementById('section-summary').innerHTML =
-		    `<b>${data.series.length}</b> IP${data.series.length !== 1 ? 's' : ''} &nbsp;·&nbsp; ` +
-		    `<b>${data.series[0]?.points.length ?? 0}</b> speedup steps`;
+		// filter out IPs with 0 points
+		allSeries = data.series.filter(s => s.points.length > 0);
+
+		const maxPoints = allSeries.reduce((m, s) => Math.max(m, s.points.length), 1);
+		const slider = document.getElementById('min-points-slider');
+		slider.max = maxPoints;
+		slider.value = 1;
+		document.getElementById('min-points-val').textContent = 1;
+
+		const filterBar = document.getElementById('filter-bar');
+		filterBar.classList.toggle('hidden', allSeries.length === 0);
 
 		document.getElementById('empty-state').classList.add('hidden');
 		scroll.style.display = 'flex';
 
-		data.series.forEach((series, i) => {
+		applyFilter();
+	    }
+
+	    function applyFilter() {
+		const minPts = parseInt(document.getElementById('min-points-slider').value, 10);
+		const visible = allSeries.filter(s => s.points.length >= minPts);
+
+		const scroll = document.getElementById('charts-scroll');
+		scroll.innerHTML = '';
+		cardState.forEach(s => s.plot?.destroy());
+		cardState.clear();
+
+		document.getElementById('section-summary').innerHTML =
+		    `<b>${visible.length}</b> IP${visible.length !== 1 ? 's' : ''} &nbsp;·&nbsp; ` +
+		    `<b>${visible[0]?.points.length ?? 0}</b> speedup steps`;
+
+		document.getElementById('filter-count').innerHTML =
+		    `<b>${visible.length}</b> / ${allSeries.length} IPs`;
+
+		if (visible.length === 0) {
+		    showEmpty('no IPs match filter');
+		    return;
+		}
+
+		document.getElementById('empty-state').classList.add('hidden');
+		scroll.style.display = 'flex';
+
+		visible.forEach((series, i) => {
 		    const color = PALETTE[i % PALETTE.length];
-		    const { el, plot } = buildCard(series, color, i);
-		    scroll.appendChild(el);
-		    plots.push(plot);
+		    scroll.appendChild(buildCard(series, color, i));
 		});
 	    }
 
-	    // ── One chart card per IP ─────────────────────────────────────────────────────
+	    document.getElementById('min-points-slider').addEventListener('input', e => {
+		document.getElementById('min-points-val').textContent = e.target.value;
+		applyFilter();
+	    });
+
+	    // ── One card per IP, chart built lazily on first expand ───────────────────────
 	    function buildCard(series, color, idx) {
-		const CHART_H    = 220;
 		const singletons = series.points.filter(p => p.singleton).length;
 
 		const card = document.createElement('div');
 		card.className = 'ip-card';
-		card.style.animationDelay = (idx * 35) + 'ms';
+		card.style.animationDelay = (idx * 30) + 'ms';
 		card.innerHTML = `
-    <div class="ip-card-header">
-      <span class="ip-addr" style="color:${color}">
-	0x${series.ip.toString(16).padStart(16, '0')}
-      </span>
-      <div class="ip-pills">
-	<span class="pill">${series.points.length} steps</span>
-	${singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : ''}
-      </div>
-    </div>
-    <div class="ip-chart-wrap"><div class="ip-chart"></div></div>`;
+	      <div class="ip-card-header">
+		<span class="ip-addr" style="color:${color}">
+		  0x${BigInt(series.ip).toString(16).padStart(16, '0')}
+		</span>
+		<div class="ip-pills">
+		  <span class="pill">${series.points.length} steps</span>
+		  ${singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : ''}
+		</div>
+		<span class="ip-expand-icon">▶</span>
+	      </div>
+	      <div class="ip-chart-body"><div class="ip-chart"></div></div>`;
 
-		const wrap    = card.querySelector('.ip-chart-wrap');
-		const chartEl = card.querySelector('.ip-chart');
+		const header   = card.querySelector('.ip-card-header');
+		const chartEl  = card.querySelector('.ip-chart');
+		const chartBody = card.querySelector('.ip-chart-body');
 
+		cardState.set(card, { plot: null, series, color });
+
+		header.addEventListener('click', () => {
+		    const isExpanded = card.classList.toggle('expanded');
+
+		    if (isExpanded) {
+			const state = cardState.get(card);
+			if (!state.plot) {
+			    // first open: build the plot now that the container is visible
+			    state.plot = buildPlot(chartEl, state.series, state.color);
+			    // size it correctly on next frame once layout is done
+			    requestAnimationFrame(() => {
+				const w = chartBody.clientWidth - 16;
+				if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
+			    });
+			}
+		    }
+		});
+
+		return card;
+	    }
+
+	    // ── Build uPlot inside a container ────────────────────────────────────────────
+	    function buildPlot(chartEl, series, color) {
 		const xVals   = series.points.map(p => p.speedup);
 		const medians = series.points.map(p => p.median);
 		const ciLow   = series.points.map(p => p.ci_low);
 		const ciHigh  = series.points.map(p => p.ci_high);
 
-		// pre-parse colour for rgba
 		const rv = parseInt(color.slice(1,3),16);
 		const gv = parseInt(color.slice(3,5),16);
 		const bv = parseInt(color.slice(5,7),16);
 
 		const opts = {
-		    width:  800, // overridden after mount
+		    width:  800,
 		    height: CHART_H,
 		    legend: { show: false },
 		    cursor: { show: true, points: { show: false } },
@@ -475,7 +628,6 @@ html, body {
 			    ctx.save();
 			    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
 
-			    // CI filled band
 			    const hiPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciHigh[i],'y',true) }));
 			    const loPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciLow[i], 'y',true) }));
 
@@ -486,7 +638,6 @@ html, body {
 			    ctx.closePath();
 			    ctx.fill();
 
-			    // CI dashed border lines
 			    ctx.strokeStyle = `rgba(${rv},${gv},${bv},0.28)`;
 			    ctx.lineWidth = 1;
 			    ctx.setLineDash([3,4]);
@@ -498,7 +649,6 @@ html, body {
 			    });
 			    ctx.setLineDash([]);
 
-			    // Singleton triangles
 			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.9)`;
 			    series.points.forEach(p => {
 				if (!p.singleton) return;
@@ -529,14 +679,7 @@ html, body {
 		    ],
 		};
 
-		const plot = new uPlot(opts, [xVals, medians, ciLow, ciHigh], chartEl);
-
-		// correct width after the card is in the DOM
-		requestAnimationFrame(() => {
-		    plot.setSize({ width: wrap.clientWidth - 16, height: CHART_H });
-		});
-
-		return { el: card, plot };
+		return new uPlot(opts, [xVals, medians, ciLow, ciHigh], chartEl);
 	    }
 
 	    // ── Catmull-Rom spline ────────────────────────────────────────────────────────
@@ -544,35 +687,38 @@ html, body {
 		const pts = reverse ? [...points].reverse() : points;
 		ctx.lineTo(pts[0].x, pts[0].y);
 		for (let i = 0; i < pts.length - 1; i++) {
-		    const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
-			p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
-		    for (let t = .1; t <= 1; t += .1) {
-			const t2=t*t, t3=t2*t;
-			ctx.lineTo(
-			    .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-			    .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
-			);
-		    }
-		}
-	    }
+					      const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
+					      p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
+					      for (let t = .1; t <= 1; t += .1) {
+					      const t2=t*t, t3=t2*t;
+					      ctx.lineTo(
+					      .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+					      .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+					      );
+					      }
+					      }
+					      }
 
-	    // ── Empty / loading ───────────────────────────────────────────────────────────
-	    function showEmpty(msg, loading = false) {
-		const emptyEl  = document.getElementById('empty-state');
-		const scrollEl = document.getElementById('charts-scroll');
-		scrollEl.style.display = 'none';
-		emptyEl.classList.remove('hidden');
-		emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
-		document.getElementById('empty-msg').innerHTML =
-		    loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
-	    }
+					      // ── Empty / loading ───────────────────────────────────────────────────────────
+					      function showEmpty(msg, loading = false) {
+					      const emptyEl  = document.getElementById('empty-state');
+					      const scrollEl = document.getElementById('charts-scroll');
+					      scrollEl.style.display = 'none';
+					      emptyEl.classList.remove('hidden');
+					      emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
+					      document.getElementById('empty-msg').innerHTML =
+					      loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
+							      }
 
-	    // ── Resize ────────────────────────────────────────────────────────────────────
-	    window.addEventListener('resize', () => {
-		document.querySelectorAll('.ip-chart-wrap').forEach((wrap, i) => {
-		    plots[i]?.setSize({ width: wrap.clientWidth - 16, height: 220 });
-		});
-	    });
+							      // ── Resize ────────────────────────────────────────────────────────────────────
+							      window.addEventListener('resize', () => {
+								  cardState.forEach((state, card) => {
+								      if (!state.plot || !card.classList.contains('expanded')) return;
+								      const body = card.querySelector('.ip-chart-body');
+								      const w = body.clientWidth - 16;
+								      if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
+								  });
+							      });
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

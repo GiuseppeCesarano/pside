@@ -132,25 +132,25 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop()) {
-        this.setExperimentParameters();
+        const speedup_percent = this.setExperimentParameters();
 
         const delay_per_tick = this.delay_per_tick.load(.monotonic);
-        const vclock_start = this.virtual_clocks.master.load(.acquire);
         const baseline_prog = this.progress.load(.monotonic);
+        const vclock_start = this.virtual_clocks.master.load(.acquire);
         const start_wall = kernel.time.now.us();
 
-        if (delay_per_tick != 0) this.sampler.?.enable();
+        if (speedup_percent != 0) this.sampler.?.enable();
         kernel.time.sleep.us(this.experiment_duration);
 
         var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
         while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog) {
             @branchHint(.cold);
-            if (kernel.Thread.shouldThisStop()) return 0;
+            if (kernel.Thread.shouldThisStop()) break;
             this.experiment_duration *= 2;
             kernel.time.sleep.us(this.experiment_duration / 2);
         }
 
-        if (delay_per_tick != 0) this.sampler.?.disable();
+        if (speedup_percent != 0) this.sampler.?.disable();
 
         const vma_begin = this.vma_begin.load(.monotonic);
         const target_ip = this.target_ip.load(.monotonic);
@@ -165,7 +165,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
             continue;
         }
 
-        if (delay_per_tick != 0) {
+        if (speedup_percent != 0) {
             kernel.preempt.disable();
             this.virtual_clocks.forEach(applyDelayToThread, .{this});
             kernel.preempt.enable();
@@ -182,7 +182,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
             .progress_delta = prog_delta,
             .wall = wall,
             .injected_delay = total_delay,
-            .delay_per_tick = delay_per_tick,
+            .speedup_percent = speedup_percent,
         }) catch {}; //We just drop the sample
     }
 
@@ -197,7 +197,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-fn setExperimentParameters(this: *CausalEngine) void {
+fn setExperimentParameters(this: *CausalEngine) u8 {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
         var generator: std.Random = undefined;
@@ -218,6 +218,8 @@ fn setExperimentParameters(this: *CausalEngine) void {
     const delay = (speedup_percent * sampler_period) / 100;
 
     this.delay_per_tick.store(@truncate(delay), .monotonic);
+
+    return @truncate(speedup_percent);
 }
 
 fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value) void {

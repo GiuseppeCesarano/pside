@@ -26,7 +26,7 @@
 // version.minor bumps on additive changes (new MeasurementKind, new field appended to a record).
 // Parsers should reject files where major != their own known major.
 // TODO: handle endianness
-// TODO: Those files shall be aligned to be readable by chunks of 2MiB 
+// TODO: Those files shall be aligned to be readable by chunks of 2MiB
 
 const std = @import("std");
 
@@ -67,8 +67,8 @@ pub const record = struct {
         progress_delta: u64,
         wall: u64,
         injected_delay: u64,
-        delay_per_tick: u16,
-        _: [6]u8 = .{0} ** 6,
+        speedup_percent: u8,
+        _: [7]u8 = @splat(0),
 
         pub const empty = std.mem.zeroes(Throughput);
 
@@ -78,6 +78,6 @@ pub const record = struct {
     };
 
     pub const Latency = extern struct {
-        // Later
+        // TODO
     };
 };

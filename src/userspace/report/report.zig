@@ -24,10 +24,10 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     var parsed_results: OutputFileParserResult = try .parse(allocator, io, path_null);
     defer parsed_results.deinit(allocator);
 
-    var server: Server = try .init(allocator, io);
+    var server: Server = try .init(allocator, io, &parsed_results);
     defer server.deinit(allocator, io);
 
-    server.openInBrowser(io);
+    _ = try io.concurrent(Server.openInBrowser, .{ &server, io });
     std.log.info("Server running: http://[::1]:{}", .{server.port()});
     try server.run(allocator, io);
 }

@@ -2,24 +2,50 @@ const std = @import("std");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
+const OutputFileParserResult = @import("OutputFileParserResult");
+const Statistics = @import("Statistics.zig");
 
 const Server = @This();
 
+pub const Point = struct {
+    speedup: f64,
+    median: f64,
+    ci_low: f64,
+    ci_high: f64,
+    singleton: bool,
+};
+
+pub const IpSeries = struct {
+    ip: u64,
+    points: []Point,
+
+    pub fn deinit(this: IpSeries, allocator: std.mem.Allocator) void {
+        allocator.free(this.points);
+    }
+};
+
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
-share_path: []const u8, // owned, allocated at init
+share_path: []const u8,
+results: *const OutputFileParserResult,
+prng: std.Random.DefaultPrng,
 
-pub fn init(allocator: std.mem.Allocator, io: Io) !Server {
+pub fn init(allocator: std.mem.Allocator, io: Io, results: *const OutputFileParserResult) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
     errdefer net_server.deinit(io);
 
     const share_path = try resolveSharePath(allocator, io);
     errdefer allocator.free(share_path);
 
+    var seed: u64 = undefined;
+    std.Io.random(io, std.mem.asBytes(&seed));
+
     return .{
         .server = net_server,
         .should_shut_down = undefined,
         .share_path = share_path,
+        .results = results,
+        .prng = std.Random.DefaultPrng.init(seed),
     };
 }
 
@@ -37,7 +63,9 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
     const partial_url = "http://[::1]:";
     const max_port: u16 = std.math.maxInt(u16);
     var buf: [partial_url.len + std.math.log10_int(max_port) + 1]u8 = undefined;
+
     const full_url = std.fmt.bufPrint(&buf, partial_url ++ "{}", .{this.port()}) catch unreachable;
+
     _ = std.process.spawn(io, .{
         .argv = &.{ "xdg-open", full_url },
         .stdin = .ignore,
@@ -85,7 +113,7 @@ pub fn stop(this: *Server, io: Io) void {
     stream.close(io);
 }
 
-fn handleRequest(this: *const Server, allocator: std.mem.Allocator, io: Io, request: *http.Server.Request) !void {
+fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *http.Server.Request) !void {
     const target = request.head.target;
     std.log.debug("{s} {s}", .{ @tagName(request.head.method), target });
 
@@ -95,9 +123,65 @@ fn handleRequest(this: *const Server, allocator: std.mem.Allocator, io: Io, requ
         try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript");
     } else if (std.mem.eql(u8, target, "/uplot.min.css")) {
         try this.serveFile(allocator, io, request, "uplot.min.css", "text/css");
+    } else if (std.mem.eql(u8, target, "/api/sections")) {
+        try this.serveSections(allocator, request);
+    } else if (std.mem.startsWith(u8, target, "/api/section?vma=")) {
+        try this.serveSection(allocator, request, target["/api/section?vma=".len..]);
     } else {
         try request.respond("", .{ .status = .not_found });
     }
+}
+
+fn serveSections(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request) !void {
+    const SectionInfo = struct {
+        vma: []const u8,
+        ip_count: usize,
+        sample_count: usize,
+        binary_path: []const u8,
+    };
+
+    var list: std.ArrayListUnmanaged(SectionInfo) = .empty;
+    defer list.deinit(allocator);
+
+    var it = this.results.throughput_map.iterator();
+    while (it.next()) |entry| {
+        var sample_count: usize = 0;
+        var ip_it = entry.value_ptr.iterator();
+        while (ip_it.next()) |ip_entry| sample_count += ip_entry.value_ptr.items.len;
+        try list.append(allocator, .{
+            .vma = entry.key_ptr.*,
+            .ip_count = entry.value_ptr.count(),
+            .sample_count = sample_count,
+            .binary_path = this.results.binary_path,
+        });
+    }
+
+    const body = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
+    defer allocator.free(body);
+
+    try request.respond(body, .{
+        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    });
+}
+
+fn serveSection(this: *Server, allocator: std.mem.Allocator, request: *http.Server.Request, vma: []const u8) !void {
+    const ip_map = this.results.throughput_map.getPtr(vma) orelse {
+        try request.respond("", .{ .status = .not_found });
+        return;
+    };
+
+    const series = try Statistics.computeSection(allocator, ip_map, this.prng.random());
+    defer {
+        for (series) |s| s.deinit(allocator);
+        allocator.free(series);
+    }
+
+    const body = try std.json.Stringify.valueAlloc(allocator, .{ .series = series }, .{});
+    defer allocator.free(body);
+
+    try request.respond(body, .{
+        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
+    });
 }
 
 fn serveFile(
