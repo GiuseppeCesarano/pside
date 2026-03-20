@@ -250,19 +250,23 @@ fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Bu
 
 fn installWebAssets(b: *std.Build) void {
     const uplot = b.dependency("uplot", .{});
+    const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
 
-    b.getInstallStep().dependOn(&b.addInstallFile(
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
         b.path("src/userspace/report/web/index.html"),
-        "share/pside/index.html",
+        web_dir,
+        "index.html",
     ).step);
 
-    b.getInstallStep().dependOn(&b.addInstallFile(
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
         uplot.path("dist/uPlot.iife.min.js"),
-        "share/pside/uplot.min.js",
+        web_dir,
+        "uplot.min.js",
     ).step);
 
-    b.getInstallStep().dependOn(&b.addInstallFile(
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
         uplot.path("dist/uPlot.min.css"),
-        "share/pside/uplot.min.css",
+        web_dir,
+        "uplot.min.css",
     ).step);
 }
