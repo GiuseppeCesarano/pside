@@ -411,7 +411,7 @@ pub const ThreadClocks = struct {
 
         for (this.bitmask, 0..) |*bit_bucket, i| {
             var bucket = bit_bucket.load(.unordered);
-            while (bucket != 0) {
+            while (bucket != 0) : (bucket &= bucket - 1) {
                 const bit_pos = @ctz(bucket);
                 const index = i * @bitSizeOf(usize) + bit_pos;
 
@@ -421,8 +421,6 @@ pub const ThreadClocks = struct {
                 const value = &pair.value.raw;
 
                 @call(.always_inline, cb, .{ master, key, value } ++ args);
-
-                bucket &= bucket - 1;
             }
         }
     }
@@ -439,16 +437,17 @@ pub fn Pool(Type: type) type {
         pub const empty: @This() = .{ .entries = undefined, .free_bitmask = .init(std.math.maxInt(usize)), .next = .init(null) };
 
         fn tryClaimEntry(this: *@This()) ?*Type {
+            var free = this.free_bitmask.load(.monotonic);
             return for (0..5) |_| {
-                const free = this.free_bitmask.load(.monotonic);
-                const slot = @ctz(free);
+                if (free == 0) break null;
 
-                if (slot == pool_len) return null;
+                const target_bit = free & -%free;
+                const mask = ~target_bit;
+                free = this.free_bitmask.fetchAnd(mask, .monotonic);
 
-                const old = this.free_bitmask.fetchAnd(~(@as(usize, 1) << @truncate(slot)), .monotonic);
-
-                if (old >> @truncate(slot) & 1 == 1) {
+                if ((free & target_bit) != 0) {
                     @branchHint(.likely);
+                    const slot = @ctz(target_bit);
                     break &this.entries[slot];
                 }
             } else null;
