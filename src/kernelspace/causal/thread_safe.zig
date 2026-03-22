@@ -402,6 +402,14 @@ pub const ThreadClocks = struct {
         return .{ old_pairs, old_bitmask };
     }
 
+    pub fn clear(this: *ThreadClocks) void {
+        this.forEach(struct {
+            pub fn callback(_: Ticks, key: *Key, _: *Value) void {
+                key.* = .empty;
+            }
+        }.callback, .{});
+    }
+
     pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
         this.ref.close();
         defer this.ref.open();

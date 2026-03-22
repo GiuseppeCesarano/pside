@@ -160,3 +160,19 @@ pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_
         else => std.log.err("{s}", .{@tagName(e)}),
     }
 }
+
+pub fn stop(this: *@This()) !void {
+    const data: communications.Data = .{ .empty = {} };
+
+    const rc = linux.ioctl(
+        this.ctl.handle,
+        @intFromEnum(communications.Commands.stop_profiler),
+        @intFromPtr(&data),
+    );
+
+    const e = linux.errno(rc);
+    switch (e) {
+        .SUCCESS => {},
+        else => std.log.err("{s}", .{@tagName(e)}),
+    }
+}

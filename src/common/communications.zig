@@ -4,6 +4,7 @@ const iow = std.os.linux.IOCTL.IOW;
 pub const Commands = enum(c_uint) {
     pub const Tag = @typeInfo(Commands).@"enum".tag_type;
     start_profiler = iow('k', 0, Data),
+    stop_profiler = iow('k', 1, Data),
     _,
 };
 
@@ -16,4 +17,5 @@ pub const Data = union {
         vma_name: [vma_name_max_len + 1]u8 = @splat(0),
         vma_name_len: u8,
     },
+    empty: void,
 };

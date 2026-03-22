@@ -64,20 +64,8 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 
 pub fn deinit(this: *CausalEngine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
-
-    if (this.profiler_thread) |t| t.stop();
-    if (this.sampler) |s| s.deinit();
-
-    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
-    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
-    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
-    kernel.tracepoint.sync();
-
+    this.stop();
     this.delay_pool.deinit();
-    this.disk_writer.deinit();
-    this.vma_ranges.deinit();
-
     const clocks_len = this.virtual_clocks.pairs.len;
     this.virtual_clocks.deinit(if (clocks_len == clocks_starting_len) allocator else atomic_allocator);
 }
@@ -126,6 +114,32 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
+}
+
+pub fn stop(this: *CausalEngine) void {
+    if (this.profiler_thread) |t| t.stop();
+    this.profiler_thread = null;
+
+    if (this.sampler) |s| s.deinit();
+    this.sampler = null;
+
+    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
+    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
+    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+    kernel.tracepoint.sync();
+
+    this.disk_writer.deinit();
+    this.disk_writer = DiskWriter.init() catch unreachable;
+    this.vma_ranges.deinit();
+    this.vma_ranges = .empty;
+
+    this.virtual_clocks.clear();
+    this.target_ip.store(0, .monotonic);
+    this.vma_begin.store(0, .monotonic);
+    this.profiled_pid.store(0, .monotonic);
+    this.error_has_occurred.store(false, .monotonic);
+    this.experiment_duration = 45 * std.time.us_per_ms;
 }
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {

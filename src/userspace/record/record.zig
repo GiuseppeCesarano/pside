@@ -13,11 +13,11 @@ const TracedProcess = @import("TracedProcess.zig");
 var global_traced_process: ?TracedProcess = null;
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
-    const start = std.Io.Timestamp.now(init.io, .real);
     const parsed_options = options.parse(struct {
         c: []const u8 = "",
         p: []const u8 = "",
         l: []const u8 = "",
+        n: u32 = 1,
     });
 
     const io = init.io;
@@ -31,34 +31,39 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
     defer user_program.deinit(allocator);
 
+    const calling_user = try getCallingUser(init.minimal.environ);
+
+    var module = try KernelInterface.loadModuleFromDefaultPath(calling_user, allocator, io);
+    defer module.unload(io) catch |err| {
+        std.log.warn("Could not remove the kernel module ({s}), please try manually with:\n\n\tsudo rmmod pside\n", .{@errorName(err)});
+    };
+
+    const vma_name = resolveVmaName(parsed_options.flags.l, user_program.path);
+
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
     defer if (future_patch_addresses.cancel(io)) |addresses| allocator.free(addresses) else |_| {};
-
-    const calling_user = try getCallingUser(init.minimal.environ);
-    var future_module = io.async(KernelInterface.loadModuleFromDefaultPath, .{ calling_user, allocator, io });
-    defer if (future_module.cancel(io)) |module| module.unload(io) catch |err| {
-        std.log.warn("Could not remove the kernel module ({s}), please try manually with:\n\n\tsudo rmmod pside\n", .{@errorName(err)});
-    } else |_| {};
-
-    global_traced_process = try .spawn(user_program, io);
-    const traced_process = &global_traced_process.?;
-    errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
     const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
 
-    const vma_name = resolveVmaName(parsed_options.flags.l, user_program.path);
-    var module = try future_module.await(io);
-    try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
+    for (0..parsed_options.flags.n) |i| {
+        std.log.info("Run {}/{}", .{ i + 1, parsed_options.flags.n });
 
-    for (try future_patch_addresses.await(io)) |address|
-        if (address != 0) try traced_process.patchProgressPoint(address);
+        global_traced_process = try .spawn(user_program, io);
+        const traced_process = &global_traced_process.?;
+        errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
 
-    try traced_process.start();
+        try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
 
-    std.log.info("Setup time {}ms", .{std.Io.Timestamp.untilNow(start, io, .real).toMilliseconds()});
+        for (try future_patch_addresses.await(io)) |address|
+            if (address != 0) try traced_process.patchProgressPoint(address);
 
-    _ = traced_process.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
+        try traced_process.start();
+
+        _ = traced_process.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
+        try module.stop();
+        global_traced_process = null;
+    }
 }
 
 fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
