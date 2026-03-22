@@ -17,6 +17,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const parsed_options = options.parse(struct {
         c: []const u8 = "",
         p: []const u8 = "",
+        l: []const u8 = "",
     });
 
     const io = init.io;
@@ -46,8 +47,9 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
 
+    const vma_name = resolveVmaName(parsed_options.flags.l, user_program.path);
     var module = try future_module.await(io);
-    try module.startProfilerOnPid(traced_process.pid, output_file.file.handle);
+    try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
 
     for (try future_patch_addresses.await(io)) |address|
         if (address != 0) try traced_process.patchProgressPoint(address);
@@ -96,4 +98,16 @@ fn getCallingUser(env: std.process.Environ) !?[2]u32 {
     const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return null, 10);
 
     return .{ uid, gid };
+}
+
+fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
+    if (flag.len != 0) return flag;
+
+    const path = std.mem.span(program_path);
+    const base = std.fs.path.basename(path);
+
+    return if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot|
+        base[0..dot]
+    else
+        base;
 }

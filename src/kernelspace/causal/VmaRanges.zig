@@ -25,7 +25,7 @@ extern fn c_snapshot_executable_vmas(
     c_int,
 ) c_int;
 
-pub fn snapshot(task: *kernel.Task, filter: []const u8) !VmaRanges {
+pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
     const vma_ranges = try allocator.alloc(Range, 32);
     errdefer allocator.free(vma_ranges);
 
@@ -33,6 +33,8 @@ pub fn snapshot(task: *kernel.Task, filter: []const u8) !VmaRanges {
     const count: usize = @intCast(c_snapshot_executable_vmas(task, filter_z, vma_ranges.ptr, 32));
 
     std.debug.assert(allocator.resize(vma_ranges, count));
+
+    std.log.debug("{any}", .{vma_ranges[0..count]});
 
     return .{ .entries = vma_ranges[0..count] };
 }

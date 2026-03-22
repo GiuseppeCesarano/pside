@@ -50,6 +50,10 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) void {
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
     const bytes = std.mem.asBytes(&record);
+    try this.pushBytes(bytes);
+}
+
+pub fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
     const len = this.buffer.len;
     const end = this.buffer_end.load(.monotonic);
     const begin = this.buffer_begin.load(.monotonic);

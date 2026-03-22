@@ -138,14 +138,22 @@ pub fn unload(this: @This(), io: std.Io) !void {
     } else return DeleteModuleError.FdOpen;
 }
 
-pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t) !void {
-    const data: communications.Data = .{ .start = .{ .pid = pid, .output_fd = fd } };
+pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_name: []const u8) !void {
+    var data: communications.Data = .{ .start = .{
+        .pid = pid,
+        .output_fd = fd,
+        .vma_name = undefined,
+        .vma_name_len = @intCast(vma_name.len),
+    } };
+    @memcpy(data.start.vma_name[0..vma_name.len], vma_name);
+    data.start.vma_name[vma_name.len] = 0;
 
     const rc = linux.ioctl(
         this.ctl.handle,
         @intFromEnum(communications.Commands.start_profiler),
         @intFromPtr(&data),
     );
+
     const e = linux.errno(rc);
     switch (e) {
         .SUCCESS => {},

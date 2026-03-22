@@ -82,15 +82,15 @@ pub fn deinit(this: *CausalEngine) void {
     this.virtual_clocks.deinit(if (clocks_len == clocks_starting_len) allocator else atomic_allocator);
 }
 
-pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t) !void {
+pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
     const task = kernel.Task.fromTid(pid);
 
-    //TODO: those shall not be hardcoded
-    this.vma_ranges = try .snapshot(task, "pc");
+    this.vma_ranges = try .snapshot(task, vma_name);
 
     this.disk_writer.start(fd);
-    this.disk_writer.push(serialization.SectionHeader{ .kind = .throughput }) catch {};
-    this.disk_writer.push("pc".*) catch {};
+    try this.disk_writer.push(serialization.SectionHeader{ .kind = .throughput });
+    try this.disk_writer.pushBytes(vma_name);
+    try this.disk_writer.push(@as(u8, 0));
 
     try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
