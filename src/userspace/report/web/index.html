@@ -42,7 +42,6 @@ html, body {
     overflow: hidden;
 }
 
-/* ── Topbar ── */
 #topbar {
     grid-column: 1 / -1;
     display: flex;
@@ -90,7 +89,6 @@ html, body {
 }
 @keyframes pulse { 0%,100%{opacity:1}50%{opacity:.3} }
 
-/* ── Sidebar ── */
 #sidebar {
     background: var(--bg2);
     border-right: 1px solid var(--border);
@@ -169,7 +167,6 @@ html, body {
     padding: 0 4px;
 }
 
-/* ── Main ── */
 #main {
     display: flex;
     flex-direction: column;
@@ -198,7 +195,6 @@ html, body {
 #section-summary { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
 #section-summary b { color: var(--text-mid); font-weight: 400; }
 
-/* ── Empty / loading ── */
 #empty-state {
     flex: 1;
     display: flex;
@@ -212,7 +208,6 @@ html, body {
 #empty-state .big { font-size: 36px; opacity: .12; letter-spacing: .25em; }
 #empty-state.hidden { display: none; }
 
-/* ── Filter bar ── */
 #filter-bar {
     padding: 8px 20px;
     border-bottom: 1px solid var(--border);
@@ -259,7 +254,6 @@ html, body {
 #filter-count { color: var(--text-dim); white-space: nowrap; }
 #filter-count b { color: var(--text-mid); font-weight: 400; }
 
-/* ── Chart scroll area ── */
 #charts-scroll {
     flex: 1;
     overflow-y: auto;
@@ -273,7 +267,6 @@ html, body {
 #charts-scroll::-webkit-scrollbar-track { background: transparent; }
 #charts-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
-/* ── IP card ── */
 .ip-card {
     background: var(--bg2);
     border: 1px solid var(--border);
@@ -301,13 +294,39 @@ html, body {
     background: var(--bg3);
 }
 
-.ip-addr {
+/* ── Location display ── */
+.loc-resolved {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1;
+    min-width: 0;
+}
+.loc-fn {
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: .02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.loc-src {
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    letter-spacing: .01em;
+}
+.loc-src .loc-line { color: var(--text-mid); }
+.loc-ip {
     font-size: 12px;
     font-weight: 500;
     letter-spacing: .04em;
     flex: 1;
 }
-.ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
+
+.ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
 .ip-pills .pill {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -324,19 +343,16 @@ html, body {
 }
 .ip-card.expanded .ip-expand-icon { transform: rotate(90deg); }
 
-/* chart body — hidden by default, expands on click */
 .ip-chart-body {
     display: none;
     padding: 8px 8px 4px;
 }
 .ip-card.expanded .ip-chart-body { display: block; }
 
-/* uPlot */
 .u-legend { display: none !important; }
 .u-wrap   { background: transparent !important; }
 .u-over   { cursor: crosshair; }
 
-/* spinner */
 .spinner {
     width: 18px; height: 18px;
     border: 2px solid var(--border2);
@@ -403,7 +419,6 @@ html, body {
 	    let allSeries = [];
 	    const cardState = new Map();
 
-	    // ── Boot ──────────────────────────────────────────────────────────────────────
 	    (async () => {
 		try {
 		    sections = await (await fetch('/api/sections')).json();
@@ -418,7 +433,6 @@ html, body {
 		}
 	    })();
 
-	    // ── Sidebar ───────────────────────────────────────────────────────────────────
 	    function renderSidebar(items) {
 		const list = document.getElementById('section-list');
 		list.innerHTML = '';
@@ -446,7 +460,6 @@ html, body {
 		renderSidebar(sections.filter(s => s.vma.toLowerCase().includes(q)));
 	    });
 
-	    // ── Load section ──────────────────────────────────────────────────────────────
 	    async function loadSection(vma) {
 		if (vma === activeVma) return;
 		activeVma = vma;
@@ -459,7 +472,6 @@ html, body {
 		titleEl.classList.remove('placeholder');
 		document.getElementById('section-summary').innerHTML = '';
 
-		// destroy old plots
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 		allSeries = [];
@@ -475,15 +487,12 @@ html, body {
 		}
 	    }
 
-	    // ── Render section ────────────────────────────────────────────────────────────
-
 	    function renderSection(data) {
 		const scroll = document.getElementById('charts-scroll');
 		scroll.innerHTML = '';
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 
-		// filter out IPs with 0 points
 		allSeries = data.series.filter(s => s.points.length > 0);
 
 		const maxPoints = allSeries.reduce((m, s) => Math.max(m, s.points.length), 1);
@@ -536,41 +545,81 @@ html, body {
 		applyFilter();
 	    });
 
+	    // ── Location helpers ──────────────────────────────────────────────────────────
+
+	    function locationTitle(loc) {
+		if (loc.resolved) {
+		    const fn   = loc.resolved.function ?? '??';
+		    const file = loc.resolved.file ?? '??';
+		    const line = loc.resolved.line ?? 0;
+		    return `${fn}  ${file}:${line}`;
+		}
+		return `0x${BigInt(loc.ip).toString(16).padStart(16, '0')}`;
+	    }
+
+	    function buildLocationEl(loc, color) {
+		if (loc.resolved) {
+		    const fn   = esc(loc.resolved.function ?? '??');
+		    const file = esc((loc.resolved.file ?? '??').split('/').pop());
+		    const line = loc.resolved.line ?? 0;
+		    const el   = document.createElement('div');
+		    el.className = 'loc-resolved';
+		    el.innerHTML =
+			`<span class="loc-fn" style="color:${color}">${fn}</span>` +
+			`<span class="loc-src">${file}<span class="loc-line">:${line}</span></span>`;
+		    return el;
+		}
+		const el = document.createElement('span');
+		el.className = 'loc-ip';
+		el.style.color = color;
+		el.textContent = `0x${BigInt(loc.ip).toString(16).padStart(16, '0')}`;
+		return el;
+	    }
+
 	    // ── One card per IP, chart built lazily on first expand ───────────────────────
+
 	    function buildCard(series, color, idx) {
 		const singletons = series.points.filter(p => p.singleton).length;
 
 		const card = document.createElement('div');
 		card.className = 'ip-card';
 		card.style.animationDelay = (idx * 30) + 'ms';
-		card.innerHTML = `
-	      <div class="ip-card-header">
-		<span class="ip-addr" style="color:${color}">
-		  0x${BigInt(series.ip).toString(16).padStart(16, '0')}
-		</span>
-		<div class="ip-pills">
-		  <span class="pill">${series.points.length} steps</span>
-		  ${singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : ''}
-		</div>
-		<span class="ip-expand-icon">▶</span>
-	      </div>
-	      <div class="ip-chart-body"><div class="ip-chart"></div></div>`;
 
-		const header   = card.querySelector('.ip-card-header');
-		const chartEl  = card.querySelector('.ip-chart');
-		const chartBody = card.querySelector('.ip-chart-body');
+		const header = document.createElement('div');
+		header.className = 'ip-card-header';
+		header.title = locationTitle(series.location);
+
+		header.appendChild(buildLocationEl(series.location, color));
+
+		const pills = document.createElement('div');
+		pills.className = 'ip-pills';
+		pills.innerHTML =
+		    `<span class="pill">${series.points.length} steps</span>` +
+		    (singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : '');
+		header.appendChild(pills);
+
+		const expandIcon = document.createElement('span');
+		expandIcon.className = 'ip-expand-icon';
+		expandIcon.textContent = '▶';
+		header.appendChild(expandIcon);
+
+		const chartBody = document.createElement('div');
+		chartBody.className = 'ip-chart-body';
+		const chartEl = document.createElement('div');
+		chartEl.className = 'ip-chart';
+		chartBody.appendChild(chartEl);
+
+		card.appendChild(header);
+		card.appendChild(chartBody);
 
 		cardState.set(card, { plot: null, series, color });
 
 		header.addEventListener('click', () => {
 		    const isExpanded = card.classList.toggle('expanded');
-
 		    if (isExpanded) {
 			const state = cardState.get(card);
 			if (!state.plot) {
-			    // first open: build the plot now that the container is visible
 			    state.plot = buildPlot(chartEl, state.series, state.color);
-			    // size it correctly on next frame once layout is done
 			    requestAnimationFrame(() => {
 				const w = chartBody.clientWidth - 16;
 				if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
@@ -682,43 +731,40 @@ html, body {
 		return new uPlot(opts, [xVals, medians, ciLow, ciHigh], chartEl);
 	    }
 
-	    // ── Catmull-Rom spline ────────────────────────────────────────────────────────
 	    function drawSpline(ctx, points, reverse) {
 		const pts = reverse ? [...points].reverse() : points;
 		ctx.lineTo(pts[0].x, pts[0].y);
 		for (let i = 0; i < pts.length - 1; i++) {
-					      const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
-					      p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
-					      for (let t = .1; t <= 1; t += .1) {
-					      const t2=t*t, t3=t2*t;
-					      ctx.lineTo(
-					      .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-					      .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
-					      );
-					      }
-					      }
-					      }
+					 const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
+					 p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
+					 for (let t = .1; t <= 1; t += .1) {
+					 const t2=t*t, t3=t2*t;
+					 ctx.lineTo(
+					 .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+					 .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+					 );
+					 }
+					 }
+					 }
 
-					      // ── Empty / loading ───────────────────────────────────────────────────────────
-					      function showEmpty(msg, loading = false) {
-					      const emptyEl  = document.getElementById('empty-state');
-					      const scrollEl = document.getElementById('charts-scroll');
-					      scrollEl.style.display = 'none';
-					      emptyEl.classList.remove('hidden');
-					      emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
-					      document.getElementById('empty-msg').innerHTML =
-					      loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
-							      }
+					 function showEmpty(msg, loading = false) {
+					 const emptyEl  = document.getElementById('empty-state');
+					 const scrollEl = document.getElementById('charts-scroll');
+					 scrollEl.style.display = 'none';
+					 emptyEl.classList.remove('hidden');
+					 emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
+					 document.getElementById('empty-msg').innerHTML =
+					 loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
+							 }
 
-							      // ── Resize ────────────────────────────────────────────────────────────────────
-							      window.addEventListener('resize', () => {
-								  cardState.forEach((state, card) => {
-								      if (!state.plot || !card.classList.contains('expanded')) return;
-								      const body = card.querySelector('.ip-chart-body');
-								      const w = body.clientWidth - 16;
-								      if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
-								  });
-							      });
+							 window.addEventListener('resize', () => {
+							     cardState.forEach((state, card) => {
+								 if (!state.plot || !card.classList.contains('expanded')) return;
+								 const body = card.querySelector('.ip-chart-body');
+								 const w = body.clientWidth - 16;
+								 if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
+							     });
+							 });
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

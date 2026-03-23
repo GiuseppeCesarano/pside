@@ -4,6 +4,7 @@ const ParseResult = @import("OutputFileParserResult");
 pub const ThroughputNoIP = ParseResult.ThroughputNoIP;
 pub const ThroughputIpMap = ParseResult.ThroughputIpMap;
 
+const DebugInfo = @import("DebugInfo.zig");
 const Server = @import("Server.zig");
 const Point = Server.Point;
 const IpPoints = Server.IpSeries;
@@ -16,6 +17,7 @@ pub fn computeSection(
     allocator: std.mem.Allocator,
     ip_map: *const ThroughputIpMap,
     rng: std.Random,
+    debug_info: *DebugInfo,
 ) ![]IpPoints {
     var section = try std.ArrayList(IpPoints).initCapacity(allocator, 10);
     errdefer {
@@ -24,14 +26,19 @@ pub fn computeSection(
     }
 
     var ip_it = ip_map.iterator();
-    while (ip_it.next()) |entry| try section.append(allocator, try computeIpSeries(allocator, entry.key_ptr.*, entry.value_ptr.items, rng));
+    while (ip_it.next()) |entry| {
+        const location = try debug_info.resolve(allocator, entry.key_ptr.*);
+        errdefer location.deinit(allocator);
+
+        try section.append(allocator, try computeIpSeries(allocator, location, entry.value_ptr.items, rng));
+    }
 
     return section.toOwnedSlice(allocator);
 }
 
 fn computeIpSeries(
     allocator: std.mem.Allocator,
-    ip: u64,
+    location: DebugInfo.Location,
     records: []const ThroughputNoIP,
     rng: std.Random,
 ) !IpPoints {
@@ -43,8 +50,8 @@ fn computeIpSeries(
     for (records) |r| {
         const wall: f64 = @floatFromInt(r.wall);
         const injected_delay: f64 = @floatFromInt(r.injected_delay);
-
         const virtual_wall = wall - injected_delay;
+
         if (virtual_wall <= 0) continue;
 
         const tp = @as(f64, @floatFromInt(r.progress_delta)) / virtual_wall;
@@ -54,7 +61,7 @@ fn computeIpSeries(
     }
 
     const baseline_p75 = sortAndGet75Percentile(bucket[0].items);
-    if (baseline_p75 == 0) return .{ .ip = ip, .points = &.{} };
+    if (baseline_p75 == 0) return .{ .location = location, .points = &.{} };
 
     var points: std.ArrayListUnmanaged(Point) = .empty;
     errdefer points.deinit(allocator);
@@ -70,14 +77,14 @@ fn computeIpSeries(
 
         const speedup_pct: f64 = @as(f64, @floatFromInt(i)) * 5.0;
         const p75_norm = 100.0 * sortAndGet75Percentile(b.items) / baseline_p75;
-
         boot_dist.clearRetainingCapacity();
-        try resample.resize(allocator, b.items.len);
 
+        try resample.resize(allocator, b.items.len);
         for (0..bootstrap_iterations) |_| {
             for (resample.items) |*s| s.* = b.items[rng.uintLessThan(usize, b.items.len)];
             try boot_dist.append(allocator, 100.0 * sortAndGet75Percentile(resample.items) / baseline_p75);
         }
+
         std.mem.sort(f64, boot_dist.items, {}, std.sort.asc(f64));
 
         try points.append(allocator, .{
@@ -89,12 +96,11 @@ fn computeIpSeries(
         });
     }
 
-    return .{ .ip = ip, .points = try points.toOwnedSlice(allocator) };
+    return .{ .location = location, .points = try points.toOwnedSlice(allocator) };
 }
 
 fn sortAndGet75Percentile(data: []f64) f64 {
     @setFloatMode(.optimized);
-
     return switch (data.len) {
         0 => 0,
         1 => data[0],

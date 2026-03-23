@@ -2,7 +2,10 @@ const std = @import("std");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
+
 const OutputFileParserResult = @import("OutputFileParserResult");
+
+const DebugInfo = @import("DebugInfo.zig");
 const Statistics = @import("Statistics.zig");
 
 const Server = @This();
@@ -16,10 +19,11 @@ pub const Point = struct {
 };
 
 pub const IpSeries = struct {
-    ip: u64,
+    location: DebugInfo.Location,
     points: []Point,
 
     pub fn deinit(this: IpSeries, allocator: std.mem.Allocator) void {
+        this.location.deinit(allocator);
         allocator.free(this.points);
     }
 };
@@ -29,6 +33,7 @@ should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
 results: *const OutputFileParserResult,
 prng: std.Random.DefaultPrng,
+debug_info: DebugInfo,
 
 pub fn init(allocator: std.mem.Allocator, io: Io, results: *const OutputFileParserResult) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
@@ -46,6 +51,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, results: *const OutputFilePars
         .share_path = share_path,
         .results = results,
         .prng = std.Random.DefaultPrng.init(seed),
+        .debug_info = try DebugInfo.load(allocator, io, results.binary_path),
     };
 }
 
@@ -170,7 +176,7 @@ fn serveSection(this: *Server, allocator: std.mem.Allocator, request: *http.Serv
         return;
     };
 
-    const series = try Statistics.computeSection(allocator, ip_map, this.prng.random());
+    const series = try Statistics.computeSection(allocator, ip_map, this.prng.random(), &this.debug_info);
     defer {
         for (series) |s| s.deinit(allocator);
         allocator.free(series);
