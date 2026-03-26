@@ -412,7 +412,7 @@ html, body {
 		'#60a5fa','#fb923c',
 	    ];
 
-	    const CHART_H = 220;
+	    const chartHeight = () => Math.max(480, Math.round(window.innerHeight * 0.62));
 
 	    let sections  = [];
 	    let activeVma = null;
@@ -545,8 +545,6 @@ html, body {
 		applyFilter();
 	    });
 
-	    // ── Location helpers ──────────────────────────────────────────────────────────
-
 	    function locationTitle(loc) {
 		if (loc.resolved) {
 		    const fn   = loc.resolved.function ?? '??';
@@ -575,8 +573,6 @@ html, body {
 		el.textContent = `0x${BigInt(loc.ip).toString(16).padStart(16, '0')}`;
 		return el;
 	    }
-
-	    // ── One card per IP, chart built lazily on first expand ───────────────────────
 
 	    function buildCard(series, color, idx) {
 		const singletons = series.points.filter(p => p.singleton).length;
@@ -622,7 +618,7 @@ html, body {
 			    state.plot = buildPlot(chartEl, state.series, state.color);
 			    requestAnimationFrame(() => {
 				const w = chartBody.clientWidth - 16;
-				if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
+				if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
 			    });
 			}
 		    }
@@ -631,7 +627,6 @@ html, body {
 		return card;
 	    }
 
-	    // ── Build uPlot inside a container ────────────────────────────────────────────
 	    function buildPlot(chartEl, series, color) {
 		const xVals   = series.points.map(p => p.speedup);
 		const medians = series.points.map(p => p.median);
@@ -644,7 +639,7 @@ html, body {
 
 		const opts = {
 		    width:  800,
-		    height: CHART_H,
+		    height: chartHeight(),
 		    legend: { show: false },
 		    cursor: { show: true, points: { show: false } },
 		    scales: {
@@ -659,11 +654,26 @@ html, body {
 		    ],
 		    hooks: {
 			drawClear: [u => {
-			    const { ctx, bbox: { left, top, width } } = u;
+			    const { ctx, bbox: { left, top, width, height } } = u;
 			    const y100 = u.valToPos(100, 'y', true);
+
+			    const gradUp = ctx.createLinearGradient(0, y100, 0, top);
+			    gradUp.addColorStop(0,   'rgba(74, 240, 176, 0)');
+			    gradUp.addColorStop(0.4, 'rgba(74, 240, 176, 0.06)');
+			    gradUp.addColorStop(1,   'rgba(74, 240, 176, 0.16)');
+			    ctx.fillStyle = gradUp;
+			    ctx.fillRect(left, top, width, y100 - top);
+
+			    const gradDown = ctx.createLinearGradient(0, y100, 0, top + height);
+			    gradDown.addColorStop(0,    'rgba(240, 75, 75, 0)');
+			    gradDown.addColorStop(0.35, 'rgba(240, 75, 75, 0.08)');
+			    gradDown.addColorStop(1,    'rgba(240, 75, 75, 0.20)');
+			    ctx.fillStyle = gradDown;
+			    ctx.fillRect(left, y100, width, (top + height) - y100);
+
 			    ctx.save();
-			    ctx.setLineDash([4,4]);
-			    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+			    ctx.setLineDash([4, 4]);
+			    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
 			    ctx.lineWidth = 1;
 			    ctx.beginPath();
 			    ctx.moveTo(left, y100);
@@ -762,7 +772,7 @@ html, body {
 								 if (!state.plot || !card.classList.contains('expanded')) return;
 								 const body = card.querySelector('.ip-chart-body');
 								 const w = body.clientWidth - 16;
-								 if (w > 0) state.plot.setSize({ width: w, height: CHART_H });
+								 if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
 							     });
 							 });
 
