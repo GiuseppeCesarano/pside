@@ -82,6 +82,9 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) !
         }
     }
 
+    const debug_info_section = @intFromEnum(std.debug.Dwarf.Section.Id.debug_info);
+    if (dwarf.sections[debug_info_section] == null) return bail;
+
     std.debug.Dwarf.open(&dwarf, allocator, endian) catch return bail;
 
     return .{ .dwarf = dwarf, .mmap = mmap, .text_vaddr = text_vaddr, .endian = endian };

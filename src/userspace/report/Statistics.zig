@@ -8,6 +8,7 @@ const DebugInfo = @import("DebugInfo.zig");
 const Server = @import("Server.zig");
 const Point = Server.Point;
 const IpPoints = Server.IpSeries;
+const CollapsedIpMap = Server.CollapsedIpMap;
 
 const bootstrap_iterations = 10_000;
 const confidence_interval_low: usize = @intFromFloat(bootstrap_iterations * 0.05);
@@ -15,9 +16,8 @@ const confidence_interval_high: usize = @intFromFloat(bootstrap_iterations * 0.9
 
 pub fn computeSection(
     allocator: std.mem.Allocator,
-    ip_map: *const ThroughputIpMap,
+    ip_map: *const CollapsedIpMap,
     rng: std.Random,
-    debug_info: *DebugInfo,
 ) ![]IpPoints {
     var section = try std.ArrayList(IpPoints).initCapacity(allocator, 10);
     errdefer {
@@ -25,15 +25,27 @@ pub fn computeSection(
         section.deinit(allocator);
     }
 
-    var ip_it = ip_map.iterator();
-    while (ip_it.next()) |entry| {
-        const location = try debug_info.resolve(allocator, entry.key_ptr.*);
+    var it = ip_map.iterator();
+    while (it.next()) |entry| {
+        const location = try dupeLocation(allocator, entry.key_ptr.*);
         errdefer location.deinit(allocator);
 
         try section.append(allocator, try computeIpSeries(allocator, location, entry.value_ptr.items, rng));
     }
 
     return section.toOwnedSlice(allocator);
+}
+
+fn dupeLocation(allocator: std.mem.Allocator, loc: DebugInfo.Location) !DebugInfo.Location {
+    return switch (loc) {
+        .ip => loc,
+
+        .resolved => |r| .{ .resolved = .{
+            .function = if (r.function) |f| try allocator.dupe(u8, f) else null,
+            .file = if (r.file) |f| try allocator.dupe(u8, f) else null,
+            .line = r.line,
+        } },
+    };
 }
 
 fn computeIpSeries(

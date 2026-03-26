@@ -176,7 +176,19 @@ fn serveSection(this: *Server, allocator: std.mem.Allocator, request: *http.Serv
         return;
     };
 
-    const series = try Statistics.computeSection(allocator, ip_map, this.prng.random(), &this.debug_info);
+    var collapsed = try collapseByLocation(allocator, ip_map, &this.debug_info);
+    defer {
+        var it = collapsed.iterator();
+
+        while (it.next()) |entry| {
+            entry.key_ptr.deinit(allocator);
+            entry.value_ptr.deinit(allocator);
+        }
+
+        collapsed.deinit(allocator);
+    }
+
+    const series = try Statistics.computeSection(allocator, &collapsed, this.prng.random());
     defer {
         for (series) |s| s.deinit(allocator);
         allocator.free(series);
@@ -189,6 +201,74 @@ fn serveSection(this: *Server, allocator: std.mem.Allocator, request: *http.Serv
         .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
     });
 }
+
+pub const CollapsedIpMap = std.ArrayHashMapUnmanaged(
+    DebugInfo.Location,
+    std.ArrayListUnmanaged(OutputFileParserResult.ThroughputNoIP),
+    LocationContext,
+    true,
+);
+
+fn collapseByLocation(
+    allocator: std.mem.Allocator,
+    ip_map: *const OutputFileParserResult.ThroughputIpMap,
+    debug_info: *DebugInfo,
+) !CollapsedIpMap {
+    var out: CollapsedIpMap = .empty;
+    errdefer {
+        var it = out.iterator();
+        while (it.next()) |entry| {
+            entry.key_ptr.deinit(allocator);
+            entry.value_ptr.deinit(allocator);
+        }
+
+        out.deinit(allocator);
+    }
+
+    var ip_it = ip_map.iterator();
+    while (ip_it.next()) |ip_entry| {
+        const loc = try debug_info.resolve(allocator, ip_entry.key_ptr.*);
+
+        const slot = try out.getOrPut(allocator, loc);
+        if (slot.found_existing) loc.deinit(allocator) else slot.value_ptr.* = .empty;
+        try slot.value_ptr.appendSlice(allocator, ip_entry.value_ptr.items);
+    }
+
+    return out;
+}
+
+const LocationContext = struct {
+    pub fn hash(_: LocationContext, loc: DebugInfo.Location) u32 {
+        var hasher = std.hash.Wyhash.init(0);
+
+        switch (loc) {
+            .resolved => |r| {
+                hasher.update(r.file orelse "");
+                hasher.update(std.mem.asBytes(&r.line));
+            },
+
+            .ip => |ip| hasher.update(std.mem.asBytes(&ip)),
+        }
+
+        return @truncate(hasher.final());
+    }
+
+    pub fn eql(_: LocationContext, a: DebugInfo.Location, b: DebugInfo.Location, _: usize) bool {
+        return switch (a) {
+            .resolved => |ar| switch (b) {
+                .resolved => |br| ar.line == br.line and
+                    std.mem.eql(u8, ar.file orelse "", br.file orelse ""),
+
+                .ip => false,
+            },
+
+            .ip => |ai| switch (b) {
+                .ip => |bi| ai == bi,
+                .resolved => false,
+            },
+        };
+    }
+};
 
 fn serveFile(
     this: *const Server,
