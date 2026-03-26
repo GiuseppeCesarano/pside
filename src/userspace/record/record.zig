@@ -11,6 +11,7 @@ const TracedProcess = @import("TracedProcess.zig");
 
 // Needs to be global so we can kill it inside SIGINT handler
 var global_traced_process: ?TracedProcess = null;
+var stopped: std.atomic.Value(bool) = .init(false);
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
     const parsed_options = options.parse(struct {
@@ -46,7 +47,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
 
-    for (0..parsed_options.flags.n) |i| {
+    var i: usize = 0;
+    while (i < parsed_options.flags.n and !stopped.load(.monotonic)) : (i += 1) {
         std.log.info("Run {}/{}", .{ i + 1, parsed_options.flags.n });
 
         global_traced_process = try .spawn(user_program, io);
@@ -81,7 +83,7 @@ fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const
 fn setIntHandler() void {
     const sa = linux.Sigaction{
         .flags = 0,
-        .handler = .{ .handler = removeModuleOnSig },
+        .handler = .{ .handler = stop },
         .mask = linux.sigemptyset(),
     };
     if (linux.errno(linux.sigaction(.INT, &sa, null)) != .SUCCESS)
@@ -94,8 +96,11 @@ fn setIntHandler() void {
         , .{KernelInterface.name});
 }
 
-fn removeModuleOnSig(sig: linux.SIG) callconv(.c) void {
-    if (sig == .INT) if (global_traced_process) |*t| t.kill() catch {};
+fn stop(sig: linux.SIG) callconv(.c) void {
+    if (sig == .INT) {
+        if (global_traced_process) |*t| t.kill() catch {};
+        stopped.store(true, .monotonic);
+    }
 }
 
 fn getCallingUser(env: std.process.Environ) !?[2]u32 {
