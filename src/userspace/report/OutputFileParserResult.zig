@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const serialization = @import("serialization");
 
 const ParseResult = @This();

@@ -745,36 +745,36 @@ html, body {
 		const pts = reverse ? [...points].reverse() : points;
 		ctx.lineTo(pts[0].x, pts[0].y);
 		for (let i = 0; i < pts.length - 1; i++) {
-					 const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
-					 p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
-					 for (let t = .1; t <= 1; t += .1) {
-					 const t2=t*t, t3=t2*t;
-					 ctx.lineTo(
-					 .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-					 .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
-					 );
-					 }
-					 }
-					 }
+		    const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
+			p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
+		    for (let t = .1; t <= 1; t += .1) {
+			const t2=t*t, t3=t2*t;
+			ctx.lineTo(
+			    .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+			    .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+			);
+		    }
+		}
+	    }
 
-					 function showEmpty(msg, loading = false) {
-					 const emptyEl  = document.getElementById('empty-state');
-					 const scrollEl = document.getElementById('charts-scroll');
-					 scrollEl.style.display = 'none';
-					 emptyEl.classList.remove('hidden');
-					 emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
-					 document.getElementById('empty-msg').innerHTML =
-					 loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
-							 }
+	    function showEmpty(msg, loading = false) {
+		const emptyEl  = document.getElementById('empty-state');
+		const scrollEl = document.getElementById('charts-scroll');
+		scrollEl.style.display = 'none';
+		emptyEl.classList.remove('hidden');
+		emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
+		document.getElementById('empty-msg').innerHTML =
+		    loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
+	    }
 
-							 window.addEventListener('resize', () => {
-							     cardState.forEach((state, card) => {
-								 if (!state.plot || !card.classList.contains('expanded')) return;
-								 const body = card.querySelector('.ip-chart-body');
-								 const w = body.clientWidth - 16;
-								 if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
-							     });
-							 });
+	    window.addEventListener('resize', () => {
+		cardState.forEach((state, card) => {
+		    if (!state.plot || !card.classList.contains('expanded')) return;
+		    const body = card.querySelector('.ip-chart-body');
+		    const w = body.clientWidth - 16;
+		    if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
+		});
+	    });
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');

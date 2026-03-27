@@ -1,6 +1,7 @@
 const std = @import("std");
-const serialization = @import("serialization");
+
 const computeHash = @import("hash").computeHashfromFile;
+const serialization = @import("serialization");
 
 const OutputFile = @This();
 
