@@ -16,20 +16,15 @@ buffer_end: std.atomic.Value(usize),
 
 completion: kernel.Completion,
 
-pub fn init() !DiskWriter {
-    const buffer = try allocator.alloc(u8, std.heap.page_size_min * 6);
-    errdefer allocator.free(buffer);
-
-    return .{
-        .buffer = buffer,
-        .buffer_begin = .init(0),
-        .buffer_end = .init(0),
-        .file_offset = 0,
-        .thread = null,
-        .file = null,
-        .completion = undefined,
-    };
-}
+pub const empty: DiskWriter = .{
+    .buffer = &.{},
+    .buffer_begin = .init(0),
+    .buffer_end = .init(0),
+    .file_offset = 0,
+    .thread = null,
+    .file = null,
+    .completion = undefined,
+};
 
 pub fn deinit(this: *DiskWriter) void {
     if (this.thread == null) return;
@@ -39,9 +34,10 @@ pub fn deinit(this: *DiskWriter) void {
     allocator.free(this.buffer);
 }
 
-pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) void {
+pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
     if (this.file != null) return;
 
+    this.buffer = try allocator.alloc(u8, std.heap.page_size_min * 6);
     this.completion.init(); // init before thread spawns
     this.file = .get(fd);
     this.file_offset = this.file.?.size();

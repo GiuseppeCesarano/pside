@@ -58,14 +58,18 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 
         .profiler_thread = null,
         .sampler = null,
-        .disk_writer = try .init(),
+        .disk_writer = .empty,
     };
 }
 
 pub fn deinit(this: *CausalEngine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
+
     this.stop();
+
+    this.disk_writer.deinit();
     this.delay_pool.deinit();
+
     const clocks_len = this.virtual_clocks.pairs.len;
     this.virtual_clocks.deinit(if (clocks_len == clocks_starting_len) allocator else atomic_allocator);
 }
@@ -75,7 +79,7 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
 
     this.vma_ranges = try .snapshot(task, vma_name);
 
-    this.disk_writer.start(fd);
+    try this.disk_writer.start(fd);
     try this.disk_writer.push(serialization.SectionHeader{ .kind = .throughput });
     try this.disk_writer.pushBytes(vma_name);
     try this.disk_writer.push(@as(u8, 0));
@@ -129,23 +133,18 @@ pub fn stop(this: *CausalEngine) void {
     kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
     kernel.tracepoint.sync();
 
-    this.disk_writer.deinit();
-    this.disk_writer = DiskWriter.init() catch unreachable;
     this.vma_ranges.deinit();
     this.vma_ranges = .empty;
 
     this.virtual_clocks.clear();
     this.target_ip.store(0, .monotonic);
-    this.vma_begin.store(0, .monotonic);
-    this.profiled_pid.store(0, .monotonic);
     this.error_has_occurred.store(false, .monotonic);
-    this.experiment_duration = 45 * std.time.us_per_ms;
 }
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
-    while (!kernel.Thread.shouldThisStop()) {
+    while (!kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic)) {
         const speedup_percent = this.setExperimentParameters();
 
         const delay_per_tick = this.delay_per_tick.load(.monotonic);
@@ -169,7 +168,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const vma_begin = this.vma_begin.load(.monotonic);
         const target_ip = this.target_ip.load(.monotonic);
 
-        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.swap(false, .monotonic) or target_ip == 0 or target_ip < vma_begin) {
+        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic) or target_ip == 0 or target_ip < vma_begin) {
             @branchHint(.unlikely);
 
             kernel.preempt.disable();
@@ -253,17 +252,13 @@ fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, va
 
 fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
     const time = lag * this.delay_per_tick.load(.monotonic);
-    this.delay_pool.delay(task, time) catch {
-        this.abort("Could not apply delay");
-        return;
-    };
+    this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
 }
 
 fn abort(this: *CausalEngine, s: []const u8) void {
     @branchHint(.cold);
     std.log.err("{s}", .{s});
     this.error_has_occurred.store(true, .monotonic);
-    this.deinit();
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -297,7 +292,30 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch return; // TODO: allocate
+    const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch blk: {
+        const clocks, const bits = this.virtual_clocks.grow(atomic_allocator) catch {
+            this.abort("Grow in fork failed");
+            return;
+        };
+
+        const l = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch {
+            this.abort("Could not fork afther grow");
+            return;
+        };
+
+        // Currently they both call kfree so this if block is useless for now.
+        // This is there just for consistency
+        if (clocks.len == clocks_starting_len) {
+            allocator.free(clocks);
+            allocator.free(bits);
+        } else {
+            atomic_allocator.free(clocks);
+            atomic_allocator.free(bits);
+        }
+
+        break :blk l;
+    };
+
     child.incrementReferences();
 
     this.applyDelay(parent, lag);

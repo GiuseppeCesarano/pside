@@ -551,7 +551,7 @@ pub const Completion = extern struct {
 pub const File = opaque {
     extern fn c_fget(linux.fd_t) *File;
     pub fn get(fd: linux.fd_t) *File {
-        return c_fget(fd);
+        return c_fget(fd); // TODO: fill errors.
     }
 
     extern fn c_fput(*File) void;
