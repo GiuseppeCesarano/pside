@@ -704,14 +704,12 @@ html, body {
 			    ctx.fillRect(left, y100, width, (top + height) - y100);
 
 			    ctx.save();
-			    ctx.setLineDash([4, 4]);
-			    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-			    ctx.lineWidth = 1;
+			    ctx.strokeStyle = 'rgba(255,255,255,0.70)';
+			    ctx.lineWidth = 1.5;
 			    ctx.beginPath();
 			    ctx.moveTo(left, y100);
 			    ctx.lineTo(left + width, y100);
 			    ctx.stroke();
-			    ctx.setLineDash([]);
 			    ctx.restore();
 			}],
 			draw: [u => {
