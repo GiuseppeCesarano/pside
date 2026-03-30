@@ -8,18 +8,22 @@ file: std.Io.File,
 
 pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, owner: ?[2]u32) !OutputFile {
     const file_name = std.fs.path.basename(program_path);
+
     const out_name = try std.mem.concat(allocator, u8, &.{ file_name, ".pside" });
+    defer allocator.free(out_name);
+
+    const full_path = try std.Io.Dir.cwd().realPathFileAlloc(io, program_path, allocator);
+    defer allocator.free(full_path);
 
     const program_hash: [32]u8 = @splat(0); //TODO: actually compute binary's hash
 
-    defer allocator.free(out_name);
     std.log.info("{s}", .{out_name});
 
     return .{ .file = if (std.Io.Dir.cwd().openFile(io, out_name, .{ .mode = .read_write })) |f| blk: {
         errdefer f.close(io);
         try validate(f, io, @splat(0));
         break :blk f;
-    } else |_| try create(io, out_name, owner, program_path, program_hash) };
+    } else |_| try create(io, out_name, owner, full_path, program_hash) };
 }
 
 pub fn close(this: OutputFile, io: std.Io) void {

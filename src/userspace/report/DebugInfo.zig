@@ -26,15 +26,15 @@ mmap: ?std.Io.File.MemoryMap,
 text_vaddr: u64,
 endian: std.builtin.Endian,
 
-const empty: DebugInfo = .{
+pub const empty: DebugInfo = .{
     .dwarf = null,
     .mmap = null,
     .text_vaddr = 0,
     .endian = .little,
 };
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) !DebugInfo {
-    const file = std.Io.Dir.cwd().openFile(io, binary_path, .{}) catch return empty;
+pub fn load(allocator: std.mem.Allocator, io: std.Io, absolute_binary_path: []const u8) !DebugInfo {
+    const file = std.Io.Dir.openFileAbsolute(io, absolute_binary_path, .{}) catch return empty;
     defer file.close(io);
 
     const file_len: usize = @intCast(try file.length(io));
