@@ -65,7 +65,16 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 pub fn deinit(this: *CausalEngine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
 
-    this.stop();
+    if (this.profiler_thread) |t| t.stop();
+
+    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
+    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
+    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+    kernel.tracepoint.sync();
+
+    if (this.sampler) |s| s.deinit();
+    this.vma_ranges.deinit();
 
     this.disk_writer.deinit();
     this.delay_pool.deinit();
@@ -119,27 +128,6 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
 
     this.profiler_thread = .run(profileLoop, this, "pside_loop");
-}
-
-pub fn stop(this: *CausalEngine) void {
-    if (this.profiler_thread) |t| t.stop();
-    this.profiler_thread = null;
-
-    if (this.sampler) |s| s.deinit();
-    this.sampler = null;
-
-    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
-    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
-    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
-    kernel.tracepoint.sync();
-
-    this.vma_ranges.deinit();
-    this.vma_ranges = .empty;
-
-    this.virtual_clocks.clear();
-    this.target_ip.store(0, .monotonic);
-    this.error_has_occurred.store(false, .monotonic);
 }
 
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
