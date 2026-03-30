@@ -77,6 +77,7 @@ pub fn parse(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !Pars
 
                 try appendThroughputSection(allocator, &reader, pair.value_ptr);
             },
+
             .latency => {
                 allocator.free(vma_dupe);
                 return error.UnsupportedSectionKind; // TODO

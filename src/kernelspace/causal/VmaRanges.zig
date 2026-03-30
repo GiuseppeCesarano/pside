@@ -34,8 +34,6 @@ pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
 
     std.debug.assert(allocator.resize(vma_ranges, count));
 
-    std.log.debug("{any}", .{vma_ranges[0..count]});
-
     return .{ .entries = vma_ranges[0..count] };
 }
 

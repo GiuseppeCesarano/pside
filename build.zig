@@ -27,12 +27,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const hash_mod = b.addModule("hash", .{
-        .root_source_file = b.path("src/common/hash.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const bindings_mod = b.addModule("kernel_bidings", .{
         .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
@@ -64,7 +58,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
             .{ .name = "serialization", .module = serialization_mod },
-            .{ .name = "hash", .module = hash_mod },
         },
     });
 
@@ -74,7 +67,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "serialization", .module = serialization_mod },
-            .{ .name = "hash", .module = hash_mod },
         },
     });
 
