@@ -353,6 +353,23 @@ html, body {
 .u-wrap   { background: transparent !important; }
 .u-over   { cursor: crosshair; }
 
+.chart-legend {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 6px 8px 2px;
+    font-size: 10px;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+}
+.chart-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.chart-legend-item svg { flex-shrink: 0; display: block; }
+
 .spinner {
     width: 18px; height: 18px;
     border: 2px solid var(--border2);
@@ -601,6 +618,21 @@ html, body {
 
 		const chartBody = document.createElement('div');
 		chartBody.className = 'ip-chart-body';
+
+		const legend = document.createElement('div');
+		legend.className = 'chart-legend';
+		legend.innerHTML =
+		    `<span class="chart-legend-item">` +
+		    `<svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${color}" stroke-width="2"/></svg>` +
+		    `75th percentile</span>` +
+		    `<span class="chart-legend-item">` +
+		    `<svg width="20" height="10"><rect x="0" y="1" width="20" height="8" rx="1" fill="${color}" fill-opacity="0.22"/><line x1="0" y1="1" x2="20" y2="1" stroke="${color}" stroke-opacity="0.55" stroke-width="1" stroke-dasharray="3,3"/><line x1="0" y1="9" x2="20" y2="9" stroke="${color}" stroke-opacity="0.55" stroke-width="1" stroke-dasharray="3,3"/></svg>` +
+		    `95% confidence interval</span>` +
+		    `<span class="chart-legend-item">` +
+		    `<svg width="12" height="12"><polygon points="6,1 11,11 1,11" fill="${color}" fill-opacity="0.9"/></svg>` +
+		    `singleton <span style="color:var(--text-mid);margin-left:2px">(single datapoint — low confidence)</span></span>`;
+		chartBody.appendChild(legend);
+
 		const chartEl = document.createElement('div');
 		chartEl.className = 'ip-chart';
 		chartBody.appendChild(chartEl);
@@ -673,7 +705,7 @@ html, body {
 
 			    ctx.save();
 			    ctx.setLineDash([4, 4]);
-			    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+			    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
 			    ctx.lineWidth = 1;
 			    ctx.beginPath();
 			    ctx.moveTo(left, y100);
@@ -690,14 +722,14 @@ html, body {
 			    const hiPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciHigh[i],'y',true) }));
 			    const loPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciLow[i], 'y',true) }));
 
-			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.1)`;
+			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.18)`;
 			    ctx.beginPath();
 			    drawSpline(ctx, hiPts, false);
 			    drawSpline(ctx, loPts, true);
 			    ctx.closePath();
 			    ctx.fill();
 
-			    ctx.strokeStyle = `rgba(${rv},${gv},${bv},0.28)`;
+			    ctx.strokeStyle = `rgba(${rv},${gv},${bv},0.50)`;
 			    ctx.lineWidth = 1;
 			    ctx.setLineDash([3,4]);
 			    [hiPts, loPts].forEach(pts => {
@@ -724,13 +756,13 @@ html, body {
 		    axes: [
 			{
 			    font: '10px monospace', stroke: '#5a6474',
-			    grid: { stroke: '#1a1e25', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
+			    grid: { stroke: '#3a4250', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
 			    label: 'speedup %', labelFont: '10px monospace',
 			    values: (u,v) => v.map(x => x == null ? '' : x.toFixed(0)+'%'),
 			},
 			{
 			    font: '10px monospace', stroke: '#5a6474',
-			    grid: { stroke: '#1a1e25', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
+			    grid: { stroke: '#3a4250', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
 			    label: 'throughput %', labelFont: '10px monospace',
 			    values: (u,v) => v.map(x => x == null ? '' : x.toFixed(0)+'%'),
 			    side: 1,
@@ -745,36 +777,36 @@ html, body {
 		const pts = reverse ? [...points].reverse() : points;
 		ctx.lineTo(pts[0].x, pts[0].y);
 		for (let i = 0; i < pts.length - 1; i++) {
-		    const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
-			p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
-		    for (let t = .1; t <= 1; t += .1) {
-			const t2=t*t, t3=t2*t;
-			ctx.lineTo(
-			    .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-			    .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
-			);
-		    }
-		}
-	    }
+				     const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
+				     p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
+				     for (let t = .1; t <= 1; t += .1) {
+				     const t2=t*t, t3=t2*t;
+				     ctx.lineTo(
+				     .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+				     .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+				     );
+				     }
+				     }
+				     }
 
-	    function showEmpty(msg, loading = false) {
-		const emptyEl  = document.getElementById('empty-state');
-		const scrollEl = document.getElementById('charts-scroll');
-		scrollEl.style.display = 'none';
-		emptyEl.classList.remove('hidden');
-		emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
-		document.getElementById('empty-msg').innerHTML =
-		    loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
-	    }
+				     function showEmpty(msg, loading = false) {
+				     const emptyEl  = document.getElementById('empty-state');
+				     const scrollEl = document.getElementById('charts-scroll');
+				     scrollEl.style.display = 'none';
+				     emptyEl.classList.remove('hidden');
+				     emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
+				     document.getElementById('empty-msg').innerHTML =
+				     loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
+						     }
 
-	    window.addEventListener('resize', () => {
-		cardState.forEach((state, card) => {
-		    if (!state.plot || !card.classList.contains('expanded')) return;
-		    const body = card.querySelector('.ip-chart-body');
-		    const w = body.clientWidth - 16;
-		    if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
-		});
-	    });
+						     window.addEventListener('resize', () => {
+							 cardState.forEach((state, card) => {
+							     if (!state.plot || !card.classList.contains('expanded')) return;
+							     const body = card.querySelector('.ip-chart-body');
+							     const w = body.clientWidth - 16;
+							     if (w > 0) state.plot.setSize({ width: w, height: chartHeight() });
+							 });
+						     });
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
