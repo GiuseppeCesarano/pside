@@ -63,7 +63,7 @@ pub const ThreadClocks = struct {
 
         const bit_size = @bitSizeOf(Key);
         const Unsigned = std.meta.Int(.unsigned, bit_size);
-        const collided_bit: Unsigned = @bitCast(@as(Unsigned, 1 << bit_size - 1));
+        const collided_bit: Unsigned = 1;
 
         pub const empty: Key = .{ .data = 0 };
         pub const empty_collided: Key = @bitCast(collided_bit);
@@ -274,7 +274,7 @@ pub const ThreadClocks = struct {
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
     /// Returns the delay amounts those threads should sleep
-    pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
+    pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key, is_waker_dead: bool) [2]Ticks {
         const waker_hash = waker.hash();
         const wakee_hash = wakee.hash();
 
@@ -284,30 +284,33 @@ pub const ThreadClocks = struct {
         const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash);
         const wakee_value = wakee_slot.value.load(.monotonic);
 
-        // Handle spurious wakeups: if the scheduler selects an instrumented
-        // thread to run after another thread triggered preemption, but
-        // the target isn't actually asleep, return early.
         if (!wakee_value.is_sleeping) return .{ 0, 0 };
 
         const waker_slot = this.getSlotUnsafe(waker, waker_hash);
-
         const waker_ticks = waker_slot.value.load(.monotonic).ticks;
 
-        // calling tick() while blocked is legal behavior, a sleeping thread may
-        // still advance it's clock if the sleeping line is actually the one
-        // selected for the experiment. In such case, it's ticks may be > than
-        // the master's value when going to sleep.
         const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
         const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
         const master: u31 = @truncate(this.master.load(.acquire));
 
-        waker_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
         wakee_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
 
         const waker_lag = master - waker_ticks;
 
+        if (is_waker_dead) this.removeSlotUnsafe(waker_slot) else waker_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+
         return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
+    }
+
+    fn removeSlotUnsafe(this: *ThreadClocks, slot: *Pair) void {
+        const index = this.getIndexUnsafe(slot);
+
+        const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
+        const operand = ~(@as(usize, 1) << @truncate(index % @bitSizeOf(usize)));
+        _ = bitmask_bucket.fetchAnd(operand, .monotonic);
+
+        _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
     }
 
     /// Tracks a thread forking.
@@ -333,8 +336,7 @@ pub const ThreadClocks = struct {
         return master - parent_ticks;
     }
 
-    /// Returns the delay amount that the thread should sleep
-    pub fn remove(this: *ThreadClocks, key: Key) Ticks {
+    pub fn getLag(this: *ThreadClocks, key: Key) Ticks {
         const key_hash = key.hash();
 
         this.ref.increment();
@@ -343,13 +345,6 @@ pub const ThreadClocks = struct {
         const slot = this.getSlotUnsafe(key, key_hash);
         const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
-
-        const index = this.getIndexUnsafe(slot);
-        const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
-        const operand = ~(@as(usize, 1) << @truncate(index % @bitSizeOf(usize)));
-        _ = bitmask_bucket.fetchAnd(operand, .monotonic);
-
-        _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
 
         return master - ticks;
     }

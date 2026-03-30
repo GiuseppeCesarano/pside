@@ -240,9 +240,9 @@ fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value:
 }
 
 fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
-    // We force collision bit since kernel pointer live in 0xffff8...
-    const task: *kernel.Task = @ptrFromInt(key.withCollisionBit().data);
-    if (!task.isRunning()) return;
+    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
+
+    if (key.isEql(.empty) or !task.isRunning()) return;
 
     const lag = master - value.ticks;
     value.ticks = master;
@@ -334,12 +334,12 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
-    if (woke.pid() != profiled_pid or woke.isRunning()) return;
-
     const current = kernel.Task.current();
-    if (current.pid() == profiled_pid) {
-        const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
-        this.applyDelay(current, waker_lag);
+
+    const is_current_dead = current.isDead();
+    if (woke.pid() == profiled_pid and !woke.isRunning() and current.pid() == profiled_pid) {
+        const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke), is_current_dead);
+        if (!is_current_dead) this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);
     }
 }
@@ -348,8 +348,5 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    this.delay_pool.remove(task, this) catch {
-        this.abort("Error while registering task remove");
-        return;
-    };
+    this.applyDelay(task, this.virtual_clocks.getLag(.fromPtr(task)));
 }

@@ -105,35 +105,3 @@ fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const prev = this.users_count.fetchSub(1, .monotonic);
     if (prev == 1) this.completion.signal();
 }
-
-pub fn remove(this: *DelayPool, task: *kernel.Task, engine: *CausalEngine) !void {
-    _ = this.users_count.fetchAdd(1, .monotonic);
-    errdefer _ = this.users_count.fetchSub(1, .monotonic);
-
-    const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
-
-    slot.work.func = executeRemove;
-    slot.data.store(.{ .u = .{ .engine = @intFromPtr(engine) } }, .release);
-    try task.addWork(&slot.work, .@"resume");
-}
-
-fn executeRemove(work: *kernel.Task.Work) callconv(.c) void {
-    const slot: *DelayWork = @fieldParentPtr("work", work);
-
-    const engine: *CausalEngine = @ptrFromInt(slot.data.load(.acquire).u.engine);
-    const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
-
-    const task = kernel.Task.current();
-    const lag = engine.virtual_clocks.remove(.fromPtr(task));
-    const total_delay = lag * engine.delay_per_tick.load(.monotonic);
-
-    task.decrementReferences();
-
-    kernel.time.sleep.us(total_delay);
-
-    slot.work.func = executeDelay;
-    this.pools.freeEntry(slot);
-
-    const prev = this.users_count.fetchSub(1, .monotonic);
-    if (prev == 1) this.completion.signal();
-}
