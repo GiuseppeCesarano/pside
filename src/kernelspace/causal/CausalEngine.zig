@@ -51,7 +51,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
         .vma_begin = .init(0),
         .delay_per_tick = .init(0),
 
-        .experiment_duration = 45 * std.time.us_per_ms,
+        .experiment_duration = 0,
         .progress = progress_ptr,
         .virtual_clocks = try .init(allocator, clocks_starting_len),
         .delay_pool = try .init(),
@@ -77,6 +77,7 @@ pub fn deinit(this: *CausalEngine) void {
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
     const task = kernel.Task.fromTid(pid);
 
+    this.experiment_duration = 45 * std.time.us_per_ms;
     this.vma_ranges = try .snapshot(task, vma_name);
 
     try this.disk_writer.start(fd);

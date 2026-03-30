@@ -42,7 +42,9 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const vma_name = resolveVmaName(parsed_options.flags.l, user_program.path);
 
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
-    defer if (future_patch_addresses.cancel(io)) |addresses| allocator.free(addresses) else |_| {};
+
+    const patch_addresses = try future_patch_addresses.await(io);
+    defer allocator.free(patch_addresses);
 
     const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
     defer output_file.close(io);
@@ -53,18 +55,22 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
 
         global_traced_process = try .spawn(user_program, io);
         const traced_process = &global_traced_process.?;
-        errdefer traced_process.kill() catch std.log.err("Another error has occurred and could not kill the user program", .{});
+
+        errdefer traced_process.kill() catch std.log.err("Failed to kill process after error", .{});
 
         try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
 
-        for (try future_patch_addresses.await(io)) |address|
-            if (address != 0) try traced_process.patchProgressPoint(address);
+        for (patch_addresses) |address| if (address != 0) try traced_process.patchProgressPoint(address);
 
         try traced_process.start();
 
-        _ = traced_process.wait() catch std.log.warn("Traced process died, experiment output could be incomplete or bad", .{});
+        _ = traced_process.wait() catch |err| std.log.warn("Traced process {d} exited with error: {s}", .{ traced_process.pid, @errorName(err) });
+
         try module.stop();
+
         global_traced_process = null;
+
+        try std.Io.sleep(io, .fromMilliseconds(1), .real);
     }
 }
 
