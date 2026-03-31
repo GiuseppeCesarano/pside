@@ -8,8 +8,8 @@ pub const Location = union(enum) {
     },
     ip: u64,
 
-    pub fn deinit(self: Location, allocator: std.mem.Allocator) void {
-        switch (self) {
+    pub fn deinit(this: Location, allocator: std.mem.Allocator) void {
+        switch (this) {
             .resolved => |r| {
                 if (r.function) |f| allocator.free(f);
                 if (r.file) |f| allocator.free(f);
@@ -85,27 +85,36 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, absolute_binary_path: []co
     const debug_info_section = @intFromEnum(std.debug.Dwarf.Section.Id.debug_info);
     if (dwarf.sections[debug_info_section] == null) return bail;
 
-    std.debug.Dwarf.open(&dwarf, allocator, endian) catch return bail;
+    dwarf.open(allocator, endian) catch {
+        dwarf.deinit(allocator);
+        return bail;
+    };
 
     return .{ .dwarf = dwarf, .mmap = mmap, .text_vaddr = text_vaddr, .endian = endian };
 }
 
-pub fn deinit(self: *DebugInfo, allocator: std.mem.Allocator, io: std.Io) void {
-    if (self.dwarf) |*d| d.deinit(allocator);
-    if (self.mmap) |*m| m.destroy(io);
+pub fn deinit(this: *DebugInfo, allocator: std.mem.Allocator, io: std.Io) void {
+    if (this.dwarf) |*d| d.deinit(allocator);
+    if (this.mmap) |*m| m.destroy(io);
 }
 
-pub fn resolve(self: *DebugInfo, allocator: std.mem.Allocator, relative_ip: u64) !Location {
-    const dwarf = &(self.dwarf orelse return .{ .ip = relative_ip });
-    const addr = relative_ip + self.text_vaddr;
+pub fn resolve(this: *DebugInfo, allocator: std.mem.Allocator, relative_ip: u64) !Location {
+    const dwarf = &(this.dwarf orelse return .{ .ip = relative_ip });
+    const addr = relative_ip + this.text_vaddr;
 
-    const symbol = dwarf.getSymbol(allocator, self.endian, addr) catch
+    const symbol = dwarf.getSymbol(allocator, this.endian, addr) catch
         return .{ .ip = relative_ip };
 
     const src = symbol.source_location;
+
+    const file = if (src) |s| s.file_name else null;
+    errdefer if (file) |f| allocator.free(f);
+
+    const function = if (symbol.name) |n| try allocator.dupe(u8, n) else null;
+
     return .{ .resolved = .{
-        .function = if (symbol.name) |n| try allocator.dupe(u8, n) else null,
-        .file = if (src) |s| s.file_name else null,
+        .function = function,
+        .file = file,
         .line = if (src) |s| @intCast(s.line) else 0,
     } };
 }

@@ -63,6 +63,7 @@ pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
     this.stop(io);
     this.server.deinit(io);
     allocator.free(this.share_path);
+    this.debug_info.deinit(allocator, io);
 }
 
 pub fn port(this: Server) u16 {
