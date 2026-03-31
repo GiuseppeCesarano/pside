@@ -10,7 +10,7 @@ const Point = Server.Point;
 const IpPoints = Server.IpSeries;
 const CollapsedIpMap = Server.CollapsedIpMap;
 
-const bootstrap_iterations = 10_000;
+const bootstrap_iterations = 1_000;
 const confidence_interval_low: usize = @intFromFloat(bootstrap_iterations * 0.05);
 const confidence_interval_high: usize = @intFromFloat(bootstrap_iterations * 0.95);
 
