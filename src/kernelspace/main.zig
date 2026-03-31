@@ -7,6 +7,7 @@ const CausalEngine = @import("causal/CausalEngine.zig");
 
 const name = "pside";
 
+export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL".*;
 
 pub const std_options: std.Options = .{
