@@ -676,7 +676,7 @@ html, body {
 		    cursor: { show: true, points: { show: false } },
 		    scales: {
 			x: { time: false },
-			y: { range: (u, mn, mx) => [Math.min(mn - 5, 0), Math.max(mx + 10, 110)] },
+			y: { range: (u, mn, mx) => [0, Math.max(mx + 10, 200)] },
 		    },
 		    series: [
 			{},
