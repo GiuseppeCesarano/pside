@@ -27,13 +27,10 @@ export fn init_module() linksection(".init.text") c_int {
 
     ctl.create(name, ioctlHandler) catch return 1;
 
-    engine = CausalEngine.init(progress_points_ptr) catch return 1;
-
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    engine.deinit();
     progress.remove();
     ctl.remove();
 }
@@ -46,14 +43,14 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
 
     switch (@as(communications.Commands, @enumFromInt(command))) {
         .start_profiler => {
+            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
+            engine = CausalEngine.init(progress_points_ptr) catch return 1;
+
             const raw = data.start.vma_name[0..data.start.vma_name_len :0];
             engine.profilePid(data.start.pid, data.start.output_fd, raw) catch return code(.IO);
         },
-        .stop_profiler => {
-            engine.deinit();
-            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
-            engine = CausalEngine.init(progress_points_ptr) catch return 1;
-        },
+
+        .stop_profiler => engine.deinit(),
 
         else => return code(.INVAL),
     }
