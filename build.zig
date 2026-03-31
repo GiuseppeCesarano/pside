@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod, serialization_mod }, check), is_release_bundle);
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod, serialization_mod }, check));
 
     const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
         " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
@@ -151,7 +151,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .link_libc = false,
             .link_libcpp = false,
             .single_threaded = true,
-            .strip = true,
+            .strip = false,
             .unwind_tables = .none,
             .code_model = .kernel,
             .stack_protector = false,
@@ -176,7 +176,7 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     return b.addObject(object_options);
 }
 
-fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile, should_strip: bool) *std.Build.Step.WriteFile {
+fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
 
     const write_files = b.addWriteFiles();
@@ -184,8 +184,16 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
     _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
     _ = write_files.add(cmd_name, "");
 
-    // We don't want users to run make in random folders, so we encapsulate the makefile in this build script
-    const strip_cmd = if (should_strip) "\n\tstrip --strip-debug pside.ko" else "";
+    const strip_cmd = "\n\tstrip --strip-debug" ++
+        " --remove-section=.BTF" ++
+        " --remove-section=.BTF.ext" ++
+        " --remove-section=.eh_frame" ++
+        " --remove-section=.eh_frame_hdr" ++
+        " --remove-section=.gcc_except_table" ++
+        " --remove-section=.comment" ++
+        " --remove-section=.note.GNU-stack" ++
+        " pside.ko";
+
     const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
 
     _ = write_files.add("Makefile", b.fmt(
