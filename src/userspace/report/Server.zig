@@ -46,7 +46,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, results: *const OutputFilePars
     std.Io.random(io, std.mem.asBytes(&seed));
 
     const debug_info = try DebugInfo.load(allocator, io, results.binary_path);
-    if (std.mem.eql(u8, std.mem.asBytes(&debug_info), std.mem.asBytes(&DebugInfo.empty)))
+    if (debug_info.dwarf == null)
         std.log.warn("Could not find debugging info at: {s}", .{results.binary_path});
 
     return .{

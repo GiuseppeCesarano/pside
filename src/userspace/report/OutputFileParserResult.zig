@@ -46,7 +46,7 @@ pub fn parse(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !Pars
     const buffer = try allocator.alignedAlloc(u8, .fromByteUnits(page_size), 2 * MiB);
     defer allocator.free(buffer);
 
-    const file = try openFile(path);
+    const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
 
     var reader = file.reader(io, buffer);
@@ -84,42 +84,6 @@ pub fn parse(allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !Pars
             },
         }
     } else |err| return if (err == std.Io.Reader.Error.EndOfStream) result else err;
-}
-
-fn openFile(path: [:0]const u8) !std.Io.File {
-    const rc = std.os.linux.open(path.ptr, .{ .DIRECT = true }, 0);
-
-    return switch (std.os.linux.errno(rc)) {
-        .SUCCESS => std.Io.File{ .handle = @intCast(rc), .flags = .{ .nonblocking = false } },
-        else => |e| {
-            switch (e) {
-                .INVAL => return error.BadPathName,
-                .ACCES => return error.AccessDenied,
-                .FBIG => return error.FileTooBig,
-                .OVERFLOW => return error.FileTooBig,
-                .ISDIR => return error.IsDir,
-                .LOOP => return error.SymLinkLoop,
-                .MFILE => return error.ProcessFdQuotaExceeded,
-                .NAMETOOLONG => return error.NameTooLong,
-                .NFILE => return error.SystemFdQuotaExceeded,
-                .NODEV => return error.NoDevice,
-                .NOENT => return error.FileNotFound,
-                .SRCH => return error.FileNotFound,
-                .NOMEM => return error.SystemResources,
-                .NOSPC => return error.NoSpaceLeft,
-                .NOTDIR => return error.NotDir,
-                .PERM => return error.PermissionDenied,
-                .EXIST => return error.PathAlreadyExists,
-                .BUSY => return error.DeviceBusy,
-                .OPNOTSUPP => return error.FileLocksUnsupported,
-                .AGAIN => return error.WouldBlock,
-                .TXTBSY => return error.FileBusy,
-                .NXIO => return error.NoDevice,
-                .ILSEQ => return error.BadPathName,
-                else => |err| return std.posix.unexpectedErrno(err),
-            }
-        },
-    };
 }
 
 fn deinitMaps(throughput_map: *ThroughputMap, latency_map: *LatencyMap, allocator: std.mem.Allocator) void {

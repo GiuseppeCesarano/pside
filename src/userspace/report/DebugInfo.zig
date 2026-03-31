@@ -107,7 +107,7 @@ pub fn resolve(this: *DebugInfo, allocator: std.mem.Allocator, relative_ip: u64)
 
     const src = symbol.source_location;
 
-    const file = if (src) |s| s.file_name else null;
+    const file = if (src) |s| try allocator.dupe(u8, s.file_name) else null;
     errdefer if (file) |f| allocator.free(f);
 
     const function = if (symbol.name) |n| try allocator.dupe(u8, n) else null;
