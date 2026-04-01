@@ -26,15 +26,26 @@ elf_entrypoint: usize,
 old_entry_ins: usize,
 
 pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
-    const rc = linux.fork();
-    const child_pid: linux.pid_t = switch (linux.errno(rc)) {
-        .SUCCESS => @intCast(rc),
+    const fork_rc = linux.fork();
+    const child_pid: linux.pid_t = switch (linux.errno(fork_rc)) {
+        .SUCCESS => @intCast(fork_rc),
         .AGAIN => return error.SystemResources,
         .NOMEM => return error.SystemResources,
         else => return error.Unexpected,
     };
 
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
+
+    const parm: std.os.linux.sched_param = .{ .priority = 50 };
+    const setsched_rc = linux.errno(linux.sched_setscheduler(child_pid, .{ .mode = .FIFO }, &parm));
+    switch (setsched_rc) {
+        .SUCCESS => {}, 
+        .PERM => std.log.warn("Insufficient privileges for SCHED_FIFO. Results may be noisier.", .{}),
+        .INVAL => return error.InvalidSchedulerParams, // Priority out of range for FIFO
+        .SRCH => return error.ProcessNotFound, // Child died before we could set priority
+        else => return error.Unexpected,
+    }
+
     try ptrace.waitFor(child_pid, .stop);
 
     try ptrace.setOptions(child_pid, &.{linux.PTRACE.O.TRACEEXEC});

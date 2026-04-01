@@ -251,8 +251,7 @@ fn abort(this: *CausalEngine, s: []const u8) void {
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const ctx = event.context() orelse return;
-    const this: *CausalEngine = @ptrCast(@alignCast(ctx));
+    const this: *CausalEngine = @ptrCast(@alignCast(event.context() orelse return));
 
     const ip = regs.ip;
     const target = this.target_ip.load(.monotonic);
@@ -329,6 +328,7 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
         !woke.isDead())
     {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
+
         if (!current.isDead()) this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);
     }
@@ -336,7 +336,7 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
-    if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)));
+    if (task.pid() == this.profiled_pid.load(.monotonic))
+        this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)));
 }
