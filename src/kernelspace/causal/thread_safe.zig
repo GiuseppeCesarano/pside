@@ -456,7 +456,7 @@ pub fn Pool(Type: type) type {
 
                 const target_bit = free & -%free;
                 const mask = ~target_bit;
-                free = this.free_bitmask.fetchAnd(mask, .monotonic);
+                free = this.free_bitmask.fetchAnd(mask, .acquire);
 
                 if ((free & target_bit) != 0) {
                     @branchHint(.likely);
@@ -485,7 +485,7 @@ pub fn Pool(Type: type) type {
 
             const freeing_bit = @as(usize, 1) << @truncate(position);
 
-            assert(pool.?.free_bitmask.fetchOr(freeing_bit, .monotonic) & freeing_bit == 0);
+            assert(pool.?.free_bitmask.fetchOr(freeing_bit, .release) & freeing_bit == 0);
         }
 
         pub fn appendPool(this: *@This(), new_pool: *@This()) void {
