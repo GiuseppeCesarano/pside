@@ -305,8 +305,6 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
         break :blk l;
     };
 
-    child.incrementReferences();
-
     this.applyDelay(parent, lag);
     this.applyDelay(child, lag);
 }
@@ -314,9 +312,9 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
-    if (prev.pid() != profiled_pid or prev.isRunning() or prev.isDead()) return;
 
-    this.virtual_clocks.prepareForSleep(.fromPtr(prev));
+    if (prev.pid() == profiled_pid and !prev.isRunning() and !prev.isDead())
+        this.virtual_clocks.prepareForSleep(.fromPtr(prev));
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
@@ -325,10 +323,9 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
 
     const current = kernel.Task.current();
 
-    const is_current_dead = current.isDead();
     if (woke.pid() == profiled_pid and !woke.isRunning() and current.pid() == profiled_pid) {
-        const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke), is_current_dead);
-        if (!is_current_dead) this.applyDelay(current, waker_lag);
+        const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
+        if (!current.isDead()) this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);
     }
 }
@@ -337,5 +334,5 @@ fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     if (task.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    this.applyDelay(task, this.virtual_clocks.getLag(.fromPtr(task)));
+    this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)));
 }

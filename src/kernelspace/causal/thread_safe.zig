@@ -63,6 +63,8 @@ pub const ThreadClocks = struct {
 
         const bit_size = @bitSizeOf(Key);
         const Unsigned = std.meta.Int(.unsigned, bit_size);
+        // Task pointers are always aligned so the first bit will always be 0
+        // and we can use that as collide flag
         const collided_bit: Unsigned = 1;
 
         pub const empty: Key = .{ .data = 0 };
@@ -182,9 +184,9 @@ pub const ThreadClocks = struct {
 
     /// Looks up the clock slot for a given key.
     ///
-    /// Note: A null return is only expected if the task was recently deleted (e.g., via
-    /// onSchedExit or onSchedFree). This typically happens during a race where one CPU
-    /// cleans up the task while another is mid-scheduler-event (like onSchedSwitch).
+    /// Note: A null return is only expected if the task was recently deleted ( onSchedExit).
+    /// This typically happens during a race where one CPU cleans up the task while another
+    /// is mid-scheduler-event (like onSchedSwitch).
     ///
     /// If this returns null, the caller should treat the task as having no local
     /// accumulated delay and fallback to using the Master Clock for any attributions.
@@ -250,7 +252,7 @@ pub const ThreadClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const slot = this.getSlotUnsafe(key, hash);
+        const slot = this.getSlotUnsafe(key, hash).?;
         const value = slot.value.load(.monotonic);
 
         return if (field == .ticks) value.ticks else value.master_at_sleep - value.ticks;
@@ -262,7 +264,7 @@ pub const ThreadClocks = struct {
         try this.ref.tryIncrement();
         defer this.ref.decrement();
 
-        const slot = this.getSlotUnsafe(key, hash);
+        const slot = this.getSlotUnsafe(key, hash).?;
         const value_as_ticks: *std.atomic.Value(u64) = @ptrCast(&slot.value);
 
         const ticks: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticksLsb(), .monotonic));
@@ -274,7 +276,7 @@ pub const ThreadClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const slot = this.getSlotUnsafe(key, key.hash());
+        const slot = this.getSlotUnsafe(key, key.hash()).?;
         const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
@@ -283,43 +285,55 @@ pub const ThreadClocks = struct {
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
     /// Returns the delay amounts those threads should sleep
-    pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key, is_waker_dead: bool) [2]Ticks {
+    pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
         const waker_hash = waker.hash();
         const wakee_hash = wakee.hash();
 
         this.ref.increment();
         defer this.ref.decrement();
 
-        const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash);
+        // If we do the last wake for a dying task then we don't care about lag attribution
+        // since it will not run anymore and it will make no difference in performance.
+        const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash) orelse return .{ 0, 0 };
         const wakee_value = wakee_slot.value.load(.monotonic);
 
         if (!wakee_value.is_sleeping) return .{ 0, 0 };
 
+        const master: u31 = @truncate(this.master.load(.acquire));
+
         const waker_slot = this.getSlotUnsafe(waker, waker_hash);
-        const waker_ticks = waker_slot.value.load(.monotonic).ticks;
+        const waker_ticks = if (waker_slot) |slot| slot.value.load(.monotonic).ticks else master;
 
         const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
         const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
-        const master: u31 = @truncate(this.master.load(.acquire));
-
         wakee_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
 
         const waker_lag = master - waker_ticks;
-
-        if (is_waker_dead) this.removeSlotUnsafe(waker_slot) else waker_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
-
         return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
     }
 
-    fn removeSlotUnsafe(this: *ThreadClocks, slot: *Pair) void {
+    /// Returns lag with master clock
+    pub fn remove(this: *ThreadClocks, task: Key) Ticks {
+        const task_hash = task.hash();
+
+        this.ref.increment();
+        defer this.ref.decrement();
+
+        const slot = this.getSlotUnsafe(task, task_hash).?;
         const index = this.getIndexUnsafe(slot);
+
+        const ticks = slot.value.load(.monotonic).ticks;
 
         const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
         const operand = ~(@as(usize, 1) << @truncate(index % @bitSizeOf(usize)));
         _ = bitmask_bucket.fetchAnd(operand, .monotonic);
 
         _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
+
+        const master = this.master.load(.acquire);
+        return master - ticks;
     }
 
     /// Tracks a thread forking.
@@ -331,7 +345,7 @@ pub const ThreadClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        const parent_slot = this.getSlotUnsafe(parent, parent_hash);
+        const parent_slot = this.getSlotUnsafe(parent, parent_hash).?;
         const child_slot = try this.reserveSlotUnsafe(child, child_hash);
 
         const parent_ticks = parent_slot.value.load(.monotonic).ticks;
@@ -343,19 +357,6 @@ pub const ThreadClocks = struct {
         this.publishReservedUnsafe(child, child_slot);
 
         return master - parent_ticks;
-    }
-
-    pub fn getLag(this: *ThreadClocks, key: Key) Ticks {
-        const key_hash = key.hash();
-
-        this.ref.increment();
-        defer this.ref.decrement();
-
-        const slot = this.getSlotUnsafe(key, key_hash);
-        const ticks = slot.value.load(.monotonic).ticks;
-        const master = this.master.load(.acquire);
-
-        return master - ticks;
     }
 
     pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair, []std.atomic.Value(usize) } {
@@ -552,7 +553,7 @@ test "ThreadClocks: tick and master propagation" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const key: ThreadClocks.Key = .{ .data = 1 };
+    const key: ThreadClocks.Key = .{ .data = 2 };
     try clocks.put(key, 5);
 
     try clocks.tick(key);
@@ -569,8 +570,8 @@ test "ThreadClocks: sleep and wake logic" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const waker: ThreadClocks.Key = .{ .data = 1 };
-    const wakee: ThreadClocks.Key = .{ .data = 2 };
+    const waker: ThreadClocks.Key = .{ .data = 2 };
+    const wakee: ThreadClocks.Key = .{ .data = 4 };
 
     try clocks.put(waker, 10);
     try clocks.put(wakee, 5);
@@ -597,8 +598,8 @@ test "ThreadClocks: fork" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const parent: ThreadClocks.Key = .{ .data = 1 };
-    const child: ThreadClocks.Key = .{ .data = 2 };
+    const parent: ThreadClocks.Key = .{ .data = 2 };
+    const child: ThreadClocks.Key = .{ .data = 4 };
 
     try clocks.put(parent, 50);
     clocks.master.store(100, .release);
@@ -623,7 +624,7 @@ test "ThreadClocks: collision path" {
     var keys: [min_cap / 2]ThreadClocks.Key = undefined;
     var expected: [min_cap / 2]ThreadClocks.Ticks = undefined;
     for (0..n) |i| {
-        keys[i] = ThreadClocks.Key{ .data = (@intCast(i + 1)) };
+        keys[i] = .{ .data = @intCast((i + 1) * 2) };
         expected[i] = @intCast((i + 1) * 10);
     }
 
@@ -641,8 +642,8 @@ test "ThreadClocks: Causal Mechanics" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const parent: ThreadClocks.Key = .{ .data = 1 };
-    const child: ThreadClocks.Key = .{ .data = 2 };
+    const parent: ThreadClocks.Key = .{ .data = 2 };
+    const child: ThreadClocks.Key = .{ .data = 4 };
 
     try clocks.put(parent, 10);
     clocks.master.store(50, .release);
@@ -678,7 +679,7 @@ test "ThreadClocks: concurrent stress" {
             var prng = std.Random.DefaultPrng.init(ctx.id * 0xDEAD_BEEF);
             const random = prng.random();
 
-            const key: ThreadClocks.Key = .{ .data = (@intCast(ctx.id + 1)) };
+            const key: ThreadClocks.Key = .{ .data = @intCast((ctx.id + 1) * 2) };
 
             _ = ctx.registered.fetchAdd(1, .release);
             while (ctx.registered.load(.acquire) < thread_count)
@@ -694,7 +695,7 @@ test "ThreadClocks: concurrent stress" {
                     },
 
                     .fork_and_tick => {
-                        const child_virtual_key: ThreadClocks.Key = .{ .data = @intCast((ctx.id + 1) * 10_000 + i + 1) };
+                        const child_virtual_key: ThreadClocks.Key = .{ .data = @intCast((ctx.id * ops_per_thread + i) * 2 + 100) };
                         if (ctx.clocks.fork(key, child_virtual_key)) |_| {
                             var t: usize = 0;
                             while (t < 3) : (t += 1) {
@@ -707,10 +708,10 @@ test "ThreadClocks: concurrent stress" {
         }
     };
 
-    const root: ThreadClocks.Key = .{ .data = 1 };
+    const root: ThreadClocks.Key = .{ .data = 2 };
     try clocks.put(root, 0);
     for (1..thread_count) |i| {
-        const child: ThreadClocks.Key = .{ .data = @intCast(i + 1) };
+        const child: ThreadClocks.Key = .{ .data = @intCast((i + 1) * 2) };
         _ = try clocks.fork(root, child);
     }
 
@@ -730,7 +731,7 @@ test "ThreadClocks: concurrent stress" {
     const master = clocks.master.load(.acquire);
 
     for (0..thread_count) |i| {
-        const key: ThreadClocks.Key = .{ .data = @intCast(i + 1) };
+        const key: ThreadClocks.Key = .{ .data = @intCast((i + 1) * 2) };
         try testing.expect(master >= clocks.get(key, .ticks));
     }
 
@@ -748,7 +749,7 @@ test "ThreadClocks: concurrent grow" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const root: ThreadClocks.Key = .{ .data = 1 };
+    const root: ThreadClocks.Key = .{ .data = 2 };
     try clocks.put(root, 0);
 
     const thread_count = 4;
@@ -758,8 +759,8 @@ test "ThreadClocks: concurrent grow" {
         id: usize,
 
         fn run(ctx: *@This()) void {
-            const key: ThreadClocks.Key = .{ .data = @intCast(ctx.id + 2) };
-            const root_key: ThreadClocks.Key = .{ .data = 1 };
+            const key: ThreadClocks.Key = .{ .data = @intCast((ctx.id + 2) * 2) };
+            const root_key: ThreadClocks.Key = .{ .data = 2 };
             _ = ctx.clocks.fork(root_key, key) catch return;
 
             var i: usize = 0;
@@ -801,7 +802,7 @@ test "ThreadClocks: concurrent grow" {
 
     const master = clocks.master.load(.acquire);
     for (0..thread_count) |i| {
-        const key: ThreadClocks.Key = .{ .data = @intCast(i + 2) };
+        const key: ThreadClocks.Key = .{ .data = @intCast((i + 2) * 2) };
         try testing.expect(master >= clocks.get(key, .ticks));
     }
 }
@@ -859,7 +860,7 @@ test "bitmask: popcount tracks live entry count across multiple puts and removes
     const n = 16;
     var keys: [n]ThreadClocks.Key = undefined;
     for (0..n) |i| {
-        keys[i] = ThreadClocks.Key{ .data = @intCast(i + 1) };
+        keys[i] = .{ .data = @intCast((i + 1) * 2) };
         try clocks.put(keys[i], 0);
         try testing.expectEqual(i + 1, countLiveBits(&clocks));
     }
@@ -879,8 +880,8 @@ test "bitmask: fork sets child bit without clearing parent bit" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const parent: ThreadClocks.Key = .{ .data = 1 };
-    const child: ThreadClocks.Key = .{ .data = 2 };
+    const parent: ThreadClocks.Key = .{ .data = 2 };
+    const child: ThreadClocks.Key = .{ .data = 4 };
 
     try clocks.put(parent, 10);
     clocks.master.store(10, .release); // master must be >= ticks to avoid underflow in fork
@@ -901,7 +902,7 @@ test "bitmask: grow migrates all live bits and clears none" {
     const n = 8;
     var keys: [n]ThreadClocks.Key = undefined;
     for (0..n) |i| {
-        keys[i] = ThreadClocks.Key{ .data = @intCast(i + 1) };
+        keys[i] = .{ .data = @intCast((i + 1) * 2) };
         try clocks.put(keys[i], @intCast(i * 10));
     }
 
@@ -925,7 +926,7 @@ test "bitmask: grow with partial removes — only live entries retain their bit"
     const n = 12;
     var keys: [n]ThreadClocks.Key = undefined;
     for (0..n) |i| {
-        keys[i] = ThreadClocks.Key{ .data = @intCast(i + 1) };
+        keys[i] = .{ .data = @intCast((i + 1) * 2) };
         try clocks.put(keys[i], 0);
     }
 
@@ -957,7 +958,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     const n = 8;
     var keys: [n]ThreadClocks.Key = undefined;
     for (0..n) |i| {
-        keys[i] = ThreadClocks.Key{ .data = (@intCast(i + 1)) };
+        keys[i] = .{ .data = @intCast((i + 1) * 2) };
         try clocks.put(keys[i], @intCast(i * 10));
     }
 
