@@ -180,7 +180,19 @@ pub const ThreadClocks = struct {
         return error.NoSpace;
     }
 
-    fn getSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) *Pair {
+    /// Looks up the clock slot for a given key.
+    ///
+    /// Note: A null return is only expected if the task was recently deleted (e.g., via
+    /// onSchedExit or onSchedFree). This typically happens during a race where one CPU
+    /// cleans up the task while another is mid-scheduler-event (like onSchedSwitch).
+    ///
+    /// If this returns null, the caller should treat the task as having no local
+    /// accumulated delay and fallback to using the Master Clock for any attributions.
+    ///
+    /// Conversely, the 'target' task (the one receiving the delay/tick) must always
+    /// exist in the map; if a target task lookup returns null, it indicates a
+    /// fundamental tracking failure and should be asserted with .?.
+    fn getSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) ?*Pair {
         const len = this.pairs.len;
 
         assert(@popCount(len) == 1);
@@ -193,10 +205,7 @@ pub const ThreadClocks = struct {
             const index = (hash + i) & bitmask;
             current_key = this.pairs[index].key.load(.acquire);
             if (current_key.isEql(key)) break :slot &this.pairs[index];
-        } else unreachable;
-        // Somehow we required a key that has no entry.
-        // This would be faulty logic in the algorithm implementation
-        // so we use unreachable to catch that in the tests.
+        } else null;
     }
 
     fn getIndexUnsafe(this: ThreadClocks, elm: *Pair) usize {
