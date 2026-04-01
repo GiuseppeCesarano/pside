@@ -292,9 +292,7 @@ pub const ThreadClocks = struct {
         this.ref.increment();
         defer this.ref.decrement();
 
-        // If we do the last wake for a dying task then we don't care about lag attribution
-        // since it will not run anymore and it will make no difference in performance.
-        const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash) orelse return .{ 0, 0 };
+        const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash).?;
         const wakee_value = wakee_slot.value.load(.monotonic);
 
         if (!wakee_value.is_sleeping) return .{ 0, 0 };

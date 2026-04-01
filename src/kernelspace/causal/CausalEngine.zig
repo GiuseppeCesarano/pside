@@ -323,7 +323,11 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
 
     const current = kernel.Task.current();
 
-    if (woke.pid() == profiled_pid and !woke.isRunning() and current.pid() == profiled_pid) {
+    if (current.pid() == profiled_pid and
+        woke.pid() == profiled_pid and
+        !woke.isRunning() and
+        !woke.isDead())
+    {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
         if (!current.isDead()) this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);
