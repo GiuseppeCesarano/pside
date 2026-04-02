@@ -83,7 +83,11 @@ pub const ThreadClocks = struct {
         }
 
         pub fn fromPtr(ptr: *anyopaque) Key {
-            return .{ .data = @intFromPtr(ptr) };
+            const int = @intFromPtr(ptr);
+            // kernel pointers shall always be aligned and we rely on that fact.
+            assert(int % 2 == 0);
+
+            return .{ .data = int };
         }
 
         pub fn hash(this: Key) usize {
