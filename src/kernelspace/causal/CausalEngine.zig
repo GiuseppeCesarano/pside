@@ -240,6 +240,8 @@ fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, va
 }
 
 fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
+    if (lag == 0) return;
+
     const time = lag * this.delay_per_tick.load(.monotonic);
     this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
 }

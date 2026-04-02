@@ -61,7 +61,7 @@ pub fn deinit(this: *@This()) void {
 }
 
 pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
-    if (delay_time == 0) return;
+    std.debug.assert(delay_time != 0);
 
     _ = this.users_count.fetchAdd(1, .monotonic);
     errdefer _ = this.users_count.fetchSub(1, .monotonic);
