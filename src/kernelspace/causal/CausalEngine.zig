@@ -133,7 +133,7 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
 fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
-    while (!kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic)) {
+    while (!kernel.Thread.shouldThisStop() and !this.error_has_occurred.load(.monotonic)) {
         const speedup_percent = this.setExperimentParameters();
 
         const delay_per_tick = this.delay_per_tick.load(.monotonic);
