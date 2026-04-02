@@ -104,13 +104,11 @@ pub const ThreadClocks = struct {
 
     pub const Value = packed struct(u64) {
         ticks: Ticks,
-        is_sleeping: bool,
-        master_at_sleep: u31,
+        master_at_sleep: Ticks,
 
         pub fn ticksLsb() u64 {
             const val = Value{
                 .ticks = 1,
-                .is_sleeping = false,
                 .master_at_sleep = 0,
             };
             return @bitCast(val);
@@ -241,7 +239,7 @@ pub const ThreadClocks = struct {
 
         const slot = try this.reserveSlotUnsafe(key, hash);
 
-        slot.value.store(.{ .ticks = ticks, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        slot.value.store(.{ .ticks = ticks, .master_at_sleep = undefined }, .monotonic);
 
         this.publishReservedUnsafe(key, slot);
     }
@@ -280,7 +278,7 @@ pub const ThreadClocks = struct {
         const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
-        slot.value.store(.{ .ticks = ticks, .is_sleeping = true, .master_at_sleep = @truncate(master) }, .monotonic);
+        slot.value.store(.{ .ticks = ticks, .master_at_sleep = master }, .monotonic);
     }
 
     /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
@@ -295,8 +293,6 @@ pub const ThreadClocks = struct {
         const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash).?;
         const wakee_value = wakee_slot.value.load(.monotonic);
 
-        if (!wakee_value.is_sleeping) return .{ 0, 0 };
-
         const master: u31 = @truncate(this.master.load(.acquire));
 
         const waker_slot = this.getSlotUnsafe(waker, waker_hash);
@@ -305,8 +301,8 @@ pub const ThreadClocks = struct {
         const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
         const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
-        wakee_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
-        if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        wakee_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+        if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
 
         const waker_lag = master - waker_ticks;
         return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
@@ -349,8 +345,8 @@ pub const ThreadClocks = struct {
         const parent_ticks = parent_slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
 
-        parent_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
-        child_slot.value.store(.{ .ticks = master, .is_sleeping = false, .master_at_sleep = undefined }, .monotonic);
+        parent_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+        child_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
 
         this.publishReservedUnsafe(child, child_slot);
 
