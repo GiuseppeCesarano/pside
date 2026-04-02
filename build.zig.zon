@@ -1,6 +1,6 @@
 .{
     .name = .pside,
-    .version = "0.0.0",
+    .version = "0.0.1",
     .fingerprint = 0x3d35d37bd337b3dd,
     .minimum_zig_version = "0.16.0-dev.747+493ad58ff",
     .dependencies = .{
