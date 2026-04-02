@@ -25,7 +25,7 @@ error_has_occurred: std.atomic.Value(bool),
 
 target_ip: std.atomic.Value(usize) align(std.atomic.cache_line),
 vma_ranges: VmaRanges,
-vma_begin: std.atomic.Value(usize),
+vma_base: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
 experiment_duration: usize,
@@ -48,7 +48,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 
         .target_ip = .init(0),
         .vma_ranges = .empty,
-        .vma_begin = .init(0),
+        .vma_base = .init(0),
         .delay_per_tick = .init(0),
 
         .experiment_duration = 0,
@@ -154,10 +154,10 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         if (speedup_percent != 0) this.sampler.?.disable();
 
-        const vma_begin = this.vma_begin.load(.monotonic);
+        const vma_base = this.vma_base.load(.monotonic);
         const target_ip = this.target_ip.load(.monotonic);
 
-        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic) or target_ip == 0 or target_ip < vma_begin) {
+        if (kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic) or target_ip == 0) {
             @branchHint(.unlikely);
 
             kernel.preempt.disable();
@@ -180,7 +180,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const wall = kernel.time.now.us() - start_wall;
 
         this.disk_writer.push(serialization.record.Throughput{
-            .relative_ip = this.target_ip.load(.monotonic) - vma_begin,
+            .relative_ip = this.target_ip.load(.monotonic) - vma_base,
             .progress_delta = prog_delta,
             .wall = wall,
             .injected_delay = total_delay,
@@ -264,11 +264,11 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 
     if (target == 0) {
         @branchHint(.unlikely);
-        if (this.vma_ranges.findBegin(ip)) |vma_begin| {
+        if (this.vma_ranges.findBase(ip)) |vma_base| {
             @branchHint(.unlikely);
             if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic) == null) {
                 @branchHint(.likely);
-                this.vma_begin.store(vma_begin, .release);
+                this.vma_base.store(vma_base, .release);
                 const current_task = kernel.Task.current();
                 this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
             }
@@ -329,7 +329,7 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
 
-        if (!current.isDead()) this.applyDelay(current, waker_lag);
+        this.applyDelay(current, waker_lag);
         this.applyDelay(woke, woke_lag);
     }
 }

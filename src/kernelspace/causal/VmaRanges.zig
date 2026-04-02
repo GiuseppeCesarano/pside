@@ -42,11 +42,14 @@ pub fn deinit(this: VmaRanges) void {
         allocator.free(this.entries);
 }
 
-pub fn findBegin(this: VmaRanges, ip: usize) ?usize {
+pub fn contains(this: VmaRanges, ip: usize) bool {
     return for (this.entries) |range| {
-        if (range.contains(ip)) {
-            @branchHint(.unpredictable);
-            break range.begin;
-        }
+        if (range.contains(ip)) break true;
+    } else false;
+}
+
+pub fn findBase(this: VmaRanges, ip: usize) ?usize {
+    return for (this.entries) |range| {
+        if (range.contains(ip)) break range.begin;
     } else null;
 }

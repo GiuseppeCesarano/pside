@@ -55,7 +55,8 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, absolute_binary_path: []co
 
     var ph_it = hdr.iterateProgramHeadersBuffer(bytes);
     const text_vaddr = while (try ph_it.next()) |ph| {
-        if (ph.p_type == std.elf.PT_LOAD and ph.p_flags & std.elf.PF_X != 0) break ph.p_vaddr;
+        if (ph.p_type == std.elf.PT_LOAD and ph.p_flags & std.elf.PF_X != 0)
+            break ph.p_vaddr - (ph.p_offset % ph.p_align);
     } else 0;
 
     const bail: DebugInfo = .{ .dwarf = null, .mmap = mmap, .text_vaddr = text_vaddr, .endian = endian };
