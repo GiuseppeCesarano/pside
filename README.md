@@ -27,9 +27,9 @@ We will use [toy.cpp](./examples/toy.cpp) as an example. Clone this repository, 
 
 The `report` command will display the results for the profiled file.
 
-*TODO: Add picture*
+<img width="1592" height="696" alt="2026-04-02-141048_3640x1920_scrot" src="https://github.com/user-attachments/assets/a317b455-983c-45d2-b019-5c8696e2f3ee" />
 
-The output will show a graph similar to the one above. Your initial results may be noisier; this highlights a peculiarity of causal profilers—they benefit significantly from increased sample sizes. 
+The output will show a graph similar to the one above. Your initial results may be noisier; this highlights a peculiarity of causal profilers, they benefit significantly from increased sample sizes. 
 
 To generate a cleaner profile, you can aggregate more data. If you have already performed 10 runs, you can add 50 more by running:
 `sudo ../zig-out/bin/pside record ./toy -n 50`
