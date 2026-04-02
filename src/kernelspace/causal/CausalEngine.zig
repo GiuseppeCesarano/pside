@@ -294,7 +294,7 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
         };
 
         // Currently they both call kfree so this if block is useless for now.
-        // This is there just for consistency
+        // This is there just for consistency (also free is always non blocking)
         if (clocks.len == clocks_starting_len) {
             allocator.free(clocks);
             allocator.free(bits);
