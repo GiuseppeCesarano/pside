@@ -148,7 +148,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog) {
             @branchHint(.cold);
             if (kernel.Thread.shouldThisStop()) break;
-            this.experiment_duration *= 2;
+            this.experiment_duration *|= 2;
             kernel.time.sleep.us(this.experiment_duration / 2);
         }
 
