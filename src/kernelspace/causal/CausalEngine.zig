@@ -213,7 +213,7 @@ fn setExperimentParameters(this: *CausalEngine) u8 {
 
     this.target_ip.store(0, .monotonic);
 
-    // Like coz, ~25% bias twards 0% speedup, then linear distribution on 5% increments.
+    // Like coz, ~25% bias towards 0% speedup, then linear distribution on 5% increments.
     const roll = random.generator.uintLessThan(usize, 27);
     const speedup_percent = (roll -| 6) * 5;
     const sampler_period = 1_000_000 / sampler_frequency;

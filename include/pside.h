@@ -1,5 +1,5 @@
 #define PSIDE_THROUGHPUT_POINT(name)                                           \
-  static_assert(sizeof(name) != 0, "PSIDE point needs a neme");                \
+  static_assert(sizeof(name) != 0, "PSIDE point needs a name");                \
   __asm__ __volatile__(                                                        \
       ".p2align 4\n\t"                                                         \
       "1:\n\t"                                                                 \

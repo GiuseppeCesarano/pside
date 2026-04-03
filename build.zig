@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const bindings_mod = b.addModule("kernel_bidings", .{
+    const bindings_mod = b.addModule("kernel_bindings", .{
         .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
         .optimize = optimize,
