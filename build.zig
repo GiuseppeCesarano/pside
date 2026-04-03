@@ -34,15 +34,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, &.{ communications_mod, bindings_mod, serialization_mod }, check));
+    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, .{ .communications = communications_mod, .kernel = bindings_mod, .serialization = serialization_mod }, check));
 
-    const is_build_standalone = b.option(bool, "standalone", "Create a self-contained build folder that can be used" ++
-        " to compile the kernel module on another system without requiring the Zig compiler.") orelse false;
-    if (is_build_standalone) {
-        installKernelModuleFiles(b, kernel_module_files);
-    } else {
-        installCompiledKernelModuleObject(b, kernel_module_files);
-    }
+    installCompiledKernelModuleObject(b, kernel_module_files);
 
     const cli_mod = b.addModule("cli", .{
         .root_source_file = b.path("src/userspace/cli.zig"),
@@ -125,7 +119,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_thread_safe_tests.step);
 }
 
-fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: []const *std.Build.Module, check_step: *std.Build.Step) *std.Build.Step.Compile {
+fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: struct {
+    communications: *std.Build.Module,
+    kernel: *std.Build.Module,
+    serialization: *std.Build.Module,
+}, check_step: *std.Build.Step) *std.Build.Step.Compile {
     var kernel_target = target;
     kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
 
@@ -162,9 +160,9 @@ fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
             .error_tracing = false,
             .no_builtin = true,
             .imports = &.{
-                .{ .name = "communications", .module = deps[0] },
-                .{ .name = "kernel", .module = deps[1] },
-                .{ .name = "serialization", .module = deps[2] },
+                .{ .name = "communications", .module = deps.communications },
+                .{ .name = "kernel", .module = deps.kernel },
+                .{ .name = "serialization", .module = deps.serialization },
             },
         }),
     };
@@ -216,17 +214,6 @@ fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.B
     write_files.step.dependOn(&zig_kernel_obj.step);
 
     return write_files;
-}
-
-fn installKernelModuleFiles(b: *std.Build, kernel_module_files: *std.Build.Step.WriteFile) void {
-    const install = b.addInstallDirectory(.{
-        .source_dir = kernel_module_files.getDirectory(),
-        .install_dir = .prefix,
-        .install_subdir = "kernelspace",
-    });
-
-    install.step.dependOn(&kernel_module_files.step);
-    b.getInstallStep().dependOn(&install.step);
 }
 
 fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Build.Step.WriteFile) void {
