@@ -229,14 +229,20 @@ fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value:
 }
 
 fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
-    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
+    std.debug.assert(!key.isEql(.empty));
 
-    if (key.isEql(.empty) or !task.isRunning()) return;
+    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
 
     const lag = master - value.ticks;
     value.ticks = master;
+    value.master_at_sleep = master;
 
-    this.applyDelay(task, lag);
+    // If the thread is still not running we can simply credit it with
+    // the master clock since it will make no difference to the current
+    // experiment, and the next experiment shall not recive the delay
+    // generated in current one.
+    if (task.isRunning())
+        this.applyDelay(task, lag);
 }
 
 fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
