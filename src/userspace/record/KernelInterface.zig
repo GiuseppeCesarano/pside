@@ -44,7 +44,16 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?[2]u32, allocator: std.mem.Allo
         .ctl = undefined,
     };
 
-    try fInitModule(rt.module.handle);
+    fInitModule(rt.module.handle) catch |err| {
+        switch (err) {
+            FInitModuleError.ModuleAlreadyLoaded => std.log.err("The pside module is already loaded\n\trun: sudo rmmod pside", .{}),
+            FInitModuleError.NotPrivilegedOrLoadingDisabled => std.log.err("Loading kernel modules requires root, run with sudo", .{}),
+            else => std.log.err("Loading kernel module returned: {s}", .{@errorName(err)}),
+        }
+
+        return err;
+    };
+
     errdefer deleteModule() catch |err| std.log.err("Could not unload kernel module: {s}", .{@errorName(err)});
 
     rt.ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write });
@@ -157,7 +166,10 @@ pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_
     const e = linux.errno(rc);
     switch (e) {
         .SUCCESS => {},
-        else => std.log.err("{s}", .{@tagName(e)}),
+        else => {
+            std.log.err("Sending data to chardev returned: {s}", .{@tagName(e)});
+            return error.ChardevWrite;
+        },
     }
 }
 

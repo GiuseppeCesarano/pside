@@ -40,7 +40,16 @@ pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Env
         first_token = it.next().?;
     }
 
-    const path = try expandBinaryPath(first_token, environ, allocator, io);
+    const path = expandBinaryPath(first_token, environ, allocator, io) catch |err| {
+        switch (err) {
+            error.NoPath => std.debug.print("Error: The 'PATH' environment variable is not set.\n", .{}),
+            error.NotFoundInPath => std.debug.print("Error: command not found: {s}\n", .{first_token}),
+            error.FileNotFound => std.debug.print("Error: No such file or directory: {s}\n", .{first_token}),
+            error.AccessDenied => std.debug.print("Error: Permission denied: {s}\n", .{first_token}),
+            else => std.debug.print("Error: Failed to resolve path for '{s}': {any}\n", .{ first_token, err }),
+        }
+        return err;
+    };
 
     const path_span = std.mem.span(path);
     const name = std.fs.path.basename(path_span);
@@ -84,7 +93,7 @@ fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, alloc
             const path = try std.mem.concatWithSentinel(allocator, u8, &.{ current_path, "/", binary_path }, 0);
             break :file @ptrCast(path.ptr);
         } else |_| {}
-    } else break :file error.notFoundInPath;
+    } else break :file error.NotFoundInPath;
 }
 
 pub fn deinit(this: Program, allocator: std.mem.Allocator) void {

@@ -17,7 +17,6 @@ const VmaRanges = @import("VmaRanges.zig");
 
 const CausalEngine = @This();
 const sampler_frequency = 997; //Hz, ~1ms; not round to avoid harmonics with the scheduler
-const clocks_starting_len = 1024;
 
 deinit_guard: std.atomic.Value(bool),
 profiled_pid: std.atomic.Value(Pid) align(std.atomic.cache_line),
@@ -53,7 +52,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
 
         .experiment_duration = 0,
         .progress = progress_ptr,
-        .virtual_clocks = try .init(allocator, clocks_starting_len),
+        .virtual_clocks = try .init(atomic_allocator, 1024),
         .delay_pool = try .init(),
 
         .profiler_thread = null,
@@ -79,8 +78,7 @@ pub fn deinit(this: *CausalEngine) void {
     this.disk_writer.deinit();
     this.delay_pool.deinit();
 
-    const clocks_len = this.virtual_clocks.pairs.len;
-    this.virtual_clocks.deinit(if (clocks_len == clocks_starting_len) allocator else atomic_allocator);
+    this.virtual_clocks.deinit(atomic_allocator);
 }
 
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
@@ -299,13 +297,8 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
 
         // Currently they both call kfree so this if block is useless for now.
         // This is there just for consistency (also free is always non blocking)
-        if (clocks.len == clocks_starting_len) {
-            allocator.free(clocks);
-            allocator.free(bits);
-        } else {
-            atomic_allocator.free(clocks);
-            atomic_allocator.free(bits);
-        }
+        atomic_allocator.free(clocks);
+        atomic_allocator.free(bits);
 
         break :blk l;
     };
