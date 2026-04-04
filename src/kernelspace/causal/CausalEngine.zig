@@ -229,8 +229,6 @@ fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value:
 }
 
 fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
-    std.debug.assert(!key.isEql(.empty));
-
     const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
 
     const lag = master - value.ticks;

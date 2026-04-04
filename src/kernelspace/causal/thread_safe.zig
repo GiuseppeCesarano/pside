@@ -431,6 +431,8 @@ pub const ThreadClocks = struct {
                 const key = &pair.key.raw;
                 const value = &pair.value.raw;
 
+                assert(!key.isEql(.empty) and !key.isEql(.reserved));
+
                 @call(.always_inline, cb, .{ master, key, value } ++ args);
             }
         }
