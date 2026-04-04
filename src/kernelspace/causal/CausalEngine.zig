@@ -295,8 +295,6 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
             return;
         };
 
-        // Currently they both call kfree so this if block is useless for now.
-        // This is there just for consistency (also free is always non blocking)
         atomic_allocator.free(clocks);
         atomic_allocator.free(bits);
 
