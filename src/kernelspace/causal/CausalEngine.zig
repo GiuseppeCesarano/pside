@@ -185,7 +185,7 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
             .wall = wall,
             .injected_delay = total_delay,
             .speedup_percent = speedup_percent,
-        }) catch {}; //We just drop the sample
+        }) catch std.log.warn("Writer buffer full, dropping sample", .{}); //We just drop the sample
     }
 
     this.disk_writer.push(serialization.record.Throughput.empty) catch {
