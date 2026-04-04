@@ -9,16 +9,9 @@ const thread_safe = @import("thread_safe.zig");
 
 const DelayPool = @This();
 
-const Data = packed struct(usize) {
-    u: packed union {
-        time: usize,
-        engine: usize,
-    },
-};
-
 const DelayWork = struct {
     work: kernel.Task.Work,
-    data: std.atomic.Value(Data),
+    time: std.atomic.Value(usize),
     pool: *DelayPool,
 };
 const Pool = thread_safe.Pool(DelayWork);
@@ -41,7 +34,7 @@ pub fn initEntries(this: *@This()) void {
     for (&this.pools.entries) |*e| e.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
         .pool = this,
-        .data = undefined,
+        .time = undefined,
     };
 
     this.completion.init();
@@ -68,7 +61,7 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
 
     const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
 
-    slot.data.store(.{ .u = .{ .time = delay_time } }, .release);
+    slot.time.store(delay_time, .release);
     try task.addWork(&slot.work, .@"resume");
 }
 
@@ -79,7 +72,7 @@ fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {
     for (&new_pool.entries) |*e| e.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
         .pool = this,
-        .data = undefined,
+        .time = undefined,
     };
 
     const entry = new_pool.getEntry().?;
@@ -95,7 +88,7 @@ pub fn waitAllDelays(this: *DelayPool) void {
 
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
-    const delay_time = slot.data.load(.acquire).u.time;
+    const delay_time = slot.time.load(.acquire);
     const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
 
     this.pools.freeEntry(slot);
