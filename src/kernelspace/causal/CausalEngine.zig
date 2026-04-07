@@ -256,28 +256,38 @@ fn abort(this: *CausalEngine, s: []const u8) void {
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(event.context() orelse return));
-
     const ip = regs.ip;
+
     const target = this.target_ip.load(.monotonic);
 
-    if (target == ip) {
-        const current_task = kernel.Task.current();
-        this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
-        return;
-    }
+    if (ip == target) return this.tickVirtualClock();
 
     if (target == 0) {
         @branchHint(.unlikely);
-        if (this.vma_ranges.findBase(ip)) |vma_base| {
-            @branchHint(.unlikely);
-            if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic) == null) {
-                @branchHint(.likely);
-                this.vma_base.store(vma_base, .release);
-                const current_task = kernel.Task.current();
-                this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
-            }
-        }
+        if (this.tryCaptureTarget(ip))
+            this.tickVirtualClock();
     }
+}
+
+inline fn tickVirtualClock(this: *CausalEngine) void {
+    if (this.delay_per_tick.load(.monotonic) == 0) return;
+
+    const current_task = kernel.Task.current();
+    this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
+}
+
+fn tryCaptureTarget(this: *CausalEngine, ip: usize) bool {
+    const vma_base = this.vma_ranges.findBase(ip) orelse return false;
+
+    return r: {
+        if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic)) |_| {
+            @branchHint(.likely);
+            break :r false;
+        } else {
+            this.vma_base.store(vma_base, .release);
+            break :r true;
+        }
+    };
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
