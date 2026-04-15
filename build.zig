@@ -13,7 +13,18 @@ pub fn build(b: *std.Build) void {
     const optimize = if (is_release_bundle) .ReleaseSmall else b.standardOptimizeOption(.{});
     const kernel_optimize = if (is_release_bundle) .ReleaseFast else optimize;
 
-    const check = b.step("check", "Check for compilation errors");
+    var kernel_target = target;
+    kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
+    kernel_target.query = switch (kernel_target.query.cpu_arch.?) {
+        .x86_64 => .{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+            .cpu_features_add = std.Target.x86.featureSet(&.{ .soft_float, .retpoline, .retpoline_external_thunk }),
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
+        },
+        else => @panic("Correct feature flags unimplemented for target arch..."),
+    };
 
     const communications_mod = b.addModule("communications", .{
         .root_source_file = b.path("src/common/communications.zig"),
@@ -34,9 +45,90 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const kernel_module_files = createKernelModuleFiles(b, optimize == .Debug, createZigKernelObj(b, target, kernel_optimize, .{ .communications = communications_mod, .kernel = bindings_mod, .serialization = serialization_mod }, check));
+    const object_options: std.Build.ObjectOptions = .{
+        .name = "pside_zig",
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/kernelspace/main.zig"),
+            .target = kernel_target,
+            .optimize = kernel_optimize,
+            .link_libc = false,
+            .link_libcpp = false,
+            .single_threaded = true,
+            .strip = false,
+            .unwind_tables = .none,
+            .code_model = .kernel,
+            .stack_protector = false,
+            .stack_check = false,
+            .pic = false,
+            .red_zone = false,
+            .omit_frame_pointer = false,
+            .error_tracing = false,
+            .no_builtin = true,
+            .imports = &.{
+                .{ .name = "communications", .module = communications_mod },
+                .{ .name = "kernel", .module = bindings_mod },
+                .{ .name = "serialization", .module = serialization_mod },
+            },
+        }),
+    };
 
-    installCompiledKernelModuleObject(b, kernel_module_files);
+    const check = b.step("check", "Check for compilation errors");
+    const check_obj = b.addObject(object_options);
+    check.dependOn(&check_obj.step);
+
+    const zig_kernel_obj = b.addObject(object_options);
+
+    const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
+    const is_debug = optimize == .Debug;
+    const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
+    const strip_cmd = "\n\tstrip --strip-debug" ++
+        " --remove-section=.BTF" ++
+        " --remove-section=.BTF.ext" ++
+        " --remove-section=.eh_frame" ++
+        " --remove-section=.eh_frame_hdr" ++
+        " --remove-section=.gcc_except_table" ++
+        " --remove-section=.comment" ++
+        " --remove-section=.note.GNU-stack" ++
+        " pside.ko";
+
+    const kernel_module_files = b.addWriteFiles();
+    _ = kernel_module_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
+    _ = kernel_module_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
+    _ = kernel_module_files.add(cmd_name, "");
+    _ = kernel_module_files.add("Makefile", b.fmt(
+        \\{s}
+        \\obj-m += pside.o
+        \\pside-objs := kernel.o {s}
+        \\
+        \\PWD := $(CURDIR)
+        \\
+        \\all:
+    ++ "\n\t" ++
+        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+    ++ "{s}" ++
+        \\ 
+        \\clean:
+    ++ "\n\t" ++
+        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
+    , .{ debug_flag, zig_kernel_obj.out_filename, strip_cmd }));
+    kernel_module_files.step.dependOn(&zig_kernel_obj.step);
+
+    const compile = b.addSystemCommand(&.{"make"});
+    compile.setCwd(kernel_module_files.getDirectory());
+    compile.step.dependOn(&kernel_module_files.step);
+
+    const source = kernel_module_files.getDirectory().join(b.allocator, "pside.ko") catch @panic("OOM");
+    const dest = brk: {
+        var uts: std.os.linux.utsname = undefined;
+        _ = std.os.linux.uname(&uts);
+        const release = uts.release;
+        const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
+        break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", release[0..release_end], "/extra/pside.ko" }) catch @panic("OOM");
+    };
+    const install_ko = b.addInstallFile(source, dest);
+    install_ko.step.dependOn(&compile.step);
+    b.getInstallStep().dependOn(&install_ko.step);
 
     const cli_mod = b.addModule("cli", .{
         .root_source_file = b.path("src/userspace/cli.zig"),
@@ -90,16 +182,30 @@ pub fn build(b: *std.Build) void {
     };
     const executable = b.addExecutable(executable_options);
     b.installArtifact(executable);
-    installWebAssets(b);
 
-    // Zls check without emitting object
     const check_exe = b.addExecutable(executable_options);
     check.dependOn(&check_exe.step);
 
-    // Tests
-    const cli_tests = b.addTest(.{
-        .root_module = cli_mod,
-    });
+    const uplot = b.dependency("uplot", .{});
+    const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
+
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
+        b.path("src/userspace/report/web/index.html"),
+        web_dir,
+        "index.html",
+    ).step);
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
+        uplot.path("dist/uPlot.iife.min.js"),
+        web_dir,
+        "uplot.min.js",
+    ).step);
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
+        uplot.path("dist/uPlot.min.css"),
+        web_dir,
+        "uplot.min.css",
+    ).step);
+
+    const cli_tests = b.addTest(.{ .root_module = cli_mod });
     const run_cli_tests = b.addRunArtifact(cli_tests);
 
     const bindings_tests = b.addTest(.{ .root_module = bindings_mod });
@@ -117,143 +223,4 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_bindings_tests.step);
     test_step.dependOn(&run_thread_safe_tests.step);
-}
-
-fn createZigKernelObj(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, deps: struct {
-    communications: *std.Build.Module,
-    kernel: *std.Build.Module,
-    serialization: *std.Build.Module,
-}, check_step: *std.Build.Step) *std.Build.Step.Compile {
-    var kernel_target = target;
-    kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
-
-    kernel_target.query = switch (kernel_target.query.cpu_arch.?) {
-        .x86_64 => .{
-            .cpu_arch = .x86_64,
-            .os_tag = .freestanding,
-            .abi = .none,
-            .cpu_features_add = std.Target.x86.featureSet(&.{ .soft_float, .retpoline, .retpoline_external_thunk }),
-            .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
-        },
-
-        else => @panic("Correct feature flags unimplemented for target arch..."),
-    };
-
-    const object_options: std.Build.ObjectOptions = .{
-        .name = "pside_zig",
-        .use_llvm = true,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernelspace/main.zig"),
-            .target = kernel_target,
-            .optimize = optimize,
-            .link_libc = false,
-            .link_libcpp = false,
-            .single_threaded = true,
-            .strip = false,
-            .unwind_tables = .none,
-            .code_model = .kernel,
-            .stack_protector = false,
-            .stack_check = false,
-            .pic = false,
-            .red_zone = false,
-            .omit_frame_pointer = false,
-            .error_tracing = false,
-            .no_builtin = true,
-            .imports = &.{
-                .{ .name = "communications", .module = deps.communications },
-                .{ .name = "kernel", .module = deps.kernel },
-                .{ .name = "serialization", .module = deps.serialization },
-            },
-        }),
-    };
-
-    // Zls check without emitting object
-    const check_obj = b.addObject(object_options);
-    check_step.dependOn(&check_obj.step);
-
-    return b.addObject(object_options);
-}
-
-fn createKernelModuleFiles(b: *std.Build, is_debug: bool, zig_kernel_obj: *std.Build.Step.Compile) *std.Build.Step.WriteFile {
-    const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
-
-    const write_files = b.addWriteFiles();
-    _ = write_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = write_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
-    _ = write_files.add(cmd_name, "");
-
-    const strip_cmd = "\n\tstrip --strip-debug" ++
-        " --remove-section=.BTF" ++
-        " --remove-section=.BTF.ext" ++
-        " --remove-section=.eh_frame" ++
-        " --remove-section=.eh_frame_hdr" ++
-        " --remove-section=.gcc_except_table" ++
-        " --remove-section=.comment" ++
-        " --remove-section=.note.GNU-stack" ++
-        " pside.ko";
-
-    const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
-
-    _ = write_files.add("Makefile", b.fmt(
-        \\{s}
-        \\obj-m += pside.o
-        \\pside-objs := kernel.o {s}
-        \\
-        \\PWD := $(CURDIR)
-        \\
-        \\all:
-    ++ "\n\t" ++
-        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-    ++ "{s}" ++
-        \\ 
-        \\clean:
-    ++ "\n\t" ++
-        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
-    , .{ debug_flag, zig_kernel_obj.out_filename, strip_cmd }));
-
-    write_files.step.dependOn(&zig_kernel_obj.step);
-
-    return write_files;
-}
-
-fn installCompiledKernelModuleObject(b: *std.Build, kernel_module_files: *std.Build.Step.WriteFile) void {
-    const compile = b.addSystemCommand(&.{"make"});
-    compile.setCwd(kernel_module_files.getDirectory());
-    compile.step.dependOn(&kernel_module_files.step);
-
-    const source = kernel_module_files.getDirectory().join(b.allocator, "pside.ko") catch @panic("OOM");
-    const dest = brk: {
-        var uts: std.os.linux.utsname = undefined;
-        _ = std.os.linux.uname(&uts);
-        const release = uts.release;
-        const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
-        break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", release[0..release_end], "/extra/pside.ko" }) catch @panic("OOM");
-    };
-    const install = b.addInstallFile(source, dest);
-    install.step.dependOn(&compile.step);
-
-    b.getInstallStep().dependOn(&install.step);
-}
-
-fn installWebAssets(b: *std.Build) void {
-    const uplot = b.dependency("uplot", .{});
-    const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
-
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        b.path("src/userspace/report/web/index.html"),
-        web_dir,
-        "index.html",
-    ).step);
-
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        uplot.path("dist/uPlot.iife.min.js"),
-        web_dir,
-        "uplot.min.js",
-    ).step);
-
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        uplot.path("dist/uPlot.min.css"),
-        web_dir,
-        "uplot.min.css",
-    ).step);
 }

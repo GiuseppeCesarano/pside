@@ -39,7 +39,7 @@ pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
     const parm: std.os.linux.sched_param = .{ .priority = 50 };
     const setsched_rc = linux.errno(linux.sched_setscheduler(child_pid, .{ .mode = .FIFO }, &parm));
     switch (setsched_rc) {
-        .SUCCESS => {}, 
+        .SUCCESS => {},
         .PERM => std.log.warn("Insufficient privileges for SCHED_FIFO. Results may be noisier.", .{}),
         .INVAL => return error.InvalidSchedulerParams, // Priority out of range for FIFO
         .SRCH => return error.ProcessNotFound, // Child died before we could set priority
@@ -362,12 +362,12 @@ const ptrace = struct {
                 const event = status >> 16;
 
                 switch (target) {
-                    .exec => if (sig == @intFromEnum(linux.SIG.TRAP) and event == linux.PTRACE.EVENT.EXEC) return,
-                    .trap => if (sig == @intFromEnum(linux.SIG.TRAP) and event == 0) return,
-                    .stop => if (sig == @intFromEnum(linux.SIG.STOP) and event == 0) return,
+                    .exec => if (sig == linux.SIG.TRAP and event == linux.PTRACE.EVENT.EXEC) return,
+                    .trap => if (sig == linux.SIG.TRAP and event == 0) return,
+                    .stop => if (sig == linux.SIG.STOP and event == 0) return,
                 }
 
-                const signal_to_forward: u32 = if (sig == @intFromEnum(linux.SIG.TRAP) or sig == @intFromEnum(linux.SIG.STOP)) 0 else sig;
+                const signal_to_forward: u32 = if (sig == linux.SIG.TRAP or sig == linux.SIG.STOP) 0 else @intFromEnum(sig);
 
                 try ptraceSysCall(linux.PTRACE.CONT, pid, 0, signal_to_forward);
             }
