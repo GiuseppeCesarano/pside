@@ -100,12 +100,14 @@ pub fn deinit(this: *DebugInfo, allocator: std.mem.Allocator, io: std.Io) void {
 }
 
 pub fn resolve(this: *DebugInfo, allocator: std.mem.Allocator, relative_ip: u64) !Location {
-    const dwarf = &(this.dwarf orelse return .{ .ip = relative_ip });
+    const dwarf = if (this.dwarf) |*dwarf| dwarf else return .{ .ip = relative_ip };
     const addr = relative_ip + this.text_vaddr;
 
-    const symbol = dwarf.getSymbol(allocator, this.endian, addr) catch
+    var array: std.ArrayList(std.debug.Symbol) = .empty;
+    dwarf.getSymbols(allocator, allocator, this.endian, addr, true, &array) catch
         return .{ .ip = relative_ip };
 
+    const symbol = if (array.items.len < 1) array.items[0] else return .{ .ip = relative_ip };
     const src = symbol.source_location;
 
     const file = if (src) |s| try allocator.dupe(u8, s.file_name) else null;
