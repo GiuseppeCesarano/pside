@@ -36,16 +36,6 @@ pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
 
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
 
-    const parm: std.os.linux.sched_param = .{ .priority = 50 };
-    const setsched_rc = linux.errno(linux.sched_setscheduler(child_pid, .{ .mode = .FIFO }, &parm));
-    switch (setsched_rc) {
-        .SUCCESS => {},
-        .PERM => std.log.warn("Insufficient privileges for SCHED_FIFO. Results may be noisier.", .{}),
-        .INVAL => return error.InvalidSchedulerParams, // Priority out of range for FIFO
-        .SRCH => return error.ProcessNotFound, // Child died before we could set priority
-        else => return error.Unexpected,
-    }
-
     try ptrace.waitFor(child_pid, .stop);
 
     try ptrace.setOptions(child_pid, &.{linux.PTRACE.O.TRACEEXEC});
@@ -176,11 +166,9 @@ pub fn kill(this: TracedProcess) !void {
     };
 }
 
-pub fn wait(this: TracedProcess) !u32 {
-    var status: u32 = undefined;
+pub fn wait(this: TracedProcess) !void {
+    var status: i32 = undefined;
     if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
-
-    return status;
 }
 
 pub fn patchProgressPoint(this: TracedProcess, addr: usize) !void {
@@ -352,7 +340,7 @@ const ptrace = struct {
     fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) !void {
         while (true) {
             var status: u32 = undefined;
-            if (linux.errno(linux.waitpid(pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
+            if (linux.errno(linux.waitpid(pid, @ptrCast(&status), 0)) != .SUCCESS) return error.WaitPidError;
 
             if (linux.W.IFEXITED(status)) return error.ChildExited;
             if (linux.W.IFSIGNALED(status)) return error.ChildKilled;

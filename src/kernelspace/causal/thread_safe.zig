@@ -279,8 +279,8 @@ pub const ThreadClocks = struct {
         defer this.ref.decrement();
 
         const slot = this.getSlotUnsafe(key, key.hash()).?;
-        const ticks = slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
+        const ticks = slot.value.load(.monotonic).ticks;
 
         slot.value.store(.{ .ticks = ticks, .master_at_sleep = master }, .monotonic);
     }
@@ -297,7 +297,7 @@ pub const ThreadClocks = struct {
         const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash).?;
         const wakee_value = wakee_slot.value.load(.monotonic);
 
-        const master: u31 = @truncate(this.master.load(.acquire));
+        const master = this.master.load(.acquire);
 
         const waker_slot = this.getSlotUnsafe(waker, waker_hash);
         const waker_ticks = if (waker_slot) |slot| slot.value.load(.monotonic).ticks else master;
@@ -322,8 +322,6 @@ pub const ThreadClocks = struct {
         const slot = this.getSlotUnsafe(task, task_hash).?;
         const index = this.getIndexUnsafe(slot);
 
-        const ticks = slot.value.load(.monotonic).ticks;
-
         const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
         const operand = ~(@as(usize, 1) << @truncate(index % @bitSizeOf(usize)));
         _ = bitmask_bucket.fetchAnd(operand, .monotonic);
@@ -331,7 +329,7 @@ pub const ThreadClocks = struct {
         _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
 
         const master = this.master.load(.acquire);
-        return master - ticks;
+        return master - slot.value.load(.monotonic).ticks;
     }
 
     /// Tracks a thread forking.
@@ -346,8 +344,8 @@ pub const ThreadClocks = struct {
         const parent_slot = this.getSlotUnsafe(parent, parent_hash).?;
         const child_slot = try this.reserveSlotUnsafe(child, child_hash);
 
-        const parent_ticks = parent_slot.value.load(.monotonic).ticks;
         const master = this.master.load(.acquire);
+        const parent_ticks = parent_slot.value.load(.monotonic).ticks;
 
         parent_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
         child_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
@@ -397,6 +395,7 @@ pub const ThreadClocks = struct {
                         new_bitmask[@divFloor(index, @bitSizeOf(usize))].raw |= @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
                         break;
                     }
+
                     new_pairs[index].key.raw.data |= @bitCast(Key.empty_collided);
                 } else return error.NoSpace;
             }

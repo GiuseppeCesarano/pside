@@ -53,7 +53,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
         .experiment_duration = 0,
         .progress = progress_ptr,
         .virtual_clocks = try .init(atomic_allocator, 1024),
-        .delay_pool = try .init(),
+        .delay_pool = .empty,
 
         .profiler_thread = null,
         .sampler = null,
@@ -82,6 +82,8 @@ pub fn deinit(this: *CausalEngine) void {
 }
 
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
+    try this.delay_pool.init();
+
     const task = kernel.Task.fromTid(pid);
 
     this.experiment_duration = 45 * std.time.us_per_ms;
@@ -94,9 +96,6 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
 
     try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
-
-    this.delay_pool.initEntries(); //TODO: not happy about that
-
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
 
@@ -132,24 +131,21 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *CausalEngine = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop() and !this.error_has_occurred.load(.monotonic)) {
-        const params = this.setRandomExperimentParameters();
+        const params = this.generateRandomExperimentParameters();
         const snap = this.takeSnapshot();
 
-        this.doExperiment(params.speedup_percent, snap.progress);
+        this.doExperiment(params, snap.progress);
 
         const target_ip = this.target_ip.load(.monotonic);
         const should_stop = kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic);
 
-        if (should_stop or target_ip == 0) {
-            this.clearAllDelays();
-            continue;
-        }
+        if (should_stop or (target_ip == 0 and params.speedup_percent != 0)) continue;
 
         this.applyAllDelays(params.speedup_percent);
         this.recordThroughput(params, snap, target_ip);
     }
 
-    this.flushFinalRecord();
+    this.flushRecords();
     return 0;
 }
 
@@ -158,7 +154,7 @@ const ExperimentParameters = struct {
     delay_per_tick: u16,
 };
 
-fn setRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
+fn generateRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
         var generator: std.Random = undefined;
@@ -170,15 +166,11 @@ fn setRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
         random.generator = random.context.?.random();
     }
 
-    this.target_ip.store(0, .monotonic);
-
     // Like coz, ~25% bias towards 0% speedup, then linear distribution on 5% increments.
     const roll = random.generator.uintLessThan(u16, 27);
     const speedup_percent = (roll -| 6) * 5;
     const sampler_period = 1_000_000 / sampler_frequency;
     const delay: u16 = @intCast(((@as(u32, speedup_percent) * sampler_period) / 100));
-
-    this.delay_per_tick.store(delay, .monotonic);
 
     return .{ .speedup_percent = speedup_percent, .delay_per_tick = delay };
 }
@@ -186,36 +178,33 @@ fn setRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
 const Snapshot = struct {
     progress: usize,
     master: ClockTicks,
-    wall: u64,
+    time: u64,
 };
 
 fn takeSnapshot(this: *CausalEngine) Snapshot {
     return .{
         .progress = this.progress.load(.monotonic),
         .master = this.virtual_clocks.master.load(.acquire),
-        .wall = kernel.time.now.us(),
+        .time = kernel.time.now.us(),
     };
 }
 
-fn doExperiment(this: *CausalEngine, speedup_percent: u16, baseline_prog: usize) void {
-    if (speedup_percent != 0) this.sampler.?.enable();
+fn doExperiment(this: *CausalEngine, parms: ExperimentParameters, baseline_prog: usize) void {
+    this.delay_per_tick.store(parms.delay_per_tick, .monotonic);
+    this.vma_base.store(0, .monotonic);
+    this.target_ip.store(0, .monotonic);
+
+    if (parms.speedup_percent != 0) this.sampler.?.enable();
     kernel.time.sleep.us(this.experiment_duration);
 
     var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
     while (prog_delta < 5) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog) {
-        @branchHint(.cold);
         if (kernel.Thread.shouldThisStop()) break;
         this.experiment_duration *|= 2;
         kernel.time.sleep.us(this.experiment_duration / 2);
     }
 
-    if (speedup_percent != 0) this.sampler.?.disable();
-}
-
-fn clearAllDelays(this: *CausalEngine) void {
-    kernel.preempt.disable();
-    this.virtual_clocks.forEach(clearThreadDelay, .{});
-    kernel.preempt.enable();
+    if (parms.speedup_percent != 0) this.sampler.?.disable();
 }
 
 fn applyAllDelays(this: *CausalEngine, speedup_percent: u16) void {
@@ -234,13 +223,13 @@ fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Sna
     this.disk_writer.push(serialization.record.Throughput{
         .relative_ip = target_ip - this.vma_base.load(.monotonic),
         .progress_delta = this.progress.load(.monotonic) -% snap.progress,
-        .wall = kernel.time.now.us() - snap.wall,
+        .wall = kernel.time.now.us() - snap.time,
         .injected_delay = vclock_delta * params.delay_per_tick,
         .speedup_percent = @truncate(params.speedup_percent),
     }) catch std.log.warn("Writer buffer full, dropping sample", .{});
 }
 
-fn flushFinalRecord(this: *CausalEngine) void {
+fn flushRecords(this: *CausalEngine) void {
     this.disk_writer.push(serialization.record.Throughput.empty) catch {
         for (0..3) |_| {
             kernel.time.sleep.us(50);
@@ -248,10 +237,6 @@ fn flushFinalRecord(this: *CausalEngine) void {
             break;
         } else std.log.err("Could not emit last empty record, file corrupted", .{});
     };
-}
-
-fn clearThreadDelay(master: ClockTicks, _: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value) void {
-    value.ticks = master;
 }
 
 fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
@@ -372,6 +357,12 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
 
-    if (task.pid() == this.profiled_pid.load(.monotonic))
-        this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)));
+    if (task.pid() == this.profiled_pid.load(.monotonic)) {
+        const d = this.virtual_clocks.remove(.fromPtr(task));
+        // TODO: remove next line and investigate
+        // why do we get lag if ticks sampler
+        // is disabled in this case.
+        if (this.delay_per_tick.load(.monotonic) == 0) return;
+        this.applyDelay(task, d);
+    }
 }

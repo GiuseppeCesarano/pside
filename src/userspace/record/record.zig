@@ -64,13 +64,13 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
 
         try traced_process.start();
 
-        _ = traced_process.wait() catch |err| std.log.warn("Traced process {d} exited with error: {s}", .{ traced_process.pid, @errorName(err) });
+        traced_process.wait() catch |err| {
+            std.log.warn("Traced process {d} exited with error: {s}", .{ traced_process.pid, @errorName(err) });
+            return err;
+        };
 
         try module.stop();
-
         global_traced_process = null;
-
-        try std.Io.sleep(io, .fromMilliseconds(1), .real);
     }
 }
 

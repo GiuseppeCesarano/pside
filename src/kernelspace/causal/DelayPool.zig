@@ -20,17 +20,18 @@ pools: *Pool,
 users_count: std.atomic.Value(u32),
 completion: kernel.Completion,
 
-pub fn init() !DelayPool {
-    const pool = try allocator.create(Pool);
-    pool.* = .empty;
-    return .{
-        .pools = pool,
-        .users_count = .init(0),
-        .completion = undefined,
-    };
-}
+pub const empty: DelayPool = .{
+    .pools = undefined,
+    .users_count = .init(std.math.maxInt(u32)),
+    .completion = undefined,
+};
 
-pub fn initEntries(this: *@This()) void {
+pub fn init(this: *@This()) !void {
+    if (this.users_count.load(.monotonic) != std.math.maxInt(u32)) return;
+
+    this.users_count = .init(0);
+
+    this.pools = try allocator.create(Pool);
     for (&this.pools.entries) |*e| e.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
         .pool = this,

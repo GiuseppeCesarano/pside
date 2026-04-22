@@ -68,11 +68,6 @@ pub const PtRegs = switch (arch) {
     else => @compileError("Unsupported arch"),
 };
 
-// We test the custom allocator replacing kernel calls with malloc and free
-const c = if (!is_target_kernel) @cImport({
-    @cInclude("stdlib.h");
-}) else {};
-
 pub const mem = struct {
     extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
     pub fn copyBytesToUser(to: *anyopaque, from: []const u8) usize {
@@ -90,7 +85,7 @@ pub const heap = struct {
     pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque) type {
         return struct {
             extern fn c_kfree(*anyopaque) void;
-            const cfree = if (is_target_kernel) c_kfree else c.free;
+            const cfree = if (is_target_kernel) c_kfree else std.c.free;
 
             const Metadata = u16;
 
@@ -153,7 +148,7 @@ pub const heap = struct {
     extern fn c_kmalloc(c_ulong) ?*anyopaque;
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(if (is_target_kernel) c_kmalloc else c.malloc).vtable,
+        .vtable = &KAllocator(if (is_target_kernel) c_kmalloc else std.c.malloc).vtable,
     };
 
     extern fn c_kmalloc_atomic(c_ulong) ?*anyopaque;
