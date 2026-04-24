@@ -186,7 +186,7 @@ pub const ThreadClocks = struct {
 
     /// Looks up the clock slot for a given key.
     ///
-    /// Note: A null return is only expected if the task was recently deleted ( onSchedExit).
+    /// Note: A null return is only expected if the task was recently deleted (onSchedExit).
     /// This typically happens during a race where one CPU cleans up the task while another
     /// is mid-scheduler-event (like onSchedSwitch).
     ///

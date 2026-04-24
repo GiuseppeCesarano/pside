@@ -31,6 +31,7 @@ export fn init_module() linksection(".init.text") c_int {
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
+    engine.deinit();
     progress.remove();
     ctl.remove();
 }

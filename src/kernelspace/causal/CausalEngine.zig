@@ -36,6 +36,17 @@ profiler_thread: ?*kernel.Thread,
 sampler: ?*kernel.PerfEvent,
 disk_writer: DiskWriter,
 
+const ExperimentParameters = struct {
+    speedup_percent: u16,
+    delay_per_tick: u16,
+};
+
+const Snapshot = struct {
+    progress: usize,
+    master: ClockTicks,
+    time: u64,
+};
+
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
@@ -149,11 +160,6 @@ fn profileLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-const ExperimentParameters = struct {
-    speedup_percent: u16,
-    delay_per_tick: u16,
-};
-
 fn generateRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
@@ -175,12 +181,6 @@ fn generateRandomExperimentParameters(this: *CausalEngine) ExperimentParameters 
     return .{ .speedup_percent = speedup_percent, .delay_per_tick = delay };
 }
 
-const Snapshot = struct {
-    progress: usize,
-    master: ClockTicks,
-    time: u64,
-};
-
 fn takeSnapshot(this: *CausalEngine) Snapshot {
     return .{
         .progress = this.progress.load(.monotonic),
@@ -189,12 +189,12 @@ fn takeSnapshot(this: *CausalEngine) Snapshot {
     };
 }
 
-fn doExperiment(this: *CausalEngine, parms: ExperimentParameters, baseline_prog: usize) void {
-    this.delay_per_tick.store(parms.delay_per_tick, .monotonic);
+fn doExperiment(this: *CausalEngine, params: ExperimentParameters, baseline_prog: usize) void {
+    this.delay_per_tick.store(params.delay_per_tick, .monotonic);
     this.vma_base.store(0, .monotonic);
     this.target_ip.store(0, .monotonic);
 
-    if (parms.speedup_percent != 0) this.sampler.?.enable();
+    if (params.speedup_percent != 0) this.sampler.?.enable();
     kernel.time.sleep.us(this.experiment_duration);
 
     var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
@@ -204,17 +204,40 @@ fn doExperiment(this: *CausalEngine, parms: ExperimentParameters, baseline_prog:
         kernel.time.sleep.us(this.experiment_duration / 2);
     }
 
-    if (parms.speedup_percent != 0) this.sampler.?.disable();
+    this.delay_per_tick.store(0, .monotonic); // stop in flight ticks
+    if (params.speedup_percent != 0) this.sampler.?.disable();
 }
 
-fn applyAllDelays(this: *CausalEngine, speedup_percent: u16) void {
-    if (speedup_percent == 0) return;
+fn applyAllDelays(this: *CausalEngine, delay_per_tick: u16) void {
+    if (delay_per_tick == 0) return;
 
     kernel.preempt.disable();
-    this.virtual_clocks.forEach(applyDelayToThread, .{this});
+    this.virtual_clocks.forEach(applyDelayToThread, .{ this, delay_per_tick });
     kernel.preempt.enable();
 
     this.delay_pool.waitAllDelays();
+}
+
+fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine, delay_per_tick: u16) void {
+    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
+
+    const lag = master - value.ticks;
+    value.ticks = master;
+    value.master_at_sleep = master;
+
+    // If the thread is still not running we can simply credit it with
+    // the master clock since it will make no difference to the current
+    // experiment, and the next experiment shall not recive the delay
+    // generated in current one.
+    if (task.isRunning())
+        this.applyDelay(task, lag, delay_per_tick);
+}
+
+fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks, delay_per_tick: u16) void {
+    if (lag == 0) return;
+
+    const time = lag * delay_per_tick;
+    this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
 }
 
 fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Snapshot, target_ip: usize) void {
@@ -237,28 +260,6 @@ fn flushRecords(this: *CausalEngine) void {
             break;
         } else std.log.err("Could not emit last empty record, file corrupted", .{});
     };
-}
-
-fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine) void {
-    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
-
-    const lag = master - value.ticks;
-    value.ticks = master;
-    value.master_at_sleep = master;
-
-    // If the thread is still not running we can simply credit it with
-    // the master clock since it will make no difference to the current
-    // experiment, and the next experiment shall not recive the delay
-    // generated in current one.
-    if (task.isRunning())
-        this.applyDelay(task, lag);
-}
-
-fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks) void {
-    if (lag == 0) return;
-
-    const time = lag * this.delay_per_tick.load(.monotonic);
-    this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
 }
 
 fn abort(this: *CausalEngine, s: []const u8) void {
@@ -324,8 +325,9 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
         break :blk l;
     };
 
-    this.applyDelay(parent, lag);
-    this.applyDelay(child, lag);
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+    this.applyDelay(parent, lag, delay_per_tick);
+    this.applyDelay(child, lag, delay_per_tick);
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
@@ -349,20 +351,15 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
 
-        this.applyDelay(current, waker_lag);
-        this.applyDelay(woke, woke_lag);
+        const delay_per_tick = this.delay_per_tick.load(.monotonic);
+        this.applyDelay(current, waker_lag, delay_per_tick);
+        this.applyDelay(woke, woke_lag, delay_per_tick);
     }
 }
 
 fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
 
-    if (task.pid() == this.profiled_pid.load(.monotonic)) {
-        const d = this.virtual_clocks.remove(.fromPtr(task));
-        // TODO: remove next line and investigate
-        // why do we get lag if ticks sampler
-        // is disabled in this case.
-        if (this.delay_per_tick.load(.monotonic) == 0) return;
-        this.applyDelay(task, d);
-    }
+    if (task.pid() == this.profiled_pid.load(.monotonic))
+        this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)), this.delay_per_tick.load(.monotonic));
 }
