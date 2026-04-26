@@ -147,8 +147,8 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const output_file_parser_mod = b.addModule("OutputFileParserResult", .{
-        .root_source_file = b.path("src/userspace/report/OutputFileParserResult.zig"),
+    const output_file_parse_results_mod = b.addModule("OutputFileParseResults", .{
+        .root_source_file = b.path("src/userspace/report/OutputFileParseResults.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -163,7 +163,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
-            .{ .name = "OutputFileParserResult", .module = output_file_parser_mod },
+            .{ .name = "OutputFileParseResults", .module = output_file_parse_results_mod },
         },
     });
 

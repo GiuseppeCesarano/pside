@@ -7,7 +7,7 @@
 // ## Layout
 //
 // [Header]                    -- magic "pside" + version
-// [FileInfo]                  -- SHA-256 hash of the profiled binary
+// [Hash]                      -- SHA-256 hash of the profiled binary
 // <binary_path>\0             -- null-terminated path string
 //
 // Repeated until EOF:
@@ -46,10 +46,7 @@ pub const Header = extern struct {
     };
 };
 
-pub const FileInfo = extern struct {
-    hash: [32]u8,
-    // binary_path: [:0]u8
-};
+pub const Hash = [32]u8;
 
 pub const SectionHeader = extern struct {
     pub const MeasurementKind = enum(u8) {

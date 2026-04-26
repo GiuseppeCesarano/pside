@@ -3,59 +3,27 @@ const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
 
-const OutputFileParserResult = @import("OutputFileParserResult");
-
-const DebugInfo = @import("DebugInfo.zig");
 const Statistics = @import("Statistics.zig");
 
 const Server = @This();
 
-pub const Point = struct {
-    speedup: f64,
-    median: f64,
-    ci_low: f64,
-    ci_high: f64,
-    singleton: bool,
-};
-
-pub const IpSeries = struct {
-    location: DebugInfo.Location,
-    points: []Point,
-
-    pub fn deinit(this: IpSeries, allocator: std.mem.Allocator) void {
-        this.location.deinit(allocator);
-        allocator.free(this.points);
-    }
-};
-
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
-results: *const OutputFileParserResult,
-prng: std.Random.DefaultPrng,
-debug_info: DebugInfo,
+throughput: *const Statistics.Throughput,
 
-pub fn init(allocator: std.mem.Allocator, io: Io, results: *const OutputFileParserResult) !Server {
+pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.Throughput) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
     errdefer net_server.deinit(io);
 
     const share_path = try resolveSharePath(allocator, io);
     errdefer allocator.free(share_path);
 
-    var seed: u64 = undefined;
-    std.Io.random(io, std.mem.asBytes(&seed));
-
-    const debug_info = try DebugInfo.load(allocator, io, results.binary_path);
-    if (debug_info.dwarf == null)
-        std.log.warn("Could not find debugging info at: {s}", .{results.binary_path});
-
     return .{
         .server = net_server,
         .should_shut_down = undefined,
         .share_path = share_path,
-        .results = results,
-        .prng = std.Random.DefaultPrng.init(seed),
-        .debug_info = debug_info,
+        .throughput = throughput,
     };
 }
 
@@ -63,7 +31,6 @@ pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
     this.stop(io);
     this.server.deinit(io);
     allocator.free(this.share_path);
-    this.debug_info.deinit(allocator, io);
 }
 
 pub fn port(this: Server) u16 {
@@ -134,36 +101,28 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
         try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript");
     } else if (std.mem.eql(u8, target, "/uplot.min.css")) {
         try this.serveFile(allocator, io, request, "uplot.min.css", "text/css");
-    } else if (std.mem.eql(u8, target, "/api/sections")) {
-        try this.serveSections(allocator, request);
-    } else if (std.mem.startsWith(u8, target, "/api/section?vma=")) {
-        try this.serveSection(allocator, request, target["/api/section?vma=".len..]);
+    } else if (std.mem.eql(u8, target, "/api/vmas")) {
+        try this.serveVmas(allocator, request);
+    } else if (std.mem.startsWith(u8, target, "/api/vma?name=")) {
+        try this.serveVma(allocator, request, target["/api/vma?name=".len..]);
     } else {
         try request.respond("", .{ .status = .not_found });
     }
 }
 
-fn serveSections(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request) !void {
-    const SectionInfo = struct {
-        vma: []const u8,
-        ip_count: usize,
-        sample_count: usize,
-        binary_path: []const u8,
+fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request) !void {
+    const VmaInfo = struct {
+        name: []const u8,
+        graph_count: usize,
     };
 
-    var list: std.ArrayListUnmanaged(SectionInfo) = .empty;
+    var list: std.ArrayListUnmanaged(VmaInfo) = .empty;
     defer list.deinit(allocator);
 
-    var it = this.results.throughput_map.iterator();
-    while (it.next()) |entry| {
-        var sample_count: usize = 0;
-        var ip_it = entry.value_ptr.iterator();
-        while (ip_it.next()) |ip_entry| sample_count += ip_entry.value_ptr.items.len;
+    for (this.throughput.vmas) |vma| {
         try list.append(allocator, .{
-            .vma = entry.key_ptr.*,
-            .ip_count = entry.value_ptr.count(),
-            .sample_count = sample_count,
-            .binary_path = this.results.binary_path,
+            .name = vma.name,
+            .graph_count = vma.graphs.len,
         });
     }
 
@@ -175,105 +134,27 @@ fn serveSections(this: *const Server, allocator: std.mem.Allocator, request: *ht
     });
 }
 
-fn serveSection(this: *Server, allocator: std.mem.Allocator, request: *http.Server.Request, vma: []const u8) !void {
-    const ip_map = this.results.throughput_map.getPtr(vma) orelse {
+fn serveVma(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request, name: []const u8) !void {
+    var vma_ptr: ?*const Statistics.Throughput.Vma = null;
+    for (this.throughput.vmas) |*vma| {
+        if (std.mem.eql(u8, vma.name, name)) {
+            vma_ptr = vma;
+            break;
+        }
+    }
+
+    if (vma_ptr == null) {
         try request.respond("", .{ .status = .not_found });
         return;
-    };
-
-    var collapsed = try collapseByLocation(allocator, ip_map, &this.debug_info);
-    defer {
-        var it = collapsed.iterator();
-
-        while (it.next()) |entry| {
-            entry.key_ptr.deinit(allocator);
-            entry.value_ptr.deinit(allocator);
-        }
-
-        collapsed.deinit(allocator);
     }
 
-    const series = try Statistics.computeSection(allocator, &collapsed, this.prng.random());
-    defer {
-        for (series) |s| s.deinit(allocator);
-        allocator.free(series);
-    }
-
-    const body = try std.json.Stringify.valueAlloc(allocator, .{ .series = series }, .{});
+    const body = try std.json.Stringify.valueAlloc(allocator, vma_ptr.?.graphs, .{});
     defer allocator.free(body);
 
     try request.respond(body, .{
         .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
     });
 }
-
-pub const CollapsedIpMap = std.ArrayHashMapUnmanaged(
-    DebugInfo.Location,
-    std.ArrayListUnmanaged(OutputFileParserResult.ThroughputNoIP),
-    LocationContext,
-    true,
-);
-
-fn collapseByLocation(
-    allocator: std.mem.Allocator,
-    ip_map: *const OutputFileParserResult.ThroughputIpMap,
-    debug_info: *DebugInfo,
-) !CollapsedIpMap {
-    var out: CollapsedIpMap = .empty;
-    errdefer {
-        var it = out.iterator();
-        while (it.next()) |entry| {
-            entry.key_ptr.deinit(allocator);
-            entry.value_ptr.deinit(allocator);
-        }
-
-        out.deinit(allocator);
-    }
-
-    var ip_it = ip_map.iterator();
-    while (ip_it.next()) |ip_entry| {
-        const loc = try debug_info.resolve(allocator, ip_entry.key_ptr.*);
-
-        const slot = try out.getOrPut(allocator, loc);
-        if (slot.found_existing) loc.deinit(allocator) else slot.value_ptr.* = .empty;
-        try slot.value_ptr.appendSlice(allocator, ip_entry.value_ptr.items);
-    }
-
-    return out;
-}
-
-const LocationContext = struct {
-    pub fn hash(_: LocationContext, loc: DebugInfo.Location) u32 {
-        var hasher = std.hash.Wyhash.init(0);
-
-        switch (loc) {
-            .resolved => |r| {
-                hasher.update(r.file orelse "");
-                hasher.update(std.mem.asBytes(&r.line));
-            },
-
-            .ip => |ip| hasher.update(std.mem.asBytes(&ip)),
-        }
-
-        return @truncate(hasher.final());
-    }
-
-    pub fn eql(_: LocationContext, a: DebugInfo.Location, b: DebugInfo.Location, _: usize) bool {
-        return switch (a) {
-            .resolved => |ar| switch (b) {
-                .resolved => |br| ar.line == br.line and
-                    std.mem.eql(u8, ar.file orelse "", br.file orelse ""),
-
-                .ip => false,
-            },
-
-            .ip => |ai| switch (b) {
-                .ip => |bi| ai == bi,
-                .resolved => false,
-            },
-        };
-    }
-};
 
 fn serveFile(
     this: *const Server,

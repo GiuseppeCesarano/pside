@@ -440,12 +440,8 @@ html, body {
 
 	    (async () => {
 		try {
-		    sections = await (await fetch('/api/sections')).json();
+		    sections = await (await fetch('/api/vmas')).json();
 		    document.getElementById('meta-sections').textContent = sections.length;
-		    if (sections[0]?.binary_path) {
-			const parts = sections[0].binary_path.split('/');
-			document.getElementById('meta-binary').textContent = parts[parts.length - 1];
-		    }
 		    renderSidebar(sections);
 		} catch {
 		    showEmpty('failed to load sections');
@@ -461,22 +457,21 @@ html, body {
 		}
 		items.forEach(s => {
 		    const el = document.createElement('div');
-		    el.className = 'section-item' + (s.vma === activeVma ? ' active' : '');
-		    el.dataset.vma = s.vma;
+		    el.className = 'section-item' + (s.name === activeVma ? ' active' : '');
+		    el.dataset.vma = s.name;
 		    el.innerHTML = `
-		      <div class="name" title="${esc(s.vma)}">${esc(s.vma)}</div>
+		      <div class="name" title="${esc(s.name)}">${esc(s.name)}</div>
 		      <div class="stats">
-			<span class="pill">${s.sample_count} samples</span>
-			<span class="pill">${s.ip_count} IPs</span>
+			<span class="pill">${s.graph_count} graphs</span>
 		      </div>`;
-		    el.addEventListener('click', () => loadSection(s.vma));
+		    el.addEventListener('click', () => loadSection(s.name));
 		    list.appendChild(el);
 		});
 	    }
 
 	    document.getElementById('search').addEventListener('input', e => {
 		const q = e.target.value.toLowerCase();
-		renderSidebar(sections.filter(s => s.vma.toLowerCase().includes(q)));
+		renderSidebar(sections.filter(s => s.name.toLowerCase().includes(q)));
 	    });
 
 	    async function loadSection(vma) {
@@ -499,7 +494,7 @@ html, body {
 		showEmpty(null, true);
 
 		try {
-		    const data = await (await fetch('/api/section?vma=' + encodeURIComponent(vma))).json();
+		    const data = await (await fetch('/api/vma?name=' + encodeURIComponent(vma))).json();
 		    renderSection(data);
 		} catch {
 		    showEmpty('failed to load section data');
@@ -512,7 +507,7 @@ html, body {
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 
-		allSeries = data.series.filter(s => s.points.length > 0);
+		allSeries = data.filter(s => s.points.length > 0);
 
 		const maxPoints = allSeries.reduce((m, s) => Math.max(m, s.points.length), 1);
 		const slider = document.getElementById('min-points-slider');
@@ -539,14 +534,14 @@ html, body {
 		cardState.clear();
 
 		document.getElementById('section-summary').innerHTML =
-		    `<b>${visible.length}</b> IP${visible.length !== 1 ? 's' : ''} &nbsp;·&nbsp; ` +
-		    `<b>${visible[0]?.points.length ?? 0}</b> speedup steps`;
+		    `<b>${visible.length}</b> location${visible.length !== 1 ? 's' : ''} &nbsp;·&nbsp; ` +
+		    `<b>${visible[0]?.points.length ?? 0}</b> experiments`;
 
 		document.getElementById('filter-count').innerHTML =
-		    `<b>${visible.length}</b> / ${allSeries.length} IPs`;
+		    `<b>${visible.length}</b> / ${allSeries.length} locations`;
 
 		if (visible.length === 0) {
-		    showEmpty('no IPs match filter');
+		    showEmpty('no locations match filter');
 		    return;
 		}
 
@@ -565,31 +560,14 @@ html, body {
 	    });
 
 	    function locationTitle(loc) {
-		if (loc.resolved) {
-		    const fn   = loc.resolved.function ?? '??';
-		    const file = loc.resolved.file ?? '??';
-		    const line = loc.resolved.line ?? 0;
-		    return `${fn}  ${file}:${line}`;
-		}
-		return `0x${BigInt(loc.ip).toString(16).padStart(16, '0')}`;
+		return loc;
 	    }
 
 	    function buildLocationEl(loc, color) {
-		if (loc.resolved) {
-		    const fn   = esc(loc.resolved.function ?? '??');
-		    const file = esc((loc.resolved.file ?? '??').split('/').pop());
-		    const line = loc.resolved.line ?? 0;
-		    const el   = document.createElement('div');
-		    el.className = 'loc-resolved';
-		    el.innerHTML =
-			`<span class="loc-fn" style="color:${color}">${fn}</span>` +
-			`<span class="loc-src">${file}<span class="loc-line">:${line}</span></span>`;
-		    return el;
-		}
 		const el = document.createElement('span');
 		el.className = 'loc-ip';
 		el.style.color = color;
-		el.textContent = `0x${BigInt(loc.ip).toString(16).padStart(16, '0')}`;
+		el.textContent = loc;
 		return el;
 	    }
 
@@ -609,7 +587,7 @@ html, body {
 		const pills = document.createElement('div');
 		pills.className = 'ip-pills';
 		pills.innerHTML =
-		    `<span class="pill">${series.points.length} steps</span>` +
+		    `<span class="pill">${series.points.length} experiments</span>` +
 		    (singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : '');
 		header.appendChild(pills);
 
@@ -661,8 +639,8 @@ html, body {
 	    }
 
 	    function buildPlot(chartEl, series, color) {
-		const xVals   = series.points.map(p => p.speedup);
-		const medians = series.points.map(p => p.median);
+		const xVals   = series.points.map((p, i) => i);
+		const percents = series.points.map(p => p.percent);
 		const ciLow   = series.points.map(p => p.ci_low);
 		const ciHigh  = series.points.map(p => p.ci_high);
 
@@ -742,10 +720,10 @@ html, body {
 			    ctx.setLineDash([]);
 
 			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.9)`;
-			    series.points.forEach(p => {
+			    series.points.forEach((p, i) => {
 				if (!p.singleton) return;
-				const x = u.valToPos(p.speedup,'x',true);
-				const y = u.valToPos(p.median, 'y',true);
+				const x = u.valToPos(i,'x',true);
+				const y = u.valToPos(p.percent, 'y',true);
 				ctx.beginPath();
 				ctx.moveTo(x, y-7); ctx.lineTo(x-5, y+4); ctx.lineTo(x+5, y+4);
 				ctx.closePath(); ctx.fill();
@@ -758,12 +736,13 @@ html, body {
 			{
 			    font: '11px monospace', stroke: '#5a6474',
 			    grid: { stroke: '#2a3040', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
-			    label: 'speedup %', labelFont: '10px monospace',
+			    label: 'experiment', labelFont: '10px monospace',
 			    splits: (u, ax, scMin, scMax) => {
-				const major = [0, 25, 50, 75, 100, 125, 150, 175, 200];
-				return major.filter(v => v >= scMin - 1 && v <= scMax + 1);
+				const major = [];
+				for (let i = Math.ceil(scMin); i <= Math.floor(scMax); i++) major.push(i);
+				return major;
 			    },
-			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
+			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0)),
 			},
 			{
 			    font: '11px monospace', stroke: '#5a6474',
@@ -772,13 +751,13 @@ html, body {
 			    splits: (u, ax, scMin, scMax) => {
 				const major = [0, 25, 50, 75, 100, 125, 150, 175, 200];
 				return major.filter(v => v >= scMin - 1 && v <= scMax + 1);
-			    },
-			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
+				     },
+				     values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
 			},
 		    ],
 		};
 
-		return new uPlot(opts, [xVals, medians, ciLow, ciHigh], chartEl);
+		return new uPlot(opts, [xVals, percents, ciLow, ciHigh], chartEl);
 	    }
 
 	    function drawSpline(ctx, points, reverse) {

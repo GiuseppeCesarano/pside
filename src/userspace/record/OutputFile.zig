@@ -65,7 +65,7 @@ fn writeFormatHeader(io: std.Io, file: std.Io.File, program_path: []const u8, pr
     var writer = file.writer(io, &buf);
 
     try writer.interface.writeAll(std.mem.asBytes(&serialization.Header.default));
-    try writer.interface.writeAll(std.mem.asBytes(&serialization.FileInfo{ .hash = program_hash }));
+    try writer.interface.writeAll(program_hash[0..]);
     try writer.interface.writeAll(program_path);
     try writer.interface.writeByte(0);
     try writer.flush();
