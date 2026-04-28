@@ -409,12 +409,6 @@ html, body {
 		    <div id="section-summary"></div>
 		</div>
 
-		<div id="filter-bar" class="hidden">
-		    <label>min points &nbsp;<b id="min-points-val">1</b></label>
-		    <input id="min-points-slider" type="range" min="1" max="21" value="1" step="1">
-		    <span id="filter-count"></span>
-		</div>
-
 		<div id="empty-state">
 		    <div class="big">∅</div>
 		    <span id="empty-msg">no section selected</span>
@@ -489,7 +483,6 @@ html, body {
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 		allSeries = [];
-		document.getElementById('filter-bar').classList.add('hidden');
 
 		showEmpty(null, true);
 
@@ -509,24 +502,11 @@ html, body {
 
 		allSeries = data.filter(s => s.points.length > 0);
 
-		const maxPoints = allSeries.reduce((m, s) => Math.max(m, s.points.length), 1);
-		const slider = document.getElementById('min-points-slider');
-		slider.max = maxPoints;
-		slider.value = 1;
-		document.getElementById('min-points-val').textContent = 1;
-
-		const filterBar = document.getElementById('filter-bar');
-		filterBar.classList.toggle('hidden', allSeries.length === 0);
-
-		document.getElementById('empty-state').classList.add('hidden');
-		scroll.style.display = 'flex';
-
 		applyFilter();
 	    }
 
 	    function applyFilter() {
-		const minPts = parseInt(document.getElementById('min-points-slider').value, 10);
-		const visible = allSeries.filter(s => s.points.length >= minPts);
+		const visible = allSeries;
 
 		const scroll = document.getElementById('charts-scroll');
 		scroll.innerHTML = '';
@@ -534,14 +514,10 @@ html, body {
 		cardState.clear();
 
 		document.getElementById('section-summary').innerHTML =
-		    `<b>${visible.length}</b> location${visible.length !== 1 ? 's' : ''} &nbsp;·&nbsp; ` +
-		    `<b>${visible[0]?.points.length ?? 0}</b> experiments`;
-
-		document.getElementById('filter-count').innerHTML =
-		    `<b>${visible.length}</b> / ${allSeries.length} locations`;
+		    `<b>${visible.length}</b> location${visible.length !== 1 ? 's' : ''}`;
 
 		if (visible.length === 0) {
-		    showEmpty('no locations match filter');
+		    showEmpty('no locations');
 		    return;
 		}
 
@@ -553,11 +529,6 @@ html, body {
 		    scroll.appendChild(buildCard(series, color, i));
 		});
 	    }
-
-	    document.getElementById('min-points-slider').addEventListener('input', e => {
-		document.getElementById('min-points-val').textContent = e.target.value;
-		applyFilter();
-	    });
 
 	    function locationTitle(loc) {
 		return loc;
@@ -586,9 +557,7 @@ html, body {
 
 		const pills = document.createElement('div');
 		pills.className = 'ip-pills';
-		pills.innerHTML =
-		    `<span class="pill">${series.points.length} experiments</span>` +
-		    (singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : '');
+		pills.innerHTML = (singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : '');
 		header.appendChild(pills);
 
 		const expandIcon = document.createElement('span');
@@ -735,14 +704,16 @@ html, body {
 		    axes: [
 			{
 			    font: '11px monospace', stroke: '#5a6474',
-			    grid: { stroke: '#2a3040', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
-			    label: 'experiment', labelFont: '10px monospace',
+			    grid: { stroke: '#2a3040', width: 1 }, 
+			    ticks: { stroke: '#252a33', width: 1 },
+			    label: 'speedup %', 
+			    labelFont: '10px monospace',
 			    splits: (u, ax, scMin, scMax) => {
 				const major = [];
-				for (let i = Math.ceil(scMin); i <= Math.floor(scMax); i++) major.push(i);
+				for (let i = 0; i <= 20; i += 2) major.push(i);
 				return major;
 			    },
-			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0)),
+			    values: (u, splits) => splits.map(v => v == null ? '' : (v * 5).toFixed(0) + '%'),
 			},
 			{
 			    font: '11px monospace', stroke: '#5a6474',
@@ -751,8 +722,8 @@ html, body {
 			    splits: (u, ax, scMin, scMax) => {
 				const major = [0, 25, 50, 75, 100, 125, 150, 175, 200];
 				return major.filter(v => v >= scMin - 1 && v <= scMax + 1);
-				     },
-				     values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
+			    },
+			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
 			},
 		    ],
 		};
@@ -764,36 +735,36 @@ html, body {
 		const pts = reverse ? [...points].reverse() : points;
 		ctx.lineTo(pts[0].x, pts[0].y);
 		for (let i = 0; i < pts.length - 1; i++) {
-				     const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
-				     p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
-				     for (let t = .1; t <= 1; t += .1) {
-				     const t2=t*t, t3=t2*t;
-				     ctx.lineTo(
-				     .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
-				     .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
-				     );
-				     }
-				     }
-				     }
+		    const p0 = pts[Math.max(i-1,0)], p1 = pts[i],
+			p2 = pts[i+1],             p3 = pts[Math.min(i+2,pts.length-1)];
+		    for (let t = .1; t <= 1; t += .1) {
+			const t2=t*t, t3=t2*t;
+			ctx.lineTo(
+			    .5*((2*p1.x)+(-p0.x+p2.x)*t+(2*p0.x-5*p1.x+4*p2.x-p3.x)*t2+(-p0.x+3*p1.x-3*p2.x+p3.x)*t3),
+			    .5*((2*p1.y)+(-p0.y+p2.y)*t+(2*p0.y-5*p1.y+4*p2.y-p3.y)*t2+(-p0.y+3*p1.y-3*p2.y+p3.y)*t3)
+			);
+		    }
+		}
+	    }
 
-				     function showEmpty(msg, loading = false) {
-				     const emptyEl  = document.getElementById('empty-state');
-				     const scrollEl = document.getElementById('charts-scroll');
-				     scrollEl.style.display = 'none';
-				     emptyEl.classList.remove('hidden');
-				     emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
-				     document.getElementById('empty-msg').innerHTML =
-				     loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
-						     }
+	    function showEmpty(msg, loading = false) {
+		const emptyEl  = document.getElementById('empty-state');
+		const scrollEl = document.getElementById('charts-scroll');
+		scrollEl.style.display = 'none';
+		emptyEl.classList.remove('hidden');
+		emptyEl.querySelector('.big').style.display = loading ? 'none' : '';
+		document.getElementById('empty-msg').innerHTML =
+		    loading ? '<div class="spinner"></div>' : (msg ?? 'no section selected');
+	    }
 
-						     window.addEventListener('resize', () => {
-							 cardState.forEach((state, card) => {
-							     if (!state.plot || !card.classList.contains('expanded')) return;
-							     const body = card.querySelector('.ip-chart-body');
-							     const w = body.clientWidth - 16;
-							     if (w > 0) state.plot.setSize({ width: w, height: chartHeight(w) });
-							 });
-						     });
+	    window.addEventListener('resize', () => {
+		cardState.forEach((state, card) => {
+		    if (!state.plot || !card.classList.contains('expanded')) return;
+		    const body = card.querySelector('.ip-chart-body');
+		    const w = body.clientWidth - 16;
+		    if (w > 0) state.plot.setSize({ width: w, height: chartHeight(w) });
+		});
+	    });
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
