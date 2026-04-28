@@ -77,9 +77,7 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
                 error.HttpConnectionClosing => break,
                 else => |e| return e,
             };
-            this.handleRequest(allocator, io, &request) catch |err| {
-                std.log.err("handleRequest: {s}", .{@errorName(err)});
-            };
+            this.handleRequest(allocator, io, &request) catch |err| std.log.err("handleRequest: {s}", .{@errorName(err)});
         }
     }
 }
@@ -95,19 +93,18 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
     const target = request.head.target;
     std.log.debug("{s} {s}", .{ @tagName(request.head.method), target });
 
-    if (std.mem.eql(u8, target, "/")) {
-        try this.serveFile(allocator, io, request, "index.html", "text/html");
-    } else if (std.mem.eql(u8, target, "/uplot.min.js")) {
-        try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript");
-    } else if (std.mem.eql(u8, target, "/uplot.min.css")) {
-        try this.serveFile(allocator, io, request, "uplot.min.css", "text/css");
-    } else if (std.mem.eql(u8, target, "/api/vmas")) {
-        try this.serveVmas(allocator, request);
-    } else if (std.mem.startsWith(u8, target, "/api/vma?name=")) {
-        try this.serveVma(allocator, request, target["/api/vma?name=".len..]);
-    } else {
+    if (std.mem.eql(u8, target, "/"))
+        try this.serveFile(allocator, io, request, "index.html", "text/html")
+    else if (std.mem.eql(u8, target, "/uplot.min.js"))
+        try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript")
+    else if (std.mem.eql(u8, target, "/uplot.min.css"))
+        try this.serveFile(allocator, io, request, "uplot.min.css", "text/css")
+    else if (std.mem.eql(u8, target, "/api/vmas"))
+        try this.serveVmas(allocator, request)
+    else if (std.mem.startsWith(u8, target, "/api/vma?name="))
+        try this.serveVma(allocator, request, target["/api/vma?name=".len..])
+    else
         try request.respond("", .{ .status = .not_found });
-    }
 }
 
 fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request) !void {
