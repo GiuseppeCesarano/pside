@@ -6,24 +6,24 @@ const bootstrap_iterations = 1_000;
 const confidence_interval_low: usize = @intFromFloat(bootstrap_iterations * 0.025);
 const confidence_interval_high: usize = @intFromFloat(bootstrap_iterations * 0.975);
 
-fn sortAndGet75Percentile(data: []f64) f64 {
+fn sortAndGet75Percentile(data: []f32) f32 {
     @setFloatMode(.optimized);
-    std.mem.sort(f64, data, {}, std.sort.asc(f64));
+    std.mem.sort(f32, data, {}, std.sort.asc(f32));
 
-    const idx: f64 = 0.75 * @as(f64, @floatFromInt(data.len - 1));
+    const idx: f32 = 0.75 * @as(f32, @floatFromInt(data.len - 1));
     const lo: usize = @intFromFloat(@floor(idx));
     const hi = lo + 1;
 
-    return if (hi >= data.len) data[lo] else data[lo] + (idx - @as(f64, @floatFromInt(lo))) * (data[hi] - data[lo]);
+    return if (hi >= data.len) data[lo] else data[lo] + (idx - @as(f32, @floatFromInt(lo))) * (data[hi] - data[lo]);
 }
 
 pub const Throughput = struct {
     pub const Vma = struct {
         pub const Graph = struct {
             pub const Point = struct {
-                percent: f64,
-                ci_low: f64,
-                ci_high: f64,
+                percent: f32,
+                ci_low: f32,
+                ci_high: f32,
                 singleton: bool,
             };
 
@@ -74,9 +74,9 @@ pub const Throughput = struct {
 
         var rng_ctx: std.Random.DefaultPrng = .init(experiments.datapoints.len);
         const rng = rng_ctx.random();
-        const bootstrap_distribution = try allocator.create([bootstrap_iterations]f64);
+        const bootstrap_distribution = try allocator.create([bootstrap_iterations]f32);
         defer allocator.destroy(bootstrap_distribution);
-        var resampled = try allocator.alloc(f64, 50);
+        var resampled = try allocator.alloc(f32, 50);
         defer allocator.free(resampled);
 
         const baseline = sortAndGet75Percentile(experiments.datapoints[0].items);
@@ -84,7 +84,7 @@ pub const Throughput = struct {
         for (graph.points[0..], experiments.datapoints) |*graph_point, datapoints| {
             if (resampled.len < datapoints.items.len) {
                 allocator.free(resampled);
-                resampled = try allocator.alloc(f64, datapoints.items.len);
+                resampled = try allocator.alloc(f32, datapoints.items.len);
             }
 
             for (bootstrap_distribution[0..]) |*bootstrap_elment| {
@@ -92,7 +92,7 @@ pub const Throughput = struct {
                 bootstrap_elment.* = 100.0 * sortAndGet75Percentile(resampled[0..datapoints.items.len]) / baseline;
             }
 
-            std.mem.sort(f64, bootstrap_distribution[0..], {}, std.sort.asc(f64));
+            std.mem.sort(f32, bootstrap_distribution[0..], {}, std.sort.asc(f32));
 
             graph_point.* = .{
                 .percent = 100.0 * sortAndGet75Percentile(datapoints.items) / baseline,

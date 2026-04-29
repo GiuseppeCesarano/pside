@@ -61,11 +61,9 @@ pub const SectionHeader = extern struct {
 pub const record = struct {
     pub const Throughput = extern struct {
         relative_ip: u64,
-        progress_delta: u64,
-        wall: u64,
-        injected_delay: u64,
+        throughput: f32,
         speedup_percent: u8,
-        _: [7]u8 = @splat(0),
+        _: [3]u8 = @splat(0),
 
         pub const empty = std.mem.zeroes(Throughput);
 
