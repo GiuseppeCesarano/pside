@@ -82,7 +82,8 @@ pub fn build(b: *std.Build) void {
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
     const is_debug = optimize == .Debug;
     const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
-    const strip_cmd = "\n\tstrip --strip-debug" ++
+    const strip_zig_obj = b.fmt("strip --strip-debug {s}", .{zig_kernel_obj.out_filename});
+    const strip_kernel_mod = "strip --strip-debug" ++
         " --remove-section=.BTF" ++
         " --remove-section=.BTF.ext" ++
         " --remove-section=.eh_frame" ++
@@ -104,14 +105,14 @@ pub fn build(b: *std.Build) void {
         \\PWD := $(CURDIR)
         \\
         \\all:
-    ++ "\n\t" ++
+    ++ "\n\t{s}\n\t" ++
         \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-    ++ "{s}" ++
+    ++ "\n\t{s}" ++
         \\ 
         \\clean:
     ++ "\n\t" ++
         \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
-    , .{ debug_flag, zig_kernel_obj.out_filename, strip_cmd }));
+    , .{ debug_flag, zig_kernel_obj.out_filename, strip_zig_obj, strip_kernel_mod }));
     kernel_module_files.step.dependOn(&zig_kernel_obj.step);
 
     const compile = b.addSystemCommand(&.{"make"});
