@@ -8,7 +8,7 @@ pub const Throughput = struct {
     pub const Vma = struct {
         pub const Experiments = struct {
             pub const speedups = 21;
-            pub const Datapoints = [speedups]std.ArrayListUnmanaged(f64); // [0] = 0% speedup, [20] = 100% speedup
+            pub const Datapoints = [speedups]std.ArrayListUnmanaged(f32); // [0] = 0% speedup, [20] = 100% speedup
 
             location: []const u8,
             datapoints: Datapoints,
@@ -102,7 +102,7 @@ fn collapseThroughputWithDwarf(
         const map_vma = parsed_vmas_map_iterator.next().?;
         for (map_vma.value_ptr.items) |experiment| {
             // TODO: maybe just write directly the float
-            const datapoint = @as(f64, @floatFromInt(experiment.progress_delta)) / @as(f64, @floatFromInt(experiment.wall - experiment.injected_delay));
+            const datapoint = experiment.throughput;
             const speedup_percent = experiment.speedup_percent;
 
             if (speedup_percent % 5 != 0 or speedup_percent > 100) return error.BadSpeedUpPercent;

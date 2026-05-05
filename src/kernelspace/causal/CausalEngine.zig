@@ -241,13 +241,16 @@ fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks, delay_pe
 }
 
 fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Snapshot, target_ip: usize) void {
+    const wall = kernel.time.now.us() - snap.time;
     const vclock_delta = this.virtual_clocks.master.load(.acquire) - snap.master;
+    const injected_delay = vclock_delta * params.delay_per_tick;
+
+    const progress_delta: f32 = @floatFromInt(this.progress.load(.monotonic) -% snap.progress);
+    const virtual_time: f32 = @floatFromInt(wall - injected_delay);
 
     this.disk_writer.push(serialization.record.Throughput{
         .relative_ip = target_ip - this.vma_base.load(.monotonic),
-        .progress_delta = this.progress.load(.monotonic) -% snap.progress,
-        .wall = kernel.time.now.us() - snap.time,
-        .injected_delay = vclock_delta * params.delay_per_tick,
+        .throughput = progress_delta / virtual_time,
         .speedup_percent = @truncate(params.speedup_percent),
     }) catch std.log.warn("Writer buffer full, dropping sample", .{});
 }
