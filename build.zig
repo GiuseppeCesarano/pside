@@ -78,6 +78,7 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&check_obj.step);
 
     const zig_kernel_obj = b.addObject(object_options);
+    zig_kernel_obj.bundle_compiler_rt = true;
 
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
     const is_debug = optimize == .Debug;
