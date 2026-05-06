@@ -519,7 +519,7 @@ test "RefGate: cold path (waiting on closed gate)" {
     };
 
     var ctx = Context{ .gate = &gate };
-    const thread = try std.Thread.spawn(.{}, Context.worker, .{&ctx});
+    const thread: std.Thread = try .spawn(.{}, Context.worker, .{&ctx});
 
     try testing.io.sleep(.fromMilliseconds(10), .real);
     try testing.expectEqual(false, ctx.entered.load(.acquire));
@@ -613,27 +613,19 @@ test "ThreadClocks: fork" {
 test "ThreadClocks: collision path" {
     const allocator = testing.allocator;
 
-    // With min_cap slots and many entries the collision bit may or may not
-    // fire depending on hash distribution; we just verify all values survive.
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
     // Use enough entries that collisions are plausible (half capacity).
-    const n = min_cap / 2;
     var keys: [min_cap / 2]ThreadClocks.Key = undefined;
     var expected: [min_cap / 2]ThreadClocks.Ticks = undefined;
-    for (0..n) |i| {
-        keys[i] = .{ .data = @intCast((i + 1) * 2) };
-        expected[i] = @intCast((i + 1) * 10);
+    for (&keys, &expected, 0..) |*key, *expected_elm, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        expected_elm.* = @intCast((i + 1) * 10);
     }
 
-    for (keys, expected) |key, ticks| {
-        try clocks.put(key, ticks);
-    }
-
-    for (keys, expected) |key, ticks| {
-        try testing.expectEqual(ticks, clocks.get(key, .ticks));
-    }
+    for (keys, expected) |key, ticks| try clocks.put(key, ticks);
+    for (keys, expected) |key, ticks| try testing.expectEqual(ticks, clocks.get(key, .ticks));
 }
 
 test "ThreadClocks: Causal Mechanics" {
@@ -667,8 +659,6 @@ test "ThreadClocks: concurrent stress" {
     const thread_count = 8;
     const ops_per_thread = 10_000;
 
-    const Op = enum { tick, fork_and_tick };
-
     const Context = struct {
         clocks: *ThreadClocks,
         id: usize,
@@ -681,29 +671,19 @@ test "ThreadClocks: concurrent stress" {
             const key: ThreadClocks.Key = .{ .data = @intCast((ctx.id + 1) * 2) };
 
             _ = ctx.registered.fetchAdd(1, .release);
-            while (ctx.registered.load(.acquire) < thread_count)
-                std.atomic.spinLoopHint();
+            while (ctx.registered.load(.acquire) < thread_count) std.atomic.spinLoopHint();
 
-            var i: usize = 0;
-            while (i < ops_per_thread) : (i += 1) {
-                const op: Op = @enumFromInt(random.uintLessThan(u8, std.meta.fields(Op).len));
-
-                switch (op) {
-                    .tick => {
-                        ctx.clocks.tick(key) catch {};
-                    },
-
-                    .fork_and_tick => {
+            for (0..ops_per_thread) |i|
+                switch (random.uintLessThan(u8, 2)) {
+                    1 => ctx.clocks.tick(key) catch {},
+                    2 => {
                         const child_virtual_key: ThreadClocks.Key = .{ .data = @intCast((ctx.id * ops_per_thread + i) * 2 + 100) };
                         if (ctx.clocks.fork(key, child_virtual_key)) |_| {
-                            var t: usize = 0;
-                            while (t < 3) : (t += 1) {
-                                ctx.clocks.tick(child_virtual_key) catch break;
-                            }
-                        } else |_| {}
+                            for (0..3) |_| ctx.clocks.tick(child_virtual_key) catch break;
+                        } else |_| continue;
                     },
-                }
-            }
+                    else => unreachable,
+                };
         }
     };
 
@@ -715,15 +695,12 @@ test "ThreadClocks: concurrent stress" {
     }
 
     var registered = std.atomic.Value(u32).init(0);
-
     var contexts: [thread_count]Context = undefined;
-    for (0..thread_count) |i| {
-        contexts[i] = .{ .clocks = &clocks, .id = i, .registered = &registered };
-    }
-
     var threads: [thread_count]std.Thread = undefined;
-    for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{&contexts[i]});
+
+    for (&contexts, &threads, 0..) |*context, *thread, i| {
+        context.* = .{ .clocks = &clocks, .id = i, .registered = &registered };
+        thread.* = try .spawn(.{}, Context.run, .{context});
     }
     for (threads) |t| t.join();
 
@@ -762,10 +739,7 @@ test "ThreadClocks: concurrent grow" {
             const root_key: ThreadClocks.Key = .{ .data = 2 };
             _ = ctx.clocks.fork(root_key, key) catch return;
 
-            var i: usize = 0;
-            while (i < 5_000) : (i += 1) {
-                ctx.clocks.tick(key) catch break;
-            }
+            for (0..5_000) |_| ctx.clocks.tick(key) catch break;
         }
     };
 
@@ -783,18 +757,14 @@ test "ThreadClocks: concurrent grow" {
     };
 
     var worker_contexts: [thread_count]Context = undefined;
-    for (0..thread_count) |i| {
-        worker_contexts[i] = .{ .clocks = &clocks, .id = i };
-    }
-
+    var threads: [thread_count + 1]std.Thread = undefined;
     var grow_ctx = GrowContext{ .clocks = &clocks, .alloc = allocator };
 
-    var threads: [thread_count + 1]std.Thread = undefined;
-    for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{&worker_contexts[i]});
+    threads[thread_count] = try .spawn(.{}, GrowContext.run, .{&grow_ctx});
+    for (&worker_contexts, threads[0 .. threads.len - 1], 0..) |*context, *thread, i| {
+        context.* = .{ .clocks = &clocks, .id = i };
+        thread.* = try .spawn(.{}, Context.run, .{context});
     }
-    threads[thread_count] = try std.Thread.spawn(.{}, GrowContext.run, .{&grow_ctx});
-
     for (threads) |t| t.join();
 
     try testing.expect(clocks.pairs.len >= min_cap);
@@ -819,17 +789,16 @@ fn bitIsSet(clocks: *ThreadClocks, key: ThreadClocks.Key) bool {
     const len = clocks.pairs.len;
     const mask = len - 1;
     const max_retries = @max(16, len / 32);
-    var i: usize = 0;
-    while (i < max_retries) : (i += 1) {
+
+    return for (0..max_retries) |i| {
         const index = (hash + i) & mask;
         const current_key = clocks.pairs[index].key.load(.acquire);
         if (current_key.isEql(key)) {
             const bucket = index / @bitSizeOf(usize);
             const bit = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
-            return clocks.bitmask[bucket].load(.monotonic) & bit != 0;
+            break clocks.bitmask[bucket].load(.monotonic) & bit != 0;
         }
-    }
-    return false;
+    } else false;
 }
 
 test "bitmask: put sets bit, remove clears it" {
@@ -856,21 +825,19 @@ test "bitmask: popcount tracks live entry count across multiple puts and removes
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const n = 16;
-    var keys: [n]ThreadClocks.Key = undefined;
-    for (0..n) |i| {
-        keys[i] = .{ .data = @intCast((i + 1) * 2) };
-        try clocks.put(keys[i], 0);
+    var keys: [16]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, 0);
         try testing.expectEqual(i + 1, countLiveBits(&clocks));
     }
 
-    var live: usize = n;
-    for (0..n) |i| {
-        if (i % 2 == 0) {
-            _ = clocks.remove(keys[i]);
-            live -= 1;
-            try testing.expectEqual(live, countLiveBits(&clocks));
-        }
+    var live = keys.len;
+    for (&keys, 0..) |*key, i| {
+        if (i % 2 == 1) continue;
+        _ = clocks.remove(key.*);
+        live -= 1;
+        try testing.expectEqual(live, countLiveBits(&clocks));
     }
 }
 
@@ -898,23 +865,21 @@ test "bitmask: grow migrates all live bits and clears none" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const n = 8;
-    var keys: [n]ThreadClocks.Key = undefined;
-    for (0..n) |i| {
-        keys[i] = .{ .data = @intCast((i + 1) * 2) };
-        try clocks.put(keys[i], @intCast(i * 10));
+    var keys: [8]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, @intCast(i * 10));
     }
 
-    try testing.expectEqual(n, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len, countLiveBits(&clocks));
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
     allocator.free(old[1]);
 
-    for (keys) |key| {
-        try testing.expect(bitIsSet(&clocks, key));
-    }
-    try testing.expectEqual(n, countLiveBits(&clocks));
+    for (keys) |key| try testing.expect(bitIsSet(&clocks, key));
+
+    try testing.expectEqual(keys.len, countLiveBits(&clocks));
 }
 
 test "bitmask: grow with partial removes — only live entries retain their bit" {
@@ -922,31 +887,27 @@ test "bitmask: grow with partial removes — only live entries retain their bit"
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const n = 12;
-    var keys: [n]ThreadClocks.Key = undefined;
-    for (0..n) |i| {
-        keys[i] = .{ .data = @intCast((i + 1) * 2) };
-        try clocks.put(keys[i], 0);
+    var keys: [12]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, 0);
     }
 
-    for (0..n) |i| {
-        if (i % 2 == 0) _ = clocks.remove(keys[i]);
-    }
-    try testing.expectEqual(n / 2, countLiveBits(&clocks));
+    for (&keys, 0..) |key, i| _ = if (i % 2 == 0) clocks.remove(key);
+
+    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
     allocator.free(old[1]);
 
-    try testing.expectEqual(n / 2, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
 
-    for (0..n) |i| {
-        if (i % 2 == 0) {
-            try testing.expect(!bitIsSet(&clocks, keys[i]));
-        } else {
-            try testing.expect(bitIsSet(&clocks, keys[i]));
-        }
-    }
+    for (&keys, 0..) |key, i|
+        if (i % 2 == 0)
+            try testing.expect(!bitIsSet(&clocks, key))
+        else
+            try testing.expect(bitIsSet(&clocks, key));
 }
 
 test "ThreadClocks: forEach visits all live entries exactly once" {
@@ -954,11 +915,10 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    const n = 8;
-    var keys: [n]ThreadClocks.Key = undefined;
-    for (0..n) |i| {
-        keys[i] = .{ .data = @intCast((i + 1) * 2) };
-        try clocks.put(keys[i], @intCast(i * 10));
+    var keys: [8]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, @intCast(i * 10));
     }
 
     clocks.master.store(30, .release);
@@ -976,7 +936,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
 
     clocks.forEach(cb, .{ &count, &ticks_sum });
 
-    try testing.expectEqual(n - 1, count);
+    try testing.expectEqual(keys.len - 1, count);
     try testing.expectEqual(250, ticks_sum);
 }
 
@@ -998,9 +958,7 @@ test "Pool: exhaustion and capacity" {
     var pool: P = .empty;
     var ptrs: [@bitSizeOf(usize)]*u8 = undefined;
 
-    for (0..@bitSizeOf(usize)) |i| {
-        ptrs[i] = pool.getEntry() orelse return error.TestUnexpectedFull;
-    }
+    for (&ptrs) |*ptr| ptr.* = pool.getEntry() orelse return error.TestUnexpectedFull;
 
     try testing.expectEqual(null, pool.getEntry());
 
@@ -1033,17 +991,13 @@ test "Pool: concurrent churn" {
                     ptr.* = ctx.id;
                     if (random.boolean()) std.atomic.spinLoopHint();
                     ctx.p.freeEntry(ptr);
-                } else {
-                    std.atomic.spinLoopHint();
-                }
+                } else std.atomic.spinLoopHint();
             }
         }
     };
 
     var threads: [thread_count]std.Thread = undefined;
-    for (0..thread_count) |i| {
-        threads[i] = try std.Thread.spawn(.{}, Context.run, .{Context{ .p = pool, .id = i }});
-    }
+    for (&threads, 0..) |*thread, i| thread.* = try .spawn(.{}, Context.run, .{Context{ .p = pool, .id = i }});
 
     for (threads) |t| t.join();
 
