@@ -2,17 +2,14 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const is_release_bundle = b.option(bool, "release", "Build CLI in ReleaseSmall and Kernel in ReleaseFast") orelse false;
-    const target = b.standardTargetOptions(.{
-        .whitelist = &.{
-            .{
-                .os_tag = .linux,
-                .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
-            },
-        },
-    });
     const optimize = if (is_release_bundle) .ReleaseSmall else b.standardOptimizeOption(.{});
     const kernel_optimize = if (is_release_bundle) .ReleaseFast else optimize;
-
+    const target = b.standardTargetOptions(.{
+        .whitelist = &.{.{
+            .os_tag = .linux,
+            .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
+        }},
+    });
     var kernel_target = target;
     kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
     kernel_target.query = switch (kernel_target.query.cpu_arch.?) {
@@ -79,6 +76,7 @@ pub fn build(b: *std.Build) void {
 
     const zig_kernel_obj = b.addObject(object_options);
     zig_kernel_obj.bundle_compiler_rt = true;
+    zig_kernel_obj.link_gc_sections = true;
 
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
     const is_debug = optimize == .Debug;
