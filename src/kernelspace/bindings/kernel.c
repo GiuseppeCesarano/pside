@@ -3,14 +3,12 @@
 #include <linux/dcache.h>
 #include <linux/delay.h>
 #include <linux/device.h>
-#include <linux/fs.h>
 #include <linux/ftrace_regs.h>
 #include <linux/io.h>
 #include <linux/kprobes.h>
 #include <linux/kthread.h>
 #include <linux/ktime.h>
 #include <linux/mm.h>
-#include <linux/module.h>
 #include <linux/namei.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
@@ -18,37 +16,35 @@
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
-#include <linux/wait.h>
-
-#include <linux/module.h>
 
 MODULE_DESCRIPTION("Pside causal profiler's kernel module");
-MODULE_LICENSE("GPL"); 
+MODULE_LICENSE("GPL");
 
 /* Forward declarations */
 
 /* Logging */
-void c_pr_err(const char *);
-void c_pr_warn(const char *);
-void c_pr_info(const char *);
-void c_pr_debug(const char *);
+void c_pr_err(const char * /*msg*/);
+void c_pr_warn(const char * /*msg*/);
+void c_pr_info(const char * /*msg*/);
+void c_pr_debug(const char * /*msg*/);
 
 /* Copy from/to userspace */
-unsigned long c_copy_to_user(void *, const void *, unsigned long);
-unsigned long c_copy_from_user(void *, const void *, unsigned long);
+unsigned long c_copy_to_user(void * /*to*/, const void * /*from*/,
+                             unsigned long /*n*/);
+unsigned long c_copy_from_user(void * /*to*/, const void * /*from*/,
+                               unsigned long /*n*/);
 
 /* Memory management */
-void *c_kmalloc(size_t);
-void c_kfree(void *);
-void *c_kmalloc_atomic(size_t);
+void *c_kmalloc(size_t /*size*/);
+void c_kfree(void * /*ptr*/);
+void *c_kmalloc_atomic(size_t /*size*/);
 
 /* Delay utilities */
-void c_ndelay(unsigned long);
-void c_udelay(unsigned long);
-void c_mdelay(unsigned long);
+void c_ndelay(unsigned long /*nsec*/);
+void c_udelay(unsigned long /*usec*/);
+void c_mdelay(unsigned long /*msec*/);
 
 /* Time */
 u64 c_ktime_get_ns(void);
@@ -57,12 +53,13 @@ u64 c_ktime_get_ns(void);
 struct task_struct *c_current_task(void);
 pid_t c_pid(struct task_struct *);
 pid_t c_tid(struct task_struct *);
-int c_task_is_running(struct task_struct *);
-int c_task_is_dead(struct task_struct *);
-struct callback_head **c_task_work_ptr(struct task_struct *);
+int c_task_is_running(struct task_struct * /*task*/);
+int c_task_is_dead(struct task_struct * /*task*/);
+struct callback_head **c_task_work_ptr(struct task_struct * /*task*/);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
-int c_task_work_add(struct task_struct *, struct callback_head *, int);
+int c_task_work_add(struct task_struct * /*task*/,
+                    struct callback_head * /*twork*/, int /*notify_mode*/);
 struct task_struct *c_get_task_from_tid(pid_t);
 void c_get_task_struct(struct task_struct *t);
 void c_put_task_struct(struct task_struct *t);
@@ -75,10 +72,11 @@ void c_rcu_read_unlock(void);
 struct VmaRange {
   unsigned long begin;
   unsigned long end;
-};
+} __attribute__((aligned(16)));
 
-int c_snapshot_executable_vmas(struct task_struct *, const char *,
-                               struct VmaRange *, int);
+int c_snapshot_executable_vmas(struct task_struct * /*task*/,
+                               const char * /*filter*/,
+                               struct VmaRange * /*ranges*/, int /*max*/);
 
 /* Chardev */
 
@@ -92,9 +90,10 @@ struct chardev {
 };
 
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
-int c_chardev_register(struct chardev *, const char *, ioctl_fn);
-void c_chardev_unregister(struct chardev *);
-void *c_get_shared_buffer(struct chardev *);
+int c_chardev_register(struct chardev * /*d*/, const char * /*name*/,
+                       ioctl_fn /*callback*/);
+void c_chardev_unregister(struct chardev * /*d*/);
+void *c_get_shared_buffer(struct chardev * /*d*/);
 void c_chardev_wake(struct chardev *);
 
 /* Perf */
@@ -102,29 +101,30 @@ struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
                                                       int, pid_t,
                                                       perf_overflow_handler_t,
                                                       void *);
-void c_perf_event_enable(struct perf_event *);
-void c_perf_event_disable(struct perf_event *);
-int c_perf_event_release_kernel(struct perf_event *);
-void *c_perf_event_context(struct perf_event *);
+void c_perf_event_enable(struct perf_event * /*event*/);
+void c_perf_event_disable(struct perf_event * /*event*/);
+int c_perf_event_release_kernel(struct perf_event * /*event*/);
+void *c_perf_event_context(struct perf_event * /*event*/);
 
 /* Kthread */
-struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
-int c_kthread_stop(struct task_struct *);
+struct task_struct *c_kthread_run(int (* /*threadfn*/)(void *), void * /*data*/,
+                                  const char * /*name*/);
+int c_kthread_stop(struct task_struct * /*k*/);
 bool c_kthread_should_stop(void);
 
 /* Sleep */
-void c_sleep(unsigned long);
+void c_sleep(unsigned long /*usecs*/);
 
 /* Tracepoints */
 void c_tracepoint_init(void);
-int c_register_sched_fork(void *, void *);
-void c_unregister_sched_fork(void *, void *);
-int c_register_sched_switch(void *, void *);
-void c_unregister_sched_switch(void *, void *);
-int c_register_sched_exit(void *, void *);
-void c_unregister_sched_exit(void *, void *);
-int c_register_sched_waking(void *, void *);
-void c_unregister_sched_waking(void *, void *);
+int c_register_sched_fork(void * /*callback*/, void * /*data*/);
+void c_unregister_sched_fork(void * /*callback*/, void * /*data*/);
+int c_register_sched_switch(void * /*callback*/, void * /*data*/);
+void c_unregister_sched_switch(void * /*callback*/, void * /*data*/);
+int c_register_sched_exit(void * /*callback*/, void * /*data*/);
+void c_unregister_sched_exit(void * /*callback*/, void * /*data*/);
+int c_register_sched_waking(void * /*callback*/, void * /*data*/);
+void c_unregister_sched_waking(void * /*callback*/, void * /*data*/);
 void c_tracepoint_sync(void);
 
 /* Preemept */
@@ -138,8 +138,8 @@ void c_complete(struct completion *);
 void c_reinit_completion(struct completion *);
 
 /* File */
-struct file *c_fget(int);
-void c_fput(struct file *);
+struct file *c_fget(int /*fd*/);
+void c_fput(struct file * /*f*/);
 ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
 ssize_t c_file_size(struct file *);
 
@@ -209,8 +209,8 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
 }
 
 struct task_struct *c_get_task_from_tid(pid_t tid) {
-  struct pid *pid_struct;
-  struct task_struct *task;
+  struct pid *pid_struct = NULL;
+  struct task_struct *task = NULL;
 
   pid_struct = find_get_pid(tid);
   if (!pid_struct) {
@@ -234,8 +234,9 @@ void c_rcu_read_unlock(void) { rcu_read_unlock(); }
 /* VMA */
 int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
                                struct VmaRange *ranges, int max) {
-  if (!task->mm)
+  if (!task->mm) {
     return 0;
+  }
   int count = 0;
   mmap_read_lock(task->mm);
   struct vm_area_struct *vma = find_vma(task->mm, 0);
@@ -245,8 +246,9 @@ int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
         ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
       } else if (vma->vm_file) {
         const char *name = vma->vm_file->f_path.dentry->d_name.name;
-        if (strcmp(name, filter) == 0)
+        if (strcmp(name, filter) == 0) {
           ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
+        }
       }
     }
     vma = find_vma(task->mm, vma->vm_end);
@@ -328,18 +330,20 @@ struct perf_event *
 c_perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
                                    pid_t pid, perf_overflow_handler_t callback,
                                    void *context) {
-  struct task_struct *task;
-  struct pid *pid_struct;
+  struct task_struct *task = NULL;
+  struct pid *pid_struct = NULL;
 
   pid_struct = find_get_pid(pid);
-  if (!pid_struct)
+  if (!pid_struct) {
     return ERR_PTR(-ESRCH);
+  }
 
   task = get_pid_task(pid_struct, PIDTYPE_PID);
   put_pid(pid_struct);
 
-  if (!task)
+  if (!task) {
     return ERR_PTR(-ESRCH);
+  }
 
   struct perf_event *event =
       perf_event_create_kernel_counter(attr, cpu, task, callback, context);
@@ -376,7 +380,7 @@ bool c_kthread_should_stop(void) { return kthread_should_stop(); }
 void c_sleep(unsigned long usecs) { usleep_range(usecs - 5, usecs + 5); }
 
 // This is the actual tracepoint object defined in the kernel core
-extern struct tracepoint __tracepoint_sched_process_fork;
+extern struct tracepoint tracepoint_sched_process_fork;
 
 /* Tracepoints */
 
@@ -385,17 +389,18 @@ struct tracepoint_provider {
   struct tracepoint *sched_exit;
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
-} tp_prov = {0};
+} __attribute__((aligned(32))) tp_prov = {0};
 
 static void lookup_all_tps(struct tracepoint *tp, void *priv) {
-  if (strcmp(tp->name, "sched_process_fork") == 0)
+  if (strcmp(tp->name, "sched_process_fork") == 0) {
     tp_prov.sched_fork = tp;
-  else if (strcmp(tp->name, "sched_process_exit") == 0)
+  } else if (strcmp(tp->name, "sched_process_exit") == 0) {
     tp_prov.sched_exit = tp;
-  else if (strcmp(tp->name, "sched_waking") == 0)
+  } else if (strcmp(tp->name, "sched_waking") == 0) {
     tp_prov.sched_waking = tp;
-  else if (strcmp(tp->name, "sched_switch") == 0)
+  } else if (strcmp(tp->name, "sched_switch") == 0) {
     tp_prov.sched_switch = tp;
+  }
 }
 
 void c_tracepoint_init(void) {
@@ -409,8 +414,9 @@ int c_register_sched_fork(void *callback, void *data) {
 }
 
 void c_unregister_sched_fork(void *callback, void *data) {
-  if (tp_prov.sched_fork)
+  if (tp_prov.sched_fork) {
     tracepoint_probe_unregister(tp_prov.sched_fork, callback, data);
+  }
 }
 
 int c_register_sched_switch(void *callback, void *data) {
@@ -420,8 +426,9 @@ int c_register_sched_switch(void *callback, void *data) {
 }
 
 void c_unregister_sched_switch(void *callback, void *data) {
-  if (tp_prov.sched_switch)
+  if (tp_prov.sched_switch) {
     tracepoint_probe_unregister(tp_prov.sched_switch, callback, data);
+  }
 }
 
 int c_register_sched_exit(void *callback, void *data) {
@@ -431,8 +438,9 @@ int c_register_sched_exit(void *callback, void *data) {
 }
 
 void c_unregister_sched_exit(void *callback, void *data) {
-  if (tp_prov.sched_exit)
+  if (tp_prov.sched_exit) {
     tracepoint_probe_unregister(tp_prov.sched_exit, callback, data);
+  }
 }
 
 int c_register_sched_waking(void *callback, void *data) {
@@ -442,8 +450,9 @@ int c_register_sched_waking(void *callback, void *data) {
 }
 
 void c_unregister_sched_waking(void *callback, void *data) {
-  if (tp_prov.sched_waking)
+  if (tp_prov.sched_waking) {
     tracepoint_probe_unregister(tp_prov.sched_waking, callback, data);
+  }
 }
 
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
