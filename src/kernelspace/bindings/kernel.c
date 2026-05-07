@@ -19,8 +19,6 @@
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
 
-MODULE_DESCRIPTION("Pside causal profiler's kernel module");
-MODULE_LICENSE("GPL");
 
 /* Forward declarations */
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const is_release_bundle = b.option(bool, "release", "Build CLI in ReleaseSmall and Kernel in ReleaseFast") orelse false;
     const optimize = if (is_release_bundle) .ReleaseSmall else b.standardOptimizeOption(.{});
     const kernel_optimize = if (is_release_bundle) .ReleaseFast else optimize;
@@ -75,7 +75,12 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&check_obj.step);
 
     const zig_kernel_obj = b.addObject(object_options);
+    try zig_kernel_obj.force_undefined_symbols.put("init_module", {});
+    try zig_kernel_obj.force_undefined_symbols.put("cleanup_module", {});
+    try zig_kernel_obj.force_undefined_symbols.put("description", {});
+    try zig_kernel_obj.force_undefined_symbols.put("license", {});
     zig_kernel_obj.bundle_compiler_rt = true;
+    zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;
 
     const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");

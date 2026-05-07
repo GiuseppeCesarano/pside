@@ -53,7 +53,6 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?[2]u32, allocator: std.mem.Allo
 
         return err;
     };
-
     errdefer deleteModule() catch |err| std.log.err("Could not unload kernel module: {s}", .{@errorName(err)});
 
     rt.ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write });
