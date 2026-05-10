@@ -45,7 +45,13 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
-    const bytes = std.mem.asBytes(&record);
+    const type_info = @typeInfo(@TypeOf(record));
+    if (type_info == .@"struct" and type_info.@"struct".is_tuple) {
+        inline for (record) |field| try this.push(field);
+        return;
+    }
+
+    const bytes = if (@TypeOf(record) == []const u8) record else std.mem.asBytes(&record);
     try this.pushBytes(bytes);
 }
 

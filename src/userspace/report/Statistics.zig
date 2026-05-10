@@ -108,8 +108,7 @@ pub const Throughput = struct {
     pub fn deinit(this: Throughput, allocator: std.mem.Allocator) void {
         for (this.vmas) |vma| {
             allocator.free(vma.name);
-            for (vma.graphs) |graph|
-                allocator.free(graph.location);
+            for (vma.graphs) |graph| allocator.free(graph.location);
             allocator.free(vma.graphs);
         }
         allocator.free(this.vmas);

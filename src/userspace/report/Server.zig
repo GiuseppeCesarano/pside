@@ -84,8 +84,7 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
 
 pub fn stop(this: *Server, io: Io) void {
     if (this.should_shut_down.swap(true, .monotonic)) return;
-    var stream = this.server.socket.address.connect(io, .{ .mode = .stream }) catch
-        @panic("Server shutdown failed");
+    var stream = this.server.socket.address.connect(io, .{ .mode = .stream }) catch @panic("Server shutdown failed");
     stream.close(io);
 }
 

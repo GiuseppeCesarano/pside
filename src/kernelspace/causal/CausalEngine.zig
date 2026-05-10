@@ -101,9 +101,11 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     this.vma_ranges = try .snapshot(task, vma_name);
 
     try this.disk_writer.start(fd);
-    try this.disk_writer.push(serialization.SectionHeader{ .kind = .throughput });
-    try this.disk_writer.pushBytes(vma_name);
-    try this.disk_writer.push(@as(u8, 0));
+
+    try this.disk_writer.push(.{
+        serialization.SectionHeader{ .kind = .throughput },
+        vma_name[0 .. vma_name.len + 1],
+    });
 
     try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);

@@ -194,21 +194,27 @@ pub fn build(b: *std.Build) !void {
     const uplot = b.dependency("uplot", .{});
     const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
 
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        b.path("src/userspace/report/web/index.html"),
-        web_dir,
-        "index.html",
-    ).step);
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        uplot.path("dist/uPlot.iife.min.js"),
-        web_dir,
-        "uplot.min.js",
-    ).step);
-    b.getInstallStep().dependOn(&b.addInstallFileWithDir(
-        uplot.path("dist/uPlot.min.css"),
-        web_dir,
-        "uplot.min.css",
-    ).step);
+    b.getInstallStep().dependOn(
+        &b.addInstallFileWithDir(
+            b.path("src/userspace/report/web/index.html"),
+            web_dir,
+            "index.html",
+        ).step,
+    );
+    b.getInstallStep().dependOn(
+        &b.addInstallFileWithDir(
+            uplot.path("dist/uPlot.iife.min.js"),
+            web_dir,
+            "uplot.min.js",
+        ).step,
+    );
+    b.getInstallStep().dependOn(
+        &b.addInstallFileWithDir(
+            uplot.path("dist/uPlot.min.css"),
+            web_dir,
+            "uplot.min.css",
+        ).step,
+    );
 
     const cli_tests = b.addTest(.{ .root_module = cli_mod });
     const run_cli_tests = b.addRunArtifact(cli_tests);
