@@ -163,7 +163,7 @@ fn serveFile(
     const path = try std.fs.path.join(allocator, &.{ this.share_path, filename });
     defer allocator.free(path);
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const file = std.Io.Dir.openFileAbsolute(io, path_z, .{}) catch |err| {

@@ -250,7 +250,7 @@ fn PrependedTuple(Tuple: type, Value: type) type {
         current_type.* = field.type;
     }
 
-    return std.meta.Tuple(&types);
+    return @Tuple(&types);
 }
 
 const OptionsTest = OptionsImpl(std.mem.SplitIterator(u8, .scalar));

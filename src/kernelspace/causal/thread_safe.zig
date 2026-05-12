@@ -62,7 +62,7 @@ pub const ThreadClocks = struct {
         data: usize,
 
         const bit_size = @bitSizeOf(Key);
-        const Unsigned = std.meta.Int(.unsigned, bit_size);
+        const Unsigned = @Int(.unsigned, bit_size);
         // Task pointers are always aligned so the first bit will always be 0
         // and we can use that as collide flag
         const collided_bit: Unsigned = 1;

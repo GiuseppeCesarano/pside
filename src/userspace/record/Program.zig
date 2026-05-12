@@ -58,13 +58,13 @@ pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Env
     const args_slice = try allocator.allocSentinel(?[*:0]const u8, final_argc, null);
     errdefer allocator.free(args_slice);
 
-    const allocated_name = try allocator.dupeZ(u8, name);
+    const allocated_name = try allocator.dupeSentinel(u8, name, 0);
     args_slice[0] = @ptrCast(allocated_name);
 
     var i: usize = 1;
     while (i < final_argc) : (i += 1) {
         if (it.next()) |next_arg| {
-            const allocated_arg = try allocator.dupeZ(u8, next_arg);
+            const allocated_arg = try allocator.dupeSentinel(u8, next_arg, 0);
             args_slice[i] = @ptrCast(allocated_arg);
         }
     }
@@ -80,7 +80,7 @@ fn isSudo(path: []const u8) bool {
 fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
     if (std.mem.findScalar(u8, binary_path, '/') != null) {
         _ = try std.Io.Dir.cwd().statFile(io, binary_path, .{});
-        const copy = try allocator.dupeZ(u8, binary_path);
+        const copy = try allocator.dupeSentinel(u8, binary_path, 0);
         return @ptrCast(copy.ptr);
     }
 
