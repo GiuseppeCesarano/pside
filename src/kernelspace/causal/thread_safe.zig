@@ -69,6 +69,7 @@ pub const ThreadClocks = struct {
 
         pub const empty: Key = .{ .data = 0 };
         pub const empty_collided: Key = @bitCast(collided_bit);
+
         pub const reserved: Key = @bitCast(std.math.maxInt(Unsigned) & ~collided_bit);
 
         pub fn isEql(this: Key, other: Key) bool {
@@ -173,8 +174,10 @@ pub const ThreadClocks = struct {
             // Double insertion of the same key would mean broken logic
             assert(!current_key.isEql(key));
 
+            const reserved = Key{ .data = Key.reserved.data | current_key.data };
+
             if (current_key.isEql(.empty) and
-                this.pairs[index].key.cmpxchgStrong(current_key, .reserved, .acquire, .monotonic) == null)
+                this.pairs[index].key.cmpxchgStrong(current_key, reserved, .acquire, .monotonic) == null) // or will preserve the collided bit.
                 return &this.pairs[index];
 
             if (!current_key.hasCollided())

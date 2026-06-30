@@ -39,7 +39,7 @@ fn OptionsImpl(ItType: type) type {
             };
 
             const Union = union_block: {
-                const Attributes = std.builtin.Type.UnionField.Attributes;
+                const Attributes = std.builtin.Type.Union.FieldAttributes;
 
                 var fields_attributes: [map.types.len]Attributes = undefined;
                 for (&fields_attributes, map.types) |*attributes, Type| {
@@ -62,11 +62,11 @@ fn OptionsImpl(ItType: type) type {
             type_tag: allowed_types.Tag,
             offset_in_parent: usize,
 
-            pub fn init(Parent: type, field: std.builtin.Type.StructField) FlagInfo {
+            pub fn init(Parent: type, name: []const u8, Type: type) FlagInfo {
                 return .{
-                    .name = field.name,
-                    .type_tag = allowed_types.tagFromType(field.type),
-                    .offset_in_parent = @offsetOf(Parent, field.name),
+                    .name = name,
+                    .type_tag = allowed_types.tagFromType(Type),
+                    .offset_in_parent = @offsetOf(Parent, name),
                 };
             }
 
@@ -127,9 +127,9 @@ fn OptionsImpl(ItType: type) type {
 
             var args = this.args;
             const Mask = Iterator.Mask;
-            var positional_mask: Mask = .initEmpty();
-            var unknown_flags_mask: Mask = .initEmpty();
-            var parse_errors_mask: Mask = .initEmpty();
+            var positional_mask: Mask = .empty;
+            var unknown_flags_mask: Mask = .empty;
+            var parse_errors_mask: Mask = .empty;
             var i: Mask.ShiftInt = 0;
 
             while (args.next()) |arg| : (i +|= 1) {
@@ -168,16 +168,16 @@ fn OptionsImpl(ItType: type) type {
             };
         }
 
-        fn createFlagsInfo(FlagsSchema: type) [std.meta.fields(FlagsSchema).len]FlagInfo {
+        fn createFlagsInfo(FlagsSchema: type) [@typeInfo(FlagsSchema).@"struct".field_names.len]FlagInfo {
             const info = @typeInfo(FlagsSchema);
 
             if (info != .@"struct") {
                 @compileError("Input must be a struct\n");
             }
 
-            comptime var runtime_flags: [info.@"struct".fields.len]FlagInfo = undefined;
-            comptime for (info.@"struct".fields, &runtime_flags) |field, *runtime_flag| {
-                runtime_flag.* = .init(FlagsSchema, field);
+            comptime var runtime_flags: [info.@"struct".field_names.len]FlagInfo = undefined;
+            comptime for (info.@"struct".field_names, info.@"struct".field_types, &runtime_flags) |name, Type, *runtime_flag| {
+                runtime_flag.* = .init(FlagsSchema, name, Type);
             };
 
             return runtime_flags;
@@ -241,14 +241,12 @@ fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @
 }
 
 fn PrependedTuple(Tuple: type, Value: type) type {
-    const struct_fields = @typeInfo(Tuple).@"struct".fields;
+    const fields_types = @typeInfo(Tuple).@"struct".field_types;
 
-    var types: [struct_fields.len + 1]type = undefined;
-
+    var types: [fields_types.len + 1]type = undefined;
     types[0] = Value;
-    for (types[1..], struct_fields) |*current_type, field| {
-        current_type.* = field.type;
-    }
+
+    @memcpy(types[1..], fields_types);
 
     return @Tuple(&types);
 }

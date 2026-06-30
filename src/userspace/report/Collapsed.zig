@@ -64,9 +64,9 @@ fn openDwarf(arena_allocator: std.mem.Allocator, elf_header: std.elf.Header, buf
         const name = std.mem.sliceTo(section_header_string_table[section.sh_name..], 0);
         const data = buff[section.sh_offset .. section.sh_offset + section.sh_size];
 
-        inline for (std.meta.fields(std.debug.Dwarf.Section.Id)) |field| {
-            if (std.mem.eql(u8, name, "." ++ field.name)) {
-                const section_index = @intFromEnum(@field(std.debug.Dwarf.Section.Id, field.name));
+        inline for (@typeInfo(std.debug.Dwarf.Section.Id).@"enum".field_names) |field_name| {
+            if (std.mem.eql(u8, name, "." ++ field_name)) {
+                const section_index = @intFromEnum(@field(std.debug.Dwarf.Section.Id, field_name));
                 dwarf.sections[section_index] = .{ .data = data, .owned = false };
             }
         }

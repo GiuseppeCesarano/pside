@@ -75,10 +75,10 @@ pub fn build(b: *std.Build) !void {
     check.dependOn(&check_obj.step);
 
     const zig_kernel_obj = b.addObject(object_options);
-    try zig_kernel_obj.force_undefined_symbols.put("init_module", {});
-    try zig_kernel_obj.force_undefined_symbols.put("cleanup_module", {});
-    try zig_kernel_obj.force_undefined_symbols.put("description", {});
-    try zig_kernel_obj.force_undefined_symbols.put("license", {});
+    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "init_module", {});
+    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "cleanup_module", {});
+    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "description", {});
+    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "license", {});
     zig_kernel_obj.bundle_compiler_rt = true;
     zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;
@@ -183,6 +183,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "report", .module = report_mod },
             },
+            .pic = true,
         }),
     };
     const executable = b.addExecutable(executable_options);
