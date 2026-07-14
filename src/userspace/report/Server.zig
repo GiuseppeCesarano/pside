@@ -110,6 +110,8 @@ fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.S
     const VmaInfo = struct {
         name: []const u8,
         graph_count: usize,
+        best_impact: f32,
+        best_location: []const u8,
     };
 
     var list: std.ArrayListUnmanaged(VmaInfo) = .empty;
@@ -119,6 +121,8 @@ fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.S
         try list.append(allocator, .{
             .name = vma.name,
             .graph_count = vma.graphs.len,
+            .best_impact = vma.best_impact,
+            .best_location = vma.best_location,
         });
     }
 
