@@ -351,31 +351,6 @@ html, body {
     background: var(--bg3-glass);
 }
 
-/* ── Location display ── */
-.loc-resolved {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    flex: 1;
-    min-width: 0;
-}
-.loc-fn {
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: .02em;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.loc-src {
-    font-size: 10px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    letter-spacing: .01em;
-}
-.loc-src .loc-line { color: var(--text-mid); }
 .loc-ip {
     font-size: 12px;
     font-weight: 500;
@@ -699,10 +674,6 @@ html, body {
 		card.classList.remove('expanded');
 	    }
 
-	    function locationTitle(loc) {
-		return loc;
-	    }
-
 	    function buildLocationEl(loc, color) {
 		const el = document.createElement('span');
 		el.className = 'loc-ip';
@@ -734,7 +705,7 @@ html, body {
 
 		const header = document.createElement('div');
 		header.className = 'ip-card-header';
-		header.title = locationTitle(series.location);
+		header.title = series.location;
 
 		header.appendChild(buildLocationEl(series.location, color));
 
