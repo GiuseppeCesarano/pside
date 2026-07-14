@@ -28,6 +28,8 @@ pub const empty: DelayPool = .{
 pub fn init(this: *@This()) !void {
     if (this.users_count.load(.monotonic) != std.math.maxInt(u32)) return;
 
+    this.users_count = .init(0);
+
     this.pools = try allocator.create(Pool);
     for (&this.pools.entries) |*e| e.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
