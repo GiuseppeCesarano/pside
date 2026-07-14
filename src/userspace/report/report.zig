@@ -39,8 +39,6 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     defer server.deinit(allocator, io);
     var server_run = try io.concurrent(Server.run, .{ &server, allocator, io });
 
-    io.sleep(.fromMilliseconds(5), .real) catch {};
-
     server.openInBrowser(io);
     std.log.info("Server running: http://[::1]:{}", .{server.port()});
 

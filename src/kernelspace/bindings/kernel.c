@@ -238,14 +238,18 @@ int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
   int count = 0;
   mmap_read_lock(task->mm);
   struct vm_area_struct *vma = find_vma(task->mm, 0);
-  while (vma && count < max) {
+  while (vma) {
     if (vma->vm_flags & VM_EXEC) {
       if (!filter || !*filter) {
-        ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
+        if (count < max)
+          ranges[count] = (struct VmaRange){vma->vm_start, vma->vm_end};
+        count++;
       } else if (vma->vm_file) {
         const char *name = vma->vm_file->f_path.dentry->d_name.name;
         if (strcmp(name, filter) == 0) {
-          ranges[count++] = (struct VmaRange){vma->vm_start, vma->vm_end};
+          if (count < max)
+            ranges[count] = (struct VmaRange){vma->vm_start, vma->vm_end};
+          count++;
         }
       }
     }

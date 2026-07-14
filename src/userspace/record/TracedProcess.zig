@@ -169,6 +169,15 @@ pub fn kill(this: TracedProcess) !void {
 pub fn wait(this: TracedProcess) !void {
     var status: i32 = undefined;
     if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
+
+    const u_status: u32 = @bitCast(status);
+    if (linux.W.IFEXITED(u_status)) {
+        const code = linux.W.EXITSTATUS(u_status);
+        if (code != 0) return error.ChildExitedWithFailure;
+        return;
+    }
+
+    return error.ChildKilledBySignal;
 }
 
 pub fn patchProgressPoint(this: TracedProcess, addr: usize) !void {

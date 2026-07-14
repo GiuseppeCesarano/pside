@@ -139,11 +139,16 @@ pub fn unload(this: @This(), io: std.Io) !void {
         deleteModule() catch |err| {
             switch (err) {
                 DeleteModuleError.NoEntity => return,
-                DeleteModuleError.FdOpen => try io.sleep(.fromMilliseconds(10), .real),
+                DeleteModuleError.FdOpen => {
+                    try io.sleep(.fromMilliseconds(10), .real);
+                    continue;
+                },
                 else => return err,
             }
         };
-    } else return DeleteModuleError.FdOpen;
+        return;
+    }
+    return DeleteModuleError.FdOpen;
 }
 
 pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_name: []const u8) !void {

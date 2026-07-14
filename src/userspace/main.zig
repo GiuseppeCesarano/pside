@@ -34,8 +34,10 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\RECORD FLAGS
         \\  -c <cmd>     Path to the program to profile.
-        \\  -p <addr>    Address (or symbol) of the progress point —
-        \\               the event whose throughput is being maximised.
+        \\  -p <name>    Name of the progress point to track (as passed to
+        \\               PSIDE_THROUGHPUT_POINT() in the source) — the event
+        \\               whose throughput is being maximised. Defaults to
+        \\               whichever progress point is found first.
         \\  -l <name>    VMA / section name to restrict profiling to.
         \\               Defaults to the binary name without extension.
         \\  -n <count>   Number of runs to execute (default: 1).

@@ -46,10 +46,9 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
-    try serialization.flatten(record, pushBytes, .{this});
-}
+    var total: usize = 0;
+    try serialization.flatten(record, sumLen, .{&total});
 
-fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
     const len = this.buffer.len;
     const end = this.buffer_end.load(.monotonic);
     const begin = this.buffer_begin.load(.monotonic);
@@ -59,7 +58,20 @@ fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
     else
         begin - end - 1;
 
-    if (free < bytes.len) return error.Full;
+    if (free < total) return error.Full;
+
+    try serialization.flatten(record, pushBytesUnchecked, .{this});
+
+    if (free - total <= len / 2) this.completion.signal();
+}
+
+fn sumLen(total: *usize, bytes: []const u8) !void {
+    total.* += bytes.len;
+}
+
+fn pushBytesUnchecked(this: *DiskWriter, bytes: []const u8) !void {
+    const len = this.buffer.len;
+    const end = this.buffer_end.load(.monotonic);
 
     const tail_space = len - end;
     if (bytes.len <= tail_space) {
@@ -70,8 +82,6 @@ fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
     }
 
     this.buffer_end.store((end + bytes.len) % len, .release);
-
-    if (free <= len / 2) this.completion.signal();
 }
 
 fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {

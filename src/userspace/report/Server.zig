@@ -11,6 +11,7 @@ server: net.Server,
 should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
 throughput: *const Statistics.Throughput,
+connections: Io.Group,
 
 pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.Throughput) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
@@ -24,6 +25,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.
         .should_shut_down = undefined,
         .share_path = share_path,
         .throughput = throughput,
+        .connections = .init,
     };
 }
 
@@ -53,32 +55,55 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
 }
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
-    const page_size = std.heap.defaultQueryPageSize();
-
     this.should_shut_down.store(false, .monotonic);
     while (!this.should_shut_down.load(.monotonic)) {
-        const recv_buffer = try allocator.alloc(u8, page_size);
-        defer allocator.free(recv_buffer);
-
-        const send_buffer = try allocator.alloc(u8, page_size);
-        defer allocator.free(send_buffer);
-
         var stream = try this.server.accept(io);
-        defer stream.close(io);
 
-        if (this.should_shut_down.load(.acquire)) break;
-
-        var reader = stream.reader(io, recv_buffer);
-        var writer = stream.writer(io, send_buffer);
-        var http_server = http.Server.init(&reader.interface, &writer.interface);
-
-        while (http_server.reader.state == .ready) {
-            var request = http_server.receiveHead() catch |err| switch (err) {
-                error.HttpConnectionClosing => break,
-                else => |e| return e,
-            };
-            this.handleRequest(allocator, io, &request) catch |err| std.log.err("handleRequest: {s}", .{@errorName(err)});
+        if (this.should_shut_down.load(.acquire)) {
+            stream.close(io);
+            break;
         }
+
+        this.connections.concurrent(io, handleConnection, .{ this, allocator, io, stream }) catch |err| {
+            std.log.err("could not spawn connection handler: {s}", .{@errorName(err)});
+            stream.close(io);
+        };
+    }
+
+    this.connections.cancel(io);
+}
+
+fn handleConnection(this: *Server, allocator: std.mem.Allocator, io: Io, stream_in: net.Stream) void {
+    var stream = stream_in;
+    defer stream.close(io);
+
+    const page_size = std.heap.defaultQueryPageSize();
+
+    const recv_buffer = allocator.alloc(u8, page_size) catch |err| {
+        std.log.err("connection handler: {s}", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(recv_buffer);
+
+    const send_buffer = allocator.alloc(u8, page_size) catch |err| {
+        std.log.err("connection handler: {s}", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(send_buffer);
+
+    var reader = stream.reader(io, recv_buffer);
+    var writer = stream.writer(io, send_buffer);
+    var http_server = http.Server.init(&reader.interface, &writer.interface);
+
+    while (http_server.reader.state == .ready) {
+        var request = http_server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => break,
+            else => |e| {
+                std.log.err("receiveHead: {s}", .{@errorName(e)});
+                break;
+            },
+        };
+        this.handleRequest(allocator, io, &request) catch |err| std.log.err("handleRequest: {s}", .{@errorName(err)});
     }
 }
 

@@ -9,8 +9,7 @@ const OutputFile = @import("OutputFile.zig");
 const Program = @import("Program.zig");
 const TracedProcess = @import("TracedProcess.zig");
 
-// Needs to be global so we can kill it inside SIGINT handler
-var global_traced_process: ?TracedProcess = null;
+var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
 var stopped: std.atomic.Value(bool) = .init(false);
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
@@ -53,24 +52,28 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     while (i < parsed_options.flags.n and !stopped.load(.monotonic)) : (i += 1) {
         std.log.info("Run {}/{}", .{ i + 1, parsed_options.flags.n });
 
-        global_traced_process = try .spawn(user_program, io);
-        const traced_process = &global_traced_process.?;
+        var traced_process: TracedProcess = try .spawn(user_program, io);
+        global_traced_pid.store(traced_process.pid, .release);
 
-        errdefer traced_process.kill() catch std.log.err("Failed to kill process after error", .{});
+        errdefer {
+            global_traced_pid.store(0, .release);
+            traced_process.kill() catch std.log.err("Failed to kill process after error", .{});
+        }
 
         try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
 
-        for (patch_addresses) |address| if (address != 0) try traced_process.patchProgressPoint(address);
+        for (patch_addresses) |address| try traced_process.patchProgressPoint(address);
 
         try traced_process.start();
 
         traced_process.wait() catch |err| {
             std.log.warn("Traced process {d} exited with error: {s}", .{ traced_process.pid, @errorName(err) });
+            global_traced_pid.store(0, .release);
             return err;
         };
 
+        global_traced_pid.store(0, .release);
         try module.stop();
-        global_traced_process = null;
     }
 }
 
@@ -104,7 +107,8 @@ fn setIntHandler() void {
 
 fn stop(sig: linux.SIG) callconv(.c) void {
     if (sig == .INT) {
-        if (global_traced_process) |*t| t.kill() catch {};
+        const pid = global_traced_pid.swap(0, .acq_rel);
+        if (pid != 0) _ = linux.kill(pid, .KILL);
         stopped.store(true, .monotonic);
     }
 }

@@ -20,7 +20,7 @@ pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allo
             return try initFromString(it.next().?, environ, allocator, io);
         }
 
-        return initWithIterator(args, args.count() - 1, environ, allocator, io);
+        return initWithIterator(args, args.count(), environ, allocator, io);
     }
 
     return error.UnspecifiedCommand;
@@ -88,7 +88,9 @@ fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, alloc
     var path_it = std.mem.tokenizeScalar(u8, path_env, ':');
 
     return file: while (path_it.next()) |current_path| {
-        const dir = std.Io.Dir.openDirAbsolute(io, current_path, .{}) catch continue;
+        var dir = std.Io.Dir.openDirAbsolute(io, current_path, .{}) catch continue;
+        defer dir.close(io);
+
         if (dir.statFile(io, binary_path, .{})) |_| {
             const path = try std.mem.concatWithSentinel(allocator, u8, &.{ current_path, "/", binary_path }, 0);
             break :file @ptrCast(path.ptr);
