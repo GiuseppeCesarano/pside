@@ -4,9 +4,7 @@ const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 
-const CausalEngine = @import("CausalEngine.zig");
-const thread_safe = @import("thread_safe.zig");
-
+const generic = @import("Pool.zig");
 const DelayPool = @This();
 
 const DelayWork = struct {
@@ -14,7 +12,8 @@ const DelayWork = struct {
     time: std.atomic.Value(usize),
     pool: *DelayPool,
 };
-const Pool = thread_safe.Pool(DelayWork);
+
+const Pool = generic.Pool(DelayWork);
 
 pools: *Pool,
 users_count: std.atomic.Value(u32),
@@ -28,8 +27,6 @@ pub const empty: DelayPool = .{
 
 pub fn init(this: *@This()) !void {
     if (this.users_count.load(.monotonic) != std.math.maxInt(u32)) return;
-
-    this.users_count = .init(0);
 
     this.pools = try allocator.create(Pool);
     for (&this.pools.entries) |*e| e.* = .{
@@ -61,6 +58,7 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
     errdefer _ = this.users_count.fetchSub(1, .monotonic);
 
     const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
+    errdefer this.pools.freeEntry(slot);
 
     slot.time.store(delay_time, .release);
     try task.addWork(&slot.work, .@"resume");
@@ -90,7 +88,7 @@ pub fn waitAllDelays(this: *DelayPool) void {
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
     const delay_time = slot.time.load(.acquire);
-    const this: *DelayPool = @ptrCast(@alignCast(slot.pool));
+    const this: *DelayPool = slot.pool;
 
     this.pools.freeEntry(slot);
 

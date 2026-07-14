@@ -43,9 +43,7 @@ pub fn deinit(this: VmaRanges) void {
 }
 
 pub fn contains(this: VmaRanges, ip: usize) bool {
-    return for (this.entries) |range| {
-        if (range.contains(ip)) break true;
-    } else false;
+    return this.findBase(ip) != null;
 }
 
 pub fn findBase(this: VmaRanges, ip: usize) ?usize {

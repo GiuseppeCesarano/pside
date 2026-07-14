@@ -2,6 +2,7 @@ const std = @import("std");
 
 const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
+const serialization = @import("serialization");
 
 const DiskWriter = @This();
 
@@ -45,17 +46,10 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
-    const type_info = @typeInfo(@TypeOf(record));
-    if (type_info == .@"struct" and type_info.@"struct".is_tuple) {
-        inline for (record) |field| try this.push(field);
-        return;
-    }
-
-    const bytes = if (@TypeOf(record) == []const u8) record else std.mem.asBytes(&record);
-    try this.pushBytes(bytes);
+    try serialization.flatten(record, pushBytes, .{this});
 }
 
-pub fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
+fn pushBytes(this: *DiskWriter, bytes: []const u8) !void {
     const len = this.buffer.len;
     const end = this.buffer_end.load(.monotonic);
     const begin = this.buffer_begin.load(.monotonic);

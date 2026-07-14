@@ -2,17 +2,16 @@
 
 const std = @import("std");
 const Pid = std.os.linux.pid_t;
-const Tid = Pid;
 
 const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 const allocator = kernel.heap.allocator;
 const serialization = @import("serialization");
 
-const DelayPool = @import("DelayPool.zig");
 const DiskWriter = @import("DiskWriter.zig");
-const thread_safe = @import("thread_safe.zig");
-const ClockTicks = thread_safe.ThreadClocks.Ticks;
+const ThreadClocks = @import("thread_safe/ThreadClocks.zig");
+const Ticks = ThreadClocks.Ticks;
+const DelayPool = @import("thread_safe/DelayPool.zig");
 const VmaRanges = @import("VmaRanges.zig");
 
 const CausalEngine = @This();
@@ -30,7 +29,7 @@ const ExperimentParameters = struct {
 
 const Snapshot = struct {
     progress: usize,
-    master: ClockTicks,
+    master: Ticks,
     time: u64,
 };
 
@@ -46,7 +45,7 @@ vma_ranges: VmaRanges,
 // Experiment tracking & progress
 experiment_duration_us: usize,
 progress: *std.atomic.Value(usize),
-virtual_clocks: thread_safe.ThreadClocks,
+virtual_clocks: ThreadClocks,
 
 // Delay application & output
 delay_pool: DelayPool,
@@ -236,12 +235,9 @@ fn applyAllDelays(this: *CausalEngine, delay_per_tick: u16) void {
     this.delay_pool.waitAllDelays();
 }
 
-fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, value: *thread_safe.ThreadClocks.Value, this: *CausalEngine, delay_per_tick: u16) void {
+fn applyDelayToThread(master: Ticks, key: *ThreadClocks.Key, value: *ThreadClocks.Value, this: *CausalEngine, delay_per_tick: u16) void {
     const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
-
-    const lag = master - value.ticks;
-    value.ticks = master;
-    value.master_at_sleep = master;
+    const lag = value.setToMaster(master);
 
     // If the thread is still not running we can simply credit it with the master clock
     // since it will make no difference to the current experiment, and the next experiment
@@ -249,7 +245,7 @@ fn applyDelayToThread(master: ClockTicks, key: *thread_safe.ThreadClocks.Key, va
     if (task.isRunning()) this.applyDelay(task, lag, delay_per_tick);
 }
 
-fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: ClockTicks, delay_per_tick: u16) void {
+fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: Ticks, delay_per_tick: u16) void {
     if (lag == 0) return;
 
     const time = lag * delay_per_tick;

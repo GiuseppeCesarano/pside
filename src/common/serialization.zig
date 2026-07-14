@@ -30,6 +30,17 @@
 
 const std = @import("std");
 
+pub fn flatten(value: anytype, comptime cb: anytype, args: anytype) !void {
+    const type_info = @typeInfo(@TypeOf(value));
+    if (type_info == .@"struct" and type_info.@"struct".is_tuple) {
+        inline for (value) |field| try flatten(field, cb, args);
+        return;
+    }
+
+    const bytes = if (@TypeOf(value) == []const u8) value else std.mem.asBytes(&value);
+    try @call(.auto, cb, args ++ .{bytes});
+}
+
 pub const Header = extern struct {
     pub const Version = extern struct {
         major: u8,

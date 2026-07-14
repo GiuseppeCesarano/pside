@@ -223,16 +223,34 @@ pub fn build(b: *std.Build) !void {
     const bindings_tests = b.addTest(.{ .root_module = bindings_mod });
     const run_bindings_tests = b.addRunArtifact(bindings_tests);
 
-    const thread_safe_tests = b.addTest(.{ .root_module = b.addModule("thread_safe", .{
-        .root_source_file = b.path("src/kernelspace/causal/thread_safe.zig"),
+    const refgate_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_refgate", .{
+        .root_source_file = b.path("src/kernelspace/causal/thread_safe/RefGate.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_thread = true,
     }) });
-    const run_thread_safe_tests = b.addRunArtifact(thread_safe_tests);
+    const run_refgate_tests = b.addRunArtifact(refgate_tests);
+
+    const threadclocks_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_threadclocks", .{
+        .root_source_file = b.path("src/kernelspace/causal/thread_safe/ThreadClocks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+    }) });
+    const run_threadclocks_tests = b.addRunArtifact(threadclocks_tests);
+
+    const pool_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_pool", .{
+        .root_source_file = b.path("src/kernelspace/causal/thread_safe/Pool.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+    }) });
+    const run_pool_tests = b.addRunArtifact(pool_tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_bindings_tests.step);
-    test_step.dependOn(&run_thread_safe_tests.step);
+    test_step.dependOn(&run_refgate_tests.step);
+    test_step.dependOn(&run_threadclocks_tests.step);
+    test_step.dependOn(&run_pool_tests.step);
 }
