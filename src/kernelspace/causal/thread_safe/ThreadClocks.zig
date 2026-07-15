@@ -224,6 +224,21 @@ pub fn tick(this: *ThreadClocks, key: Key) !void {
     _ = this.master.fetchMax(ticks.ticks + 1, .release);
 }
 
+/// Returns the accumulated lag.
+pub fn resetLag(this: *ThreadClocks, key: Key) Ticks {
+    const hash = key.hash();
+
+    this.ref.increment();
+    defer this.ref.decrement();
+
+    const slot = this.getSlotUnsafe(key, hash).?;
+
+    const master = this.master.load(.monotonic);
+    const old_ticks = slot.value.swap(.{ .ticks = master, .master_at_sleep = 0 }, .monotonic).ticks;
+
+    return (master - old_ticks);
+}
+
 pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
     this.ref.increment();
     defer this.ref.decrement();

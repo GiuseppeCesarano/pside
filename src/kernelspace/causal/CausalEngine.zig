@@ -277,13 +277,6 @@ fn flushRecords(this: *CausalEngine) void {
     };
 }
 
-fn tickVirtualClock(this: *CausalEngine) void {
-    if (this.sampler_tick_delay_us.load(.monotonic) == 0) return;
-
-    const current_task = kernel.Task.current();
-    this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
-}
-
 fn captureProfilingTarget(this: *CausalEngine, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
 
@@ -301,11 +294,16 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     const ip = regs.ip;
 
     const target = this.target_ip.load(.monotonic);
+    const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
+    const current_task = kernel.Task.current();
 
-    if (ip == target)
-        this.tickVirtualClock()
-    else if (target == 0)
-        if (this.captureProfilingTarget(ip)) this.tickVirtualClock();
+    const is_target = (ip == target) or (target == 0 and this.captureProfilingTarget(ip));
+
+    if (delay_per_tick != 0 and is_target)
+        this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
+
+    const lag = this.virtual_clocks.resetLag(.fromPtr(current_task));
+    this.applyDelay(current_task, lag, delay_per_tick);
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
