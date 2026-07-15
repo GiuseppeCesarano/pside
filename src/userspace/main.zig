@@ -16,43 +16,53 @@ pub fn main(init: std.process.Init) !void {
 
 fn printHelp(_: cli.Options, _: std.process.Init) void {
     std.log.info(
-        \\pside — causal profiler
+        \\pside — a causal profiler for Linux
         \\
         \\  Causal profiling measures the actual impact of speeding up a code
         \\  location on overall program throughput, by virtually "optimizing"
         \\  one site at a time while the program runs.
         \\
         \\USAGE
-        \\  pside <subcommand> [flags] [-- program args…]
+        \\  sudo pside record [flags] <program> [args…]
+        \\       pside report <file.pside>
         \\
         \\SUBCOMMANDS
-        \\  record    Run the target program under the profiler and write
-        \\            results to a .pside file.  
+        \\  record    Run <program> under the profiler and write the results to
+        \\            <program>.pside. Loading the profiler needs a kernel
+        \\            module, so record must be run as root (sudo).
         \\
         \\  report    Parse a .pside file and open an interactive web report
         \\            in your browser.
         \\
-        \\RECORD FLAGS
-        \\  -c <cmd>     Path to the program to profile.
-        \\  -p <name>    Name of the progress point to track (as passed to
-        \\               PSIDE_THROUGHPUT_POINT() in the source) — the event
-        \\               whose throughput is being maximised. Defaults to
-        \\               whichever progress point is found first.
-        \\  -l <name>    VMA / section name to restrict profiling to.
-        \\               Defaults to the binary name without extension.
-        \\  -n <count>   Number of runs to execute (default: 1).
-        \\               More runs → better confidence.
+        \\RECORD
+        \\  <program> [args…]  The program to profile, followed by any arguments
+        \\                     that do not start with '-'. To pass flags to the
+        \\                     program, use -c instead (see below).
+        \\  -c <cmd>           The whole command line as one quoted string, e.g.
+        \\                     -c "./my_app --threads 8". Use this when the
+        \\                     program takes its own flags.
+        \\  -p <name>          Progress point to maximise, as passed to
+        \\                     PSIDE_THROUGHPUT_POINT() in the source. Defaults
+        \\                     to whichever progress point is found first.
+        \\  -l <name>          VMA / section name to restrict profiling to.
+        \\                     Defaults to the program name without its extension.
+        \\  -n <count>         Number of runs to execute (default: 1). More runs
+        \\                     give a cleaner, higher-confidence profile; further
+        \\                     runs against the same .pside file are aggregated.
         \\
-        \\REPORT ARGS
-        \\  <file.pside>  Output file produced by `pside record`.
+        \\REPORT
+        \\  <file.pside>       A profile produced by `pside record`.
         \\
         \\EXAMPLES
-        \\  # Profile my_app for 20 runs, then view results
-        \\  sudo pside record -c ./my_app -n 20
+        \\  # Profile ./my_app over 20 runs, then view the results
+        \\  sudo pside record ./my_app -n 20
         \\  pside report my_app.pside
         \\
-        \\  # Restrict profiling to a specific shared library section
-        \\  sudo pside record -c ./my_app -l libfoo -n 10
+        \\  # Pass arguments (including flags) to the profiled program with -c
+        \\  sudo pside record -c "./my_app --threads 8" -n 20
+        \\
+        \\  # Restrict profiling to a specific shared-library section
+        \\  sudo pside record ./my_app -l libfoo -n 10
         \\
     , .{});
 }

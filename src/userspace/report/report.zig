@@ -17,7 +17,7 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
     var positional = parsed_options.positional_arguments orelse {
-        std.log.err("Usage: report <file.pside>", .{});
+        std.log.err("Usage: pside report <file.pside>", .{});
         return error.MissingArgument;
     };
     const path = positional.next().?;
@@ -27,8 +27,15 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     const arena_allocator = arena.allocator();
 
-    const parsed_results: OutputFileParseResults = try .parse(arena_allocator, io, path_null);
-    const collapsed: Collapsed = try .onDwarfSymbol(arena_allocator, io, parsed_results);
+    const parsed_results: OutputFileParseResults = parse: {
+        errdefer std.log.err("Could not read profile '{s}' (missing, not a pside file, or wrong version).", .{path});
+        break :parse try .parse(arena_allocator, io, path_null);
+    };
+
+    const collapsed: Collapsed = collapse: {
+        errdefer std.log.err("Could not resolve symbols from '{s}' (is the profiled binary present and built with -g?).", .{parsed_results.path});
+        break :collapse try .onDwarfSymbol(arena_allocator, io, parsed_results);
+    };
 
     const throughput = try Statistics.Throughput.compute(allocator, collapsed.throughput);
     defer throughput.deinit(allocator);

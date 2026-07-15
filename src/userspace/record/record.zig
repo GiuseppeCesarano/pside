@@ -42,7 +42,15 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
 
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ user_program, parsed_options.flags.p, allocator, io });
 
-    const patch_addresses = try future_patch_addresses.await(io);
+    const patch_addresses = future_patch_addresses.await(io) catch |err| {
+        const program_path = std.mem.span(user_program.path);
+        switch (err) {
+            error.NoPsideSection => std.log.err("'{s}' has no pside progress points; add PSIDE_THROUGHPUT_POINT(\"name\") to the source and rebuild.", .{program_path}),
+            error.NoProgressPointsWithSuchName => std.log.err("No progress point named '{s}' in '{s}'.", .{ parsed_options.flags.p, program_path }),
+            else => std.log.err("Could not read progress points from '{s}': {s}", .{ program_path, @errorName(err) }),
+        }
+        return err;
+    };
     defer allocator.free(patch_addresses);
 
     const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
@@ -74,6 +82,11 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
 
         global_traced_pid.store(0, .release);
         try module.stop();
+    }
+
+    if (!stopped.load(.monotonic)) {
+        const program_name = std.fs.path.basename(std.mem.span(user_program.path));
+        std.log.info("Done. View the report with: pside report {s}.pside", .{program_name});
     }
 }
 

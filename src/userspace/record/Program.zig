@@ -8,7 +8,10 @@ is_sudo: bool,
 
 pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
     if (!std.mem.eql(u8, parsed.flags.c, "")) {
-        if (parsed.positional_arguments != null) return error.ExtraPositionalArguments;
+        if (parsed.positional_arguments != null) {
+            std.log.err("Give the program either positionally or with -c, not both.", .{});
+            return error.ExtraPositionalArguments;
+        }
 
         return try initFromString(parsed.flags.c, environ, allocator, io);
     }
@@ -23,6 +26,7 @@ pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allo
         return initWithIterator(args, args.count(), environ, allocator, io);
     }
 
+    std.log.err("No program to profile.\n\tUsage: sudo pside record <program> [args…]", .{});
     return error.UnspecifiedCommand;
 }
 
@@ -42,11 +46,11 @@ pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Env
 
     const path = expandBinaryPath(first_token, environ, allocator, io) catch |err| {
         switch (err) {
-            error.NoPath => std.debug.print("Error: The 'PATH' environment variable is not set.\n", .{}),
-            error.NotFoundInPath => std.debug.print("Error: command not found: {s}\n", .{first_token}),
-            error.FileNotFound => std.debug.print("Error: No such file or directory: {s}\n", .{first_token}),
-            error.AccessDenied => std.debug.print("Error: Permission denied: {s}\n", .{first_token}),
-            else => std.debug.print("Error: Failed to resolve path for '{s}': {any}\n", .{ first_token, err }),
+            error.NoPath => std.log.err("'PATH' environment variable is not set", .{}),
+            error.NotFoundInPath => std.log.err("Command not found: {s}", .{first_token}),
+            error.FileNotFound => std.log.err("No such file or directory: {s}", .{first_token}),
+            error.AccessDenied => std.log.err("Permission denied: {s}", .{first_token}),
+            else => std.log.err("Failed to resolve path for '{s}': {s}", .{ first_token, @errorName(err) }),
         }
         return err;
     };

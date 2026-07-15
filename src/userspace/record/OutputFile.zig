@@ -17,13 +17,15 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, 
 
     const program_hash: [32]u8 = @splat(0); //TODO: actually compute binary's hash
 
-    std.log.info("{s}", .{out_name});
-
     return .{ .file = if (std.Io.Dir.cwd().openFile(io, out_name, .{ .mode = .read_write })) |f| blk: {
         errdefer f.close(io);
         try validate(f, io, @splat(0));
+        std.log.info("Aggregating runs into existing {s}", .{out_name});
         break :blk f;
-    } else |_| try create(io, out_name, owner, full_path, program_hash) };
+    } else |_| blk: {
+        std.log.info("Recording to new {s}", .{out_name});
+        break :blk try create(io, out_name, owner, full_path, program_hash);
+    } };
 }
 
 pub fn close(this: OutputFile, io: std.Io) void {
