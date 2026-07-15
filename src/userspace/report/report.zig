@@ -12,7 +12,7 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    const parsed_options = options.parse(struct {});
+    const parsed_options = options.parse(struct { json: bool = false });
     try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
     try validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
@@ -20,6 +20,7 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
         std.log.err("Usage: pside report <file.pside>", .{});
         return error.MissingArgument;
     };
+
     const path = positional.next().?;
     const path_null = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_null);
@@ -42,6 +43,11 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
 
     arena.deinit();
 
+    if (parsed_options.flags.json) {
+        try writeJson(allocator, io, path, throughput);
+        return;
+    }
+
     var server: Server = try .init(allocator, io, &throughput);
     defer server.deinit(allocator, io);
     var server_run = try io.concurrent(Server.run, .{ &server, allocator, io });
@@ -50,6 +56,26 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     std.log.info("Server running: http://[::1]:{}", .{server.port()});
 
     _ = try server_run.await(io);
+}
+
+fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, throughput: Statistics.Throughput) !void {
+    const suffix = ".pside";
+    const stem = if (std.mem.endsWith(u8, path, suffix)) path[0 .. path.len - suffix.len] else path;
+    const out_name = try std.mem.concat(allocator, u8, &.{ stem, ".json" });
+    defer allocator.free(out_name);
+
+    const body = try std.json.Stringify.valueAlloc(allocator, throughput.vmas, .{});
+    defer allocator.free(body);
+
+    const file = try std.Io.Dir.cwd().createFile(io, out_name, .{});
+    defer file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var writer = file.writer(io, &buf);
+    try writer.interface.writeAll(body);
+    try writer.flush();
+
+    std.log.info("JSON report written to {s}", .{out_name});
 }
 
 fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {

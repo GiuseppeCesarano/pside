@@ -33,6 +33,7 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\  report    Parse a .pside file and open an interactive web report
         \\            in your browser.
+        \\            With -json, write the report as JSON instead.
         \\
         \\RECORD
         \\  <program> [args…]  The program to profile, followed by any arguments
@@ -52,6 +53,8 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\REPORT
         \\  <file.pside>       A profile produced by `pside record`.
+        \\  -json              Write the report as JSON to <file>.json instead
+        \\                     of starting the web server.
         \\
         \\EXAMPLES
         \\  # Profile ./my_app over 20 runs, then view the results
