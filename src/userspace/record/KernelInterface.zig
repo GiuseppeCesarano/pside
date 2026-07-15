@@ -152,6 +152,8 @@ pub fn unload(this: @This(), io: std.Io) !void {
 }
 
 pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_name: []const u8) !void {
+    if (vma_name.len > std.math.maxInt(u8)) return error.VmaNameTooLong;
+
     var data: communications.Data = .{ .start = .{
         .pid = pid,
         .output_fd = fd,

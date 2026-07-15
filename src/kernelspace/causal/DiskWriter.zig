@@ -38,11 +38,18 @@ pub fn deinit(this: *DiskWriter) void {
 pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
     if (this.file != null) return;
 
+    const file = kernel.File.get(fd) orelse return error.InvalidFd;
+    errdefer file.put();
+
     this.buffer = try allocator.alloc(u8, std.heap.page_size_min * 6);
+    errdefer allocator.free(this.buffer);
+
     this.completion.init(); // init before thread spawns
-    this.file = .get(fd);
-    this.file_offset = this.file.?.size();
-    this.thread = .run(writerFn, this, "pside_disk_writer");
+    this.file = file;
+    this.file_offset = file.size();
+    errdefer this.file = null;
+
+    this.thread = kernel.Thread.run(writerFn, this, "pside_disk_writer") orelse return error.ThreadSpawnFailed;
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
@@ -97,22 +104,46 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+fn writeAll(file: *kernel.File, bytes: []const u8, offset: *i64) !usize {
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const n = try file.write(bytes[written..], offset);
+        if (n == 0) break;
+        written += n;
+    }
+    return written;
+}
+
 pub fn flush(this: *DiskWriter) void {
     const begin = this.buffer_begin.load(.monotonic);
     const end = this.buffer_end.load(.acquire);
     if (begin == end) return;
 
     const len = this.buffer.len;
+    const file = this.file.?;
 
     if (end > begin) {
-        _ = this.file.?.write(this.buffer[begin..end], &this.file_offset);
+        const written = writeAll(file, this.buffer[begin..end], &this.file_offset) catch |err| {
+            std.log.err("disk write failed: {s}", .{@errorName(err)});
+            return;
+        };
+        this.buffer_begin.store(begin + written, .monotonic);
     } else {
         const tail = this.buffer[begin..len];
-        const head = this.buffer[0..end];
+        const tail_written = writeAll(file, tail, &this.file_offset) catch |err| {
+            std.log.err("disk write failed: {s}", .{@errorName(err)});
+            return;
+        };
+        if (tail_written < tail.len) {
+            this.buffer_begin.store(begin + tail_written, .monotonic);
+            return;
+        }
 
-        _ = this.file.?.write(tail, &this.file_offset);
-        _ = this.file.?.write(head, &this.file_offset);
+        const head_written = writeAll(file, this.buffer[0..end], &this.file_offset) catch |err| {
+            std.log.err("disk write failed: {s}", .{@errorName(err)});
+            this.buffer_begin.store(0, .monotonic);
+            return;
+        };
+        this.buffer_begin.store(head_written, .monotonic);
     }
-
-    this.buffer_begin.store(end, .monotonic);
 }

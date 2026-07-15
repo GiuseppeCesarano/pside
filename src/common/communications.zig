@@ -11,7 +11,7 @@ pub const Commands = enum(c_uint) {
 pub const vma_name_max_len = 256;
 
 pub const Data = union {
-    start: struct {
+    start: extern struct {
         pid: std.os.linux.pid_t,
         output_fd: std.os.linux.fd_t,
         vma_name: [vma_name_max_len + 1]u8 = @splat(0),

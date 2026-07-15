@@ -17,7 +17,7 @@ pub const std_options: std.Options = .{
 
 var ctl: kernel.CharDevice = undefined;
 var progress: kernel.CharDevice = undefined;
-var engine: CausalEngine = undefined;
+var engine: ?CausalEngine = null;
 
 export fn init_module() linksection(".init.text") c_int {
     progress.create(name ++ "_progress", null) catch return 1;
@@ -25,13 +25,16 @@ export fn init_module() linksection(".init.text") c_int {
     progress_points_ptr.* = .init(0);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
 
-    ctl.create(name, ioctlHandler) catch return 1;
+    ctl.create(name, ioctlHandler) catch {
+        progress.remove();
+        return 1;
+    };
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    engine.deinit();
+    if (engine) |*e| e.deinit();
     progress.remove();
     ctl.remove();
 }
@@ -44,14 +47,26 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
 
     switch (@as(communications.Commands, @enumFromInt(command))) {
         .start_profiler => {
-            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
-            engine = CausalEngine.init(progress_points_ptr) catch return 1;
+            if (engine != null) return code(.BUSY);
 
-            const raw = data.start.vma_name[0..data.start.vma_name_len :0];
-            engine.profilePid(data.start.pid, data.start.output_fd, raw) catch return code(.IO);
+            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
+            engine = CausalEngine.init(progress_points_ptr) catch return code(.NOMEM);
+
+            const len = data.start.vma_name_len;
+            data.start.vma_name[len] = 0;
+            const raw = data.start.vma_name[0..len :0];
+
+            engine.?.profilePid(data.start.pid, data.start.output_fd, raw) catch {
+                engine.?.deinit();
+                engine = null;
+                return code(.IO);
+            };
         },
 
-        .stop_profiler => engine.deinit(),
+        .stop_profiler => if (engine) |*e| {
+            e.deinit();
+            engine = null;
+        },
 
         else => return code(.INVAL),
     }

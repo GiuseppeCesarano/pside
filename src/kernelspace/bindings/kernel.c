@@ -12,7 +12,6 @@
 #include <linux/namei.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
-#include <linux/poll.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
@@ -56,6 +55,7 @@ int c_task_is_dead(struct task_struct * /*task*/);
 struct callback_head **c_task_work_ptr(struct task_struct * /*task*/);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
+int c_task_work_resolve(void);
 int c_task_work_add(struct task_struct * /*task*/,
                     struct callback_head * /*twork*/, int /*notify_mode*/);
 struct task_struct *c_get_task_from_tid(pid_t);
@@ -70,7 +70,7 @@ void c_rcu_read_unlock(void);
 struct VmaRange {
   unsigned long begin;
   unsigned long end;
-} __attribute__((aligned(16)));
+};
 
 int c_snapshot_executable_vmas(struct task_struct * /*task*/,
                                const char * /*filter*/,
@@ -87,12 +87,17 @@ struct chardev {
   void *shared_buffer;
 };
 
+/* The Zig side mirrors these as fixed-size opaque byte arrays. */
+_Static_assert(sizeof(struct chardev) <= 512,
+               "CharDevice placeholder in kernel.zig is too small");
+_Static_assert(sizeof(struct completion) <= 64,
+               "Completion placeholder in kernel.zig is too small");
+
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
 int c_chardev_register(struct chardev * /*d*/, const char * /*name*/,
                        ioctl_fn /*callback*/);
 void c_chardev_unregister(struct chardev * /*d*/);
 void *c_get_shared_buffer(struct chardev * /*d*/);
-void c_chardev_wake(struct chardev *);
 
 /* Perf */
 struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
@@ -185,22 +190,22 @@ struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;
 }
 
+static task_work_add_t real_task_work_add = NULL;
+
+int c_task_work_resolve(void) {
+  struct kprobe kp = {.symbol_name = "task_work_add"};
+
+  if (register_kprobe(&kp) < 0)
+    return -ENOSYS;
+
+  real_task_work_add = (task_work_add_t)kp.addr;
+  unregister_kprobe(&kp);
+
+  return 0;
+}
+
 int c_task_work_add(struct task_struct *task, struct callback_head *twork,
                     int notify_mode) {
-  static task_work_add_t real_task_work_add = NULL;
-
-  if (unlikely(!task)) {
-    struct kprobe kp = {.symbol_name = "task_work_add"};
-
-    if (register_kprobe(&kp) < 0)
-      return -ENOSYS;
-
-    real_task_work_add = (task_work_add_t)kp.addr;
-    unregister_kprobe(&kp);
-
-    return 0;
-  }
-
   if (!real_task_work_add)
     return -ENOSYS;
   return real_task_work_add(task, twork, notify_mode);
@@ -268,8 +273,12 @@ static int internal_open(struct inode *inode, struct file *filp) {
 static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
   struct chardev *d = filp->private_data;
 
-  unsigned long pfn = virt_to_phys(d->shared_buffer) >> PAGE_SHIFT;
   unsigned long size = vma->vm_end - vma->vm_start;
+
+  if (vma->vm_pgoff != 0 || size > PAGE_SIZE)
+    return -EINVAL;
+
+  unsigned long pfn = virt_to_phys(d->shared_buffer) >> PAGE_SHIFT;
 
   if (remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
     return -EAGAIN;
@@ -281,26 +290,28 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
   d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
   if (!d->shared_buffer)
     return -ENOMEM;
-  if (alloc_chrdev_region(&d->dev, 0, 1, name) < 0) {
+  int rc = alloc_chrdev_region(&d->dev, 0, 1, name);
+  if (rc < 0) {
     free_page((unsigned long)d->shared_buffer);
-    return -1;
+    return rc;
   }
   d->fops.owner = THIS_MODULE;
   d->fops.open = internal_open;
   d->fops.mmap = internal_mmap;
   d->fops.unlocked_ioctl = callback;
   cdev_init(&d->cdev, &d->fops);
-  if (cdev_add(&d->cdev, d->dev, 1) < 0) {
+  rc = cdev_add(&d->cdev, d->dev, 1);
+  if (rc < 0) {
     unregister_chrdev_region(d->dev, 1);
     free_page((unsigned long)d->shared_buffer);
-    return -1;
+    return rc;
   }
   d->class = class_create(name);
   if (IS_ERR(d->class)) {
     cdev_del(&d->cdev);
     unregister_chrdev_region(d->dev, 1);
     free_page((unsigned long)d->shared_buffer);
-    return -1;
+    return PTR_ERR(d->class);
   }
   d->device = device_create(d->class, NULL, d->dev, NULL, name);
   if (IS_ERR(d->device)) {
@@ -308,7 +319,7 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
     cdev_del(&d->cdev);
     unregister_chrdev_region(d->dev, 1);
     free_page((unsigned long)d->shared_buffer);
-    return -1;
+    return PTR_ERR(d->device);
   }
   return 0;
 }
@@ -379,7 +390,10 @@ int c_kthread_stop(struct task_struct *k) { return kthread_stop(k); }
 bool c_kthread_should_stop(void) { return kthread_should_stop(); }
 
 /* Sleep */
-void c_sleep(unsigned long usecs) { usleep_range(usecs - 5, usecs + 5); }
+void c_sleep(unsigned long usecs) {
+  unsigned long min = usecs > 5 ? usecs - 5 : usecs;
+  usleep_range(min, usecs + 5);
+}
 
 // This is the actual tracepoint object defined in the kernel core
 extern struct tracepoint tracepoint_sched_process_fork;

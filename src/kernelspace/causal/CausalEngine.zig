@@ -109,7 +109,7 @@ pub fn deinit(this: *CausalEngine) void {
 pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
     try this.delay_pool.init();
 
-    const task = kernel.Task.fromTid(pid);
+    const task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
 
     this.experiment_duration_us = initial_experiment_duration_us;
     this.vma_ranges = try .snapshot(task, vma_name);
@@ -151,7 +151,7 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     };
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
 
-    this.profiler_thread = .run(profilingLoop, this, "pside_loop");
+    this.profiler_thread = kernel.Thread.run(profilingLoop, this, "pside_loop") orelse return error.ThreadSpawnFailed;
 }
 
 fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {

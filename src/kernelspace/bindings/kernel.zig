@@ -246,14 +246,14 @@ pub const Task = opaque {
         return c_current_task();
     }
 
-    extern fn c_get_task_from_tid(linux.pid_t) *Task;
-    pub fn fromTid(t: linux.pid_t) *Task {
+    extern fn c_get_task_from_tid(linux.pid_t) ?*Task;
+    pub fn fromTid(t: linux.pid_t) ?*Task {
         return c_get_task_from_tid(t);
     }
 
-    extern fn c_task_work_add(?*Task, ?*Work, NotifyMode) c_int;
+    extern fn c_task_work_resolve() c_int;
     pub fn findAddWork() WorkAddError!void {
-        return switch (linux.errno(@intCast(c_task_work_add(null, null, .none)))) {
+        return switch (linux.errno(@intCast(c_task_work_resolve()))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFaild,
             else => WorkAddError.Unknown,
@@ -301,6 +301,7 @@ pub const Task = opaque {
         Unknown,
     };
 
+    extern fn c_task_work_add(*Task, *Work, NotifyMode) c_int;
     pub fn addWork(this: *Task, work: *Work, notify_mode: NotifyMode) WorkAddError!void {
         return switch (linux.errno(@intCast(c_task_work_add(this, work, notify_mode)))) {
             .SUCCESS => {},
@@ -353,11 +354,6 @@ pub const CharDevice = extern struct {
     extern fn c_get_shared_buffer(*CharDevice) *[std.heap.page_size_min]u8;
     pub fn shared_buffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
         return c_get_shared_buffer(this);
-    }
-
-    extern fn c_chardev_wake(*CharDevice) void;
-    pub fn wake(this: *CharDevice) void {
-        c_chardev_wake(this);
     }
 };
 
@@ -416,9 +412,13 @@ pub const PerfEvent = opaque {
 
 pub const Thread = opaque {
     pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
-    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *Thread;
-    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) *Thread {
-        return c_kthread_run(thread_handler, data, name);
+    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) usize;
+    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) ?*Thread {
+        const rc = c_kthread_run(thread_handler, data, name);
+        return switch (linux.errno(rc)) {
+            .SUCCESS => @ptrFromInt(rc),
+            else => null,
+        };
     }
 
     extern fn c_kthread_stop(*Thread) c_int;
@@ -544,9 +544,11 @@ pub const Completion = extern struct {
 };
 
 pub const File = opaque {
-    extern fn c_fget(linux.fd_t) *File;
-    pub fn get(fd: linux.fd_t) *File {
-        return c_fget(fd); // TODO: fill errors.
+    pub const WriteError = error{WriteFailed};
+
+    extern fn c_fget(linux.fd_t) ?*File;
+    pub fn get(fd: linux.fd_t) ?*File {
+        return c_fget(fd);
     }
 
     extern fn c_fput(*File) void;
@@ -555,8 +557,10 @@ pub const File = opaque {
     }
 
     extern fn c_kernel_write(*File, [*]const u8, usize, *i64) isize;
-    pub fn write(this: *File, buf: []const u8, offset: *i64) isize {
-        return c_kernel_write(this, buf.ptr, buf.len, offset);
+    pub fn write(this: *File, buf: []const u8, offset: *i64) WriteError!usize {
+        const rc = c_kernel_write(this, buf.ptr, buf.len, offset);
+        if (rc < 0) return WriteError.WriteFailed;
+        return @intCast(rc);
     }
 
     extern fn c_file_size(*File) isize;
