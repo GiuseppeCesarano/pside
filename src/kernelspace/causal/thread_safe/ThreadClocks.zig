@@ -367,6 +367,31 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     return .{ old_pairs, old_bitmask };
 }
 
+/// Removes every entry the predicate marks, with exclusive map access.
+pub fn removeIf(this: *ThreadClocks, comptime pred: anytype, args: anytype) void {
+    this.ref.close();
+    defer this.ref.open();
+
+    this.ref.drain();
+
+    for (this.bitmask, 0..) |*bit_bucket, i| {
+        var bucket = bit_bucket.raw;
+        while (bucket != 0) : (bucket &= bucket - 1) {
+            const bit_pos = @ctz(bucket);
+            const index = i * @bitSizeOf(usize) + bit_pos;
+
+            const pair = &this.pairs[index];
+
+            assert(!pair.key.raw.isEql(.empty) and !pair.key.raw.isEql(.reserved));
+
+            if (@call(.always_inline, pred, .{&pair.key.raw} ++ args)) {
+                bit_bucket.raw &= ~(@as(usize, 1) << @intCast(bit_pos));
+                pair.key.raw = if (pair.key.raw.hasCollided()) .empty_collided else .empty;
+            }
+        }
+    }
+}
+
 pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
     this.ref.close();
     defer this.ref.open();
@@ -664,6 +689,32 @@ fn bitIsSet(clocks: *ThreadClocks, key: ThreadClocks.Key) bool {
     } else false;
 }
 
+test "ThreadClocks: removeIf removes only matching entries" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    var keys: [8]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, 0);
+    }
+
+    const odd_data = struct {
+        fn pred(key: *ThreadClocks.Key) bool {
+            return (key.withoutCollisionBit().data / 2) % 2 == 1;
+        }
+    }.pred;
+
+    clocks.removeIf(odd_data, .{});
+
+    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
+    for (keys, 0..) |key, i| {
+        const expect_alive = (i + 1) % 2 == 0;
+        try testing.expectEqual(expect_alive, bitIsSet(&clocks, key));
+    }
+}
+
 test "ThreadClocks: externalWake charges full lag including sleep ticks" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
@@ -683,7 +734,7 @@ test "ThreadClocks: externalWake charges full lag including sleep ticks" {
     try testing.expectEqual(0, clocks.externalWake(sleeper));
 }
 
-test "ThreadClocks: remove returns lag when tracked, null otherwise" {
+test "ThreadClocks: remove tolerates untracked keys" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
@@ -692,10 +743,12 @@ test "ThreadClocks: remove returns lag when tracked, null otherwise" {
     const untracked: ThreadClocks.Key = .{ .data = 4 };
 
     try clocks.put(tracked, 10);
-    clocks.master.store(25, .release);
 
-    try testing.expectEqual(15, clocks.remove(tracked));
-    try testing.expectEqual(null, clocks.remove(untracked));
+    clocks.remove(untracked);
+    try testing.expectEqual(1, countLiveBits(&clocks));
+
+    clocks.remove(tracked);
+    try testing.expectEqual(0, countLiveBits(&clocks));
 }
 
 test "bitmask: put sets bit, remove clears it" {

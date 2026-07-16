@@ -52,6 +52,7 @@ pid_t c_pid(struct task_struct *);
 pid_t c_tid(struct task_struct *);
 int c_task_is_running(struct task_struct * /*task*/);
 int c_task_is_dead(struct task_struct * /*task*/);
+int c_task_is_reaped(struct task_struct * /*task*/);
 struct callback_head **c_task_work_ptr(struct task_struct * /*task*/);
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
@@ -126,8 +127,6 @@ int c_register_sched_switch(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_switch(void * /*callback*/, void * /*data*/);
 int c_register_sched_exit(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_exit(void * /*callback*/, void * /*data*/);
-int c_register_sched_free(void * /*callback*/, void * /*data*/);
-void c_unregister_sched_free(void * /*callback*/, void * /*data*/);
 int c_register_sched_waking(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_waking(void * /*callback*/, void * /*data*/);
 void c_tracepoint_sync(void);
@@ -190,6 +189,9 @@ int c_task_is_running(struct task_struct *task) {
 }
 int c_task_is_dead(struct task_struct *task) {
   return (task->flags & PF_EXITING) || (task->exit_state != 0);
+}
+int c_task_is_reaped(struct task_struct *task) {
+  return task->exit_state == EXIT_DEAD;
 }
 struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;
@@ -408,7 +410,6 @@ extern struct tracepoint tracepoint_sched_process_fork;
 struct tracepoint_provider {
   struct tracepoint *sched_fork;
   struct tracepoint *sched_exit;
-  struct tracepoint *sched_free;
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
 } __attribute__((aligned(32))) tp_prov = {0};
@@ -418,8 +419,6 @@ static void lookup_all_tps(struct tracepoint *tp, void *priv) {
     tp_prov.sched_fork = tp;
   } else if (strcmp(tp->name, "sched_process_exit") == 0) {
     tp_prov.sched_exit = tp;
-  } else if (strcmp(tp->name, "sched_process_free") == 0) {
-    tp_prov.sched_free = tp;
   } else if (strcmp(tp->name, "sched_waking") == 0) {
     tp_prov.sched_waking = tp;
   } else if (strcmp(tp->name, "sched_switch") == 0) {
@@ -464,18 +463,6 @@ int c_register_sched_exit(void *callback, void *data) {
 void c_unregister_sched_exit(void *callback, void *data) {
   if (tp_prov.sched_exit) {
     tracepoint_probe_unregister(tp_prov.sched_exit, callback, data);
-  }
-}
-
-int c_register_sched_free(void *callback, void *data) {
-  if (!tp_prov.sched_free)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_free, callback, data);
-}
-
-void c_unregister_sched_free(void *callback, void *data) {
-  if (tp_prov.sched_free) {
-    tracepoint_probe_unregister(tp_prov.sched_free, callback, data);
   }
 }
 

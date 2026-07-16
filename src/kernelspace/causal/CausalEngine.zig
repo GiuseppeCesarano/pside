@@ -17,7 +17,7 @@ const VmaRanges = @import("VmaRanges.zig");
 const CausalEngine = @This();
 
 const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
-const initial_experiment_duration_us = 45 * std.time.us_per_ms;
+const initial_experiment_duration_us = 50 * std.time.us_per_ms;
 const min_progress_delta = 5;
 const flush_retry_count = 3;
 const flush_retry_delay_us = 50;
@@ -94,7 +94,6 @@ pub fn deinit(this: *CausalEngine) void {
     kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-    kernel.tracepoint.sched.free.unregister(onSchedFree, this);
     kernel.tracepoint.sync();
 
     if (this.sampler) |s| s.deinit();
@@ -103,6 +102,7 @@ pub fn deinit(this: *CausalEngine) void {
     this.disk_writer.deinit();
     this.delay_pool.deinit();
 
+    this.virtual_clocks.removeIf(releaseThread, .{});
     this.virtual_clocks.deinit(atomic_allocator);
 }
 
@@ -110,6 +110,13 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     try this.delay_pool.init();
 
     const task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
+
+    // fromTid's task reference is kept as the map entry's, dropped at sweep.
+    // Once in the map, any later failure is balanced by deinit's sweep.
+    this.virtual_clocks.put(.fromPtr(task), 0) catch |err| {
+        task.decrementReferences();
+        return err;
+    };
 
     this.experiment_duration_us = initial_experiment_duration_us;
     this.vma_ranges = try .snapshot(task, vma_name);
@@ -121,7 +128,6 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
         vma_name[0 .. vma_name.len + 1],
     });
 
-    try this.virtual_clocks.put(.fromPtr(task), 0);
     this.profiled_pid.store(pid, .monotonic);
     try kernel.tracepoint.sched.fork.register(onSchedFork, this);
     errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
@@ -131,9 +137,6 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
 
     try kernel.tracepoint.sched.waking.register(onSchedWaking, this);
     errdefer kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-
-    try kernel.tracepoint.sched.free.register(onSchedFree, this);
-    errdefer kernel.tracepoint.sched.free.unregister(onSchedFree, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
@@ -249,7 +252,11 @@ fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: Ticks, delay_per_tic
     if (lag == 0 or delay_per_tick == 0) return;
 
     const time = lag * delay_per_tick;
-    this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
+    this.delay_pool.delay(task, time) catch |err| switch (err) {
+        // Past exit_task_work the work can never run; the task is off any critical path.
+        error.TooLateShuttingDown => {},
+        else => this.abort("Could not apply delay"),
+    };
 }
 
 fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Snapshot, target_ip: usize) void {
@@ -308,21 +315,29 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
     const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch blk: {
-        const clocks, const bits = this.virtual_clocks.grow(atomic_allocator) catch {
-            this.abort("Grow in fork failed");
-            return;
+        // Reclaim reaped threads before paying for a grow.
+        this.virtual_clocks.removeIf(releaseThreadIfReaped, .{});
+
+        break :blk this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch {
+            const clocks, const bits = this.virtual_clocks.grow(atomic_allocator) catch {
+                this.abort("Grow in fork failed");
+                return;
+            };
+
+            const l = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch {
+                this.abort("Could not fork after grow");
+                return;
+            };
+
+            atomic_allocator.free(clocks);
+            atomic_allocator.free(bits);
+
+            break :blk l;
         };
-
-        const l = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch {
-            this.abort("Could not fork after grow");
-            return;
-        };
-
-        atomic_allocator.free(clocks);
-        atomic_allocator.free(bits);
-
-        break :blk l;
     };
+
+    // The map entry owns a task reference until the reap sweep drops it.
+    child.incrementReferences();
 
     const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
     this.applyDelay(parent, lag, delay_per_tick);
@@ -359,12 +374,20 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     }
 }
 
-fn onSchedFree(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
+/// Only reaped tasks leave the map: their exit wake already handed the lag to
+/// the joiner, and the held reference kept the pointer from being recycled.
+fn releaseThreadIfReaped(key: *ThreadClocks.Key) bool {
+    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
+    if (!task.isReaped()) return false;
 
-    // Fires at reap time: after the exit wake handed lag to the joiner, before
-    // the task pointer can be recycled. Pids are unhashed, the lookup is the ownership test.
-    this.virtual_clocks.remove(.fromPtr(task));
+    task.decrementReferences();
+    return true;
+}
+
+fn releaseThread(key: *ThreadClocks.Key) bool {
+    const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
+    task.decrementReferences();
+    return true;
 }
 
 fn abort(this: *CausalEngine, s: []const u8) void {

@@ -253,7 +253,7 @@ pub const Task = opaque {
 
     extern fn c_task_work_resolve() c_int;
     pub fn findAddWork() WorkAddError!void {
-        return switch (linux.errno(@intCast(c_task_work_resolve()))) {
+        return switch (linux.errno(@as(u64, @bitCast(@as(i64, c_task_work_resolve()))))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFaild,
             else => WorkAddError.Unknown,
@@ -280,6 +280,12 @@ pub const Task = opaque {
         return c_task_is_dead(this) != 0;
     }
 
+    extern fn c_task_is_reaped(*Task) c_int;
+    /// True once the task went through release_task, well past its exit wakes.
+    pub fn isReaped(this: *Task) bool {
+        return c_task_is_reaped(this) != 0;
+    }
+
     pub const Work = extern struct {
         pub const Callback = *const fn (*Work) callconv(.c) void;
         next: ?*Work align(@alignOf(usize)),
@@ -303,7 +309,7 @@ pub const Task = opaque {
 
     extern fn c_task_work_add(*Task, *Work, NotifyMode) c_int;
     pub fn addWork(this: *Task, work: *Work, notify_mode: NotifyMode) WorkAddError!void {
-        return switch (linux.errno(@intCast(c_task_work_add(this, work, notify_mode)))) {
+        return switch (linux.errno(@as(u64, @bitCast(@as(i64, c_task_work_add(this, work, notify_mode)))))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFaild,
             .INVAL => WorkAddError.BadConfig,
@@ -474,20 +480,6 @@ pub const tracepoint = struct {
             extern fn c_unregister_sched_exit(probe: Callback, data: ?*anyopaque) void;
             pub fn unregister(trace: Callback, data: ?*anyopaque) void {
                 c_unregister_sched_exit(trace, data);
-            }
-        };
-
-        pub const free = struct {
-            pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
-
-            extern fn c_register_sched_free(probe: Callback, data: ?*anyopaque) c_int;
-            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
-                if (c_register_sched_free(trace, data) != 0) return RegistrationError.Failed;
-            }
-
-            extern fn c_unregister_sched_free(probe: Callback, data: ?*anyopaque) void;
-            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-                c_unregister_sched_free(trace, data);
             }
         };
 
