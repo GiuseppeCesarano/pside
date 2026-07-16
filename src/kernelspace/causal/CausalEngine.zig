@@ -94,7 +94,7 @@ pub fn deinit(this: *CausalEngine) void {
     kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-    kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+    kernel.tracepoint.sched.free.unregister(onSchedFree, this);
     kernel.tracepoint.sync();
 
     if (this.sampler) |s| s.deinit();
@@ -132,8 +132,8 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     try kernel.tracepoint.sched.waking.register(onSchedWaking, this);
     errdefer kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
 
-    try kernel.tracepoint.sched.exit.register(onSchedExit, this);
-    errdefer kernel.tracepoint.sched.exit.unregister(onSchedExit, this);
+    try kernel.tracepoint.sched.free.register(onSchedFree, this);
+    errdefer kernel.tracepoint.sched.free.unregister(onSchedFree, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
@@ -168,7 +168,7 @@ fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         if (should_stop or (target_ip == 0 and params.speedup_percent != 0)) continue;
 
-        this.applyAllDelays(params.speedup_percent);
+        this.applyAllDelays(params.delay_per_tick);
         this.recordThroughput(params, snap, target_ip);
     }
 
@@ -246,7 +246,7 @@ fn applyDelayToThread(master: Ticks, key: *ThreadClocks.Key, value: *ThreadClock
 }
 
 fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: Ticks, delay_per_tick: u16) void {
-    if (lag == 0) return;
+    if (lag == 0 or delay_per_tick == 0) return;
 
     const time = lag * delay_per_tick;
     this.delay_pool.delay(task, time) catch this.abort("Could not apply delay");
@@ -281,7 +281,7 @@ fn captureProfilingTarget(this: *CausalEngine, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
 
     if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic)) |_| {
-        @branchHint(.likely);
+        @branchHint(.unlikely);
         return false;
     } else {
         this.vma_base.store(vma_base, .release);
@@ -301,9 +301,6 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 
     if (delay_per_tick != 0 and is_target)
         this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
-
-    const lag = this.virtual_clocks.resetLag(.fromPtr(current_task));
-    this.applyDelay(current_task, lag, delay_per_tick);
 }
 
 fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
@@ -344,26 +341,30 @@ fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
-    const current = kernel.Task.current();
+    if (woke.pid() != profiled_pid or woke.isRunning() or woke.isDead()) return;
 
-    if (current.pid() == profiled_pid and
-        woke.pid() == profiled_pid and
-        !woke.isRunning() and
-        !woke.isDead())
-    {
+    const current = kernel.Task.current();
+    const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
+
+    // In interrupt context `current` is whoever got interrupted, never a waker.
+    if (kernel.execution.inTask() and current.pid() == profiled_pid) {
         const waker_lag, const woke_lag = this.virtual_clocks.wake(.fromPtr(current), .fromPtr(woke));
 
-        const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
-        this.applyDelay(current, waker_lag, delay_per_tick);
+        // A dying waker can't repay on the critical path; its lag is already in woke_lag.
+        if (!current.isDead()) this.applyDelay(current, waker_lag, delay_per_tick);
         this.applyDelay(woke, woke_lag, delay_per_tick);
+    } else {
+        // External wake (timer, io): nobody paid on the wakee's behalf, it repays itself.
+        this.applyDelay(woke, this.virtual_clocks.externalWake(.fromPtr(woke)), delay_per_tick);
     }
 }
 
-fn onSchedExit(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
+fn onSchedFree(data: ?*anyopaque, task: *kernel.Task) callconv(.c) void {
     const this: *CausalEngine = @ptrCast(@alignCast(data.?));
 
-    if (task.pid() == this.profiled_pid.load(.monotonic))
-        this.applyDelay(task, this.virtual_clocks.remove(.fromPtr(task)), this.sampler_tick_delay_us.load(.monotonic));
+    // Fires at reap time: after the exit wake handed lag to the joiner, before
+    // the task pointer can be recycled. Pids are unhashed, the lookup is the ownership test.
+    this.virtual_clocks.remove(.fromPtr(task));
 }
 
 fn abort(this: *CausalEngine, s: []const u8) void {

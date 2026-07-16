@@ -477,6 +477,20 @@ pub const tracepoint = struct {
             }
         };
 
+        pub const free = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
+
+            extern fn c_register_sched_free(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_free(trace, data) != 0) return RegistrationError.Failed;
+            }
+
+            extern fn c_unregister_sched_free(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_free(trace, data);
+            }
+        };
+
         pub const waking = struct {
             pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
 
@@ -505,6 +519,15 @@ pub const tracepoint = struct {
             }
         };
     };
+};
+
+pub const execution = struct {
+    extern fn c_in_task() c_int;
+
+    /// True when running in process context (not hardirq/softirq/NMI).
+    pub fn inTask() bool {
+        return c_in_task() != 0;
+    }
 };
 
 pub const preempt = struct {

@@ -126,6 +126,8 @@ int c_register_sched_switch(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_switch(void * /*callback*/, void * /*data*/);
 int c_register_sched_exit(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_exit(void * /*callback*/, void * /*data*/);
+int c_register_sched_free(void * /*callback*/, void * /*data*/);
+void c_unregister_sched_free(void * /*callback*/, void * /*data*/);
 int c_register_sched_waking(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_waking(void * /*callback*/, void * /*data*/);
 void c_tracepoint_sync(void);
@@ -133,6 +135,9 @@ void c_tracepoint_sync(void);
 /* Preemept */
 void c_preempt_disable(void);
 void c_preempt_enable(void);
+
+/* Execution context */
+int c_in_task(void);
 
 /* Completion */
 void c_init_completion(struct completion *);
@@ -403,6 +408,7 @@ extern struct tracepoint tracepoint_sched_process_fork;
 struct tracepoint_provider {
   struct tracepoint *sched_fork;
   struct tracepoint *sched_exit;
+  struct tracepoint *sched_free;
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
 } __attribute__((aligned(32))) tp_prov = {0};
@@ -412,6 +418,8 @@ static void lookup_all_tps(struct tracepoint *tp, void *priv) {
     tp_prov.sched_fork = tp;
   } else if (strcmp(tp->name, "sched_process_exit") == 0) {
     tp_prov.sched_exit = tp;
+  } else if (strcmp(tp->name, "sched_process_free") == 0) {
+    tp_prov.sched_free = tp;
   } else if (strcmp(tp->name, "sched_waking") == 0) {
     tp_prov.sched_waking = tp;
   } else if (strcmp(tp->name, "sched_switch") == 0) {
@@ -459,6 +467,18 @@ void c_unregister_sched_exit(void *callback, void *data) {
   }
 }
 
+int c_register_sched_free(void *callback, void *data) {
+  if (!tp_prov.sched_free)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_free, callback, data);
+}
+
+void c_unregister_sched_free(void *callback, void *data) {
+  if (tp_prov.sched_free) {
+    tracepoint_probe_unregister(tp_prov.sched_free, callback, data);
+  }
+}
+
 int c_register_sched_waking(void *callback, void *data) {
   if (!tp_prov.sched_waking)
     return -ENOENT;
@@ -476,6 +496,9 @@ void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
 /* Preemption */
 void c_preempt_disable(void) { preempt_disable(); }
 void c_preempt_enable(void) { preempt_enable(); }
+
+/* Execution context */
+int c_in_task(void) { return in_task(); }
 
 /* Completion */
 void c_init_completion(struct completion *c) { init_completion(c); }

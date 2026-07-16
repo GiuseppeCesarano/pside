@@ -153,7 +153,7 @@ fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
 
 /// Looks up the clock slot for a given key.
 ///
-/// Note: A null return is only expected if the task was recently deleted (onSchedExit).
+/// Note: A null return is only expected if the task was recently deleted (onSchedFree).
 /// This typically happens during a race where one CPU cleans up the task while another
 /// is mid-scheduler-event (like onSchedSwitch).
 ///
@@ -224,21 +224,6 @@ pub fn tick(this: *ThreadClocks, key: Key) !void {
     _ = this.master.fetchMax(ticks.ticks + 1, .release);
 }
 
-/// Returns the accumulated lag.
-pub fn resetLag(this: *ThreadClocks, key: Key) Ticks {
-    const hash = key.hash();
-
-    this.ref.increment();
-    defer this.ref.decrement();
-
-    const slot = this.getSlotUnsafe(key, hash).?;
-
-    const master = this.master.load(.monotonic);
-    const old_ticks = slot.value.swap(.{ .ticks = master, .master_at_sleep = 0 }, .monotonic).ticks;
-
-    return (master - old_ticks);
-}
-
 pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
     this.ref.increment();
     defer this.ref.decrement();
@@ -277,14 +262,30 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
     return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
 }
 
-/// Returns lag with master clock
-pub fn remove(this: *ThreadClocks, task: Key) Ticks {
+/// Returns the full lag a thread woken by an external event must repay itself.
+/// Interrupt safe: returns 0 without settling while the map is gated.
+pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
+    const hash = key.hash();
+
+    this.ref.tryIncrement() catch return 0;
+    defer this.ref.decrement();
+
+    const slot = this.getSlotUnsafe(key, hash).?;
+
+    const master = this.master.load(.acquire);
+    const old = slot.value.swap(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+
+    return master - old.ticks;
+}
+
+/// Removes a tracked task
+pub fn remove(this: *ThreadClocks, task: Key) void {
     const task_hash = task.hash();
 
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(task, task_hash).?;
+    const slot = this.getSlotUnsafe(task, task_hash) orelse return;
     const index = this.getIndexUnsafe(slot);
 
     const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
@@ -292,9 +293,6 @@ pub fn remove(this: *ThreadClocks, task: Key) Ticks {
     _ = bitmask_bucket.fetchAnd(operand, .monotonic);
 
     _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
-
-    const master = this.master.load(.acquire);
-    return master - slot.value.load(.monotonic).ticks;
 }
 
 /// Tracks a thread forking.
@@ -367,16 +365,6 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     }
 
     return .{ old_pairs, old_bitmask };
-}
-
-pub fn clear(this: *ThreadClocks) void {
-    this.ref.close();
-    defer this.ref.open();
-
-    this.ref.drain();
-
-    for (this.pairs) |*p| p.key.raw = .empty;
-    @memset(this.bitmask, .init(0));
 }
 
 pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
@@ -674,6 +662,40 @@ fn bitIsSet(clocks: *ThreadClocks, key: ThreadClocks.Key) bool {
             break clocks.bitmask[bucket].load(.monotonic) & bit != 0;
         }
     } else false;
+}
+
+test "ThreadClocks: externalWake charges full lag including sleep ticks" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const sleeper: ThreadClocks.Key = .{ .data = 2 };
+
+    try clocks.put(sleeper, 5);
+    clocks.master.store(10, .release);
+    clocks.prepareForSleep(sleeper);
+
+    clocks.master.store(30, .release);
+
+    // pre-sleep debt (10 - 5) + sleep-time ticks (30 - 10)
+    try testing.expectEqual(25, clocks.externalWake(sleeper));
+    try testing.expectEqual(30, clocks.get(sleeper, .ticks));
+    try testing.expectEqual(0, clocks.externalWake(sleeper));
+}
+
+test "ThreadClocks: remove returns lag when tracked, null otherwise" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const tracked: ThreadClocks.Key = .{ .data = 2 };
+    const untracked: ThreadClocks.Key = .{ .data = 4 };
+
+    try clocks.put(tracked, 10);
+    clocks.master.store(25, .release);
+
+    try testing.expectEqual(15, clocks.remove(tracked));
+    try testing.expectEqual(null, clocks.remove(untracked));
 }
 
 test "bitmask: put sets bit, remove clears it" {
