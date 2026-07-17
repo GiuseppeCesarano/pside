@@ -14,7 +14,7 @@ const Ticks = ThreadClocks.Ticks;
 const DelayPool = @import("thread_safe/DelayPool.zig");
 const VmaRanges = @import("VmaRanges.zig");
 
-const CausalEngine = @This();
+const Engine = @This();
 
 const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 const initial_experiment_duration_us = 50 * std.time.us_per_ms;
@@ -59,7 +59,7 @@ sampler: ?*kernel.PerfEvent,
 deinit_guard: std.atomic.Value(bool),
 error_has_occurred: std.atomic.Value(bool),
 
-pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
+pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
     try kernel.Task.findAddWork();
     kernel.tracepoint.init();
 
@@ -86,14 +86,14 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !CausalEngine {
     };
 }
 
-pub fn deinit(this: *CausalEngine) void {
+pub fn deinit(this: *Engine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
 
     if (this.profiler_thread) |t| t.stop();
 
-    kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    kernel.tracepoint.task.newtask.unregister(onNewTask, this);
     kernel.tracepoint.sync();
 
     if (this.sampler) |s| s.deinit();
@@ -106,7 +106,7 @@ pub fn deinit(this: *CausalEngine) void {
     this.virtual_clocks.deinit(atomic_allocator);
 }
 
-pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
+pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
     try this.delay_pool.init();
 
     const task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
@@ -129,14 +129,15 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
     });
 
     this.profiled_pid.store(pid, .monotonic);
-    try kernel.tracepoint.sched.fork.register(onSchedFork, this);
-    errdefer kernel.tracepoint.sched.fork.unregister(onSchedFork, this);
 
     try kernel.tracepoint.sched.@"switch".register(onSchedSwitch, this);
     errdefer kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
 
     try kernel.tracepoint.sched.waking.register(onSchedWaking, this);
     errdefer kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+
+    try kernel.tracepoint.task.newtask.register(onNewTask, this);
+    errdefer kernel.tracepoint.task.newtask.unregister(onNewTask, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
@@ -158,7 +159,7 @@ pub fn profilePid(this: *CausalEngine, pid: Pid, fd: std.os.linux.fd_t, vma_name
 }
 
 fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
-    const this: *CausalEngine = @ptrCast(@alignCast(ctx));
+    const this: *Engine = @ptrCast(@alignCast(ctx));
 
     while (!kernel.Thread.shouldThisStop() and !this.error_has_occurred.load(.monotonic)) {
         const params = this.generateRandomExperimentParameters();
@@ -179,7 +180,7 @@ fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-fn generateRandomExperimentParameters(this: *CausalEngine) ExperimentParameters {
+fn generateRandomExperimentParameters(this: *Engine) ExperimentParameters {
     const random = struct {
         var context: ?std.Random.DefaultPrng = null;
         var generator: std.Random = undefined;
@@ -200,7 +201,7 @@ fn generateRandomExperimentParameters(this: *CausalEngine) ExperimentParameters 
     return .{ .speedup_percent = speedup_percent, .delay_per_tick = delay };
 }
 
-fn takeSnapshot(this: *CausalEngine) Snapshot {
+fn takeSnapshot(this: *Engine) Snapshot {
     return .{
         .progress = this.progress.load(.monotonic),
         .master = this.virtual_clocks.master.load(.acquire),
@@ -208,7 +209,7 @@ fn takeSnapshot(this: *CausalEngine) Snapshot {
     };
 }
 
-fn doExperiment(this: *CausalEngine, params: ExperimentParameters, baseline_prog: usize) void {
+fn doExperiment(this: *Engine, params: ExperimentParameters, baseline_prog: usize) void {
     this.sampler_tick_delay_us.store(params.delay_per_tick, .monotonic);
     this.vma_base.store(0, .monotonic);
     this.target_ip.store(0, .monotonic);
@@ -228,7 +229,7 @@ fn doExperiment(this: *CausalEngine, params: ExperimentParameters, baseline_prog
     if (params.speedup_percent != 0) this.sampler.?.disable();
 }
 
-fn applyAllDelays(this: *CausalEngine, delay_per_tick: u16) void {
+fn applyAllDelays(this: *Engine, delay_per_tick: u16) void {
     if (delay_per_tick == 0) return;
 
     kernel.preempt.disable();
@@ -238,7 +239,7 @@ fn applyAllDelays(this: *CausalEngine, delay_per_tick: u16) void {
     this.delay_pool.waitAllDelays();
 }
 
-fn applyDelayToThread(master: Ticks, key: *ThreadClocks.Key, value: *ThreadClocks.Value, this: *CausalEngine, delay_per_tick: u16) void {
+fn applyDelayToThread(master: Ticks, key: *ThreadClocks.Key, value: *ThreadClocks.Value, this: *Engine, delay_per_tick: u16) void {
     const task: *kernel.Task = @ptrFromInt(key.withoutCollisionBit().data);
     const lag = value.setToMaster(master);
 
@@ -248,7 +249,7 @@ fn applyDelayToThread(master: Ticks, key: *ThreadClocks.Key, value: *ThreadClock
     if (task.isRunning()) this.applyDelay(task, lag, delay_per_tick);
 }
 
-fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: Ticks, delay_per_tick: u16) void {
+fn applyDelay(this: *Engine, task: *kernel.Task, lag: Ticks, delay_per_tick: u16) void {
     if (lag == 0 or delay_per_tick == 0) return;
 
     const time = lag * delay_per_tick;
@@ -259,7 +260,7 @@ fn applyDelay(this: *CausalEngine, task: *kernel.Task, lag: Ticks, delay_per_tic
     };
 }
 
-fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Snapshot, target_ip: usize) void {
+fn recordThroughput(this: *Engine, params: ExperimentParameters, snap: Snapshot, target_ip: usize) void {
     const wall = kernel.time.now.us() - snap.time;
     const vclock_delta = this.virtual_clocks.master.load(.acquire) - snap.master;
     const injected_delay = vclock_delta * params.delay_per_tick;
@@ -274,7 +275,7 @@ fn recordThroughput(this: *CausalEngine, params: ExperimentParameters, snap: Sna
     }) catch std.log.warn("Writer buffer full, dropping sample", .{});
 }
 
-fn flushRecords(this: *CausalEngine) void {
+fn flushRecords(this: *Engine) void {
     this.disk_writer.push(serialization.record.Throughput.empty) catch {
         for (0..flush_retry_count) |_| {
             kernel.time.sleep.us(flush_retry_delay_us);
@@ -284,7 +285,7 @@ fn flushRecords(this: *CausalEngine) void {
     };
 }
 
-fn captureProfilingTarget(this: *CausalEngine, ip: usize) bool {
+fn captureProfilingTarget(this: *Engine, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
 
     if (this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic)) |_| {
@@ -297,7 +298,7 @@ fn captureProfilingTarget(this: *CausalEngine, ip: usize) bool {
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(event.context() orelse return));
+    const this: *Engine = @ptrCast(@alignCast(event.context() orelse return));
     const ip = regs.ip;
 
     const target = this.target_ip.load(.monotonic);
@@ -310,8 +311,10 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
         this.virtual_clocks.tick(.fromPtr(current_task)) catch {};
 }
 
-fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
+fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) void {
+    const this: *Engine = @ptrCast(@alignCast(data.?));
+    const parent = kernel.Task.current();
+
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
     const lag = this.virtual_clocks.fork(.fromPtr(parent), .fromPtr(child)) catch blk: {
@@ -345,7 +348,7 @@ fn onSchedFork(data: ?*anyopaque, parent: *kernel.Task, child: *kernel.Task) cal
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
+    const this: *Engine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
     if (prev.pid() == profiled_pid and !prev.isRunning() and !prev.isDead())
@@ -353,7 +356,7 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
 }
 
 fn onSchedWaking(data: ?*anyopaque, woke: *kernel.Task) callconv(.c) void {
-    const this: *CausalEngine = @ptrCast(@alignCast(data.?));
+    const this: *Engine = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
     if (woke.pid() != profiled_pid or woke.isRunning() or woke.isDead()) return;
@@ -390,7 +393,7 @@ fn releaseThread(key: *ThreadClocks.Key) bool {
     return true;
 }
 
-fn abort(this: *CausalEngine, s: []const u8) void {
+fn abort(this: *Engine, s: []const u8) void {
     @branchHint(.cold);
     std.log.err("{s}", .{s});
     this.error_has_occurred.store(true, .monotonic);

@@ -3,7 +3,7 @@ const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("kernel");
 
-const CausalEngine = @import("causal/CausalEngine.zig");
+const Engine = @import("causal/Engine.zig");
 
 const name = "pside";
 
@@ -17,7 +17,7 @@ pub const std_options: std.Options = .{
 
 var ctl: kernel.CharDevice = undefined;
 var progress: kernel.CharDevice = undefined;
-var engine: ?CausalEngine = null;
+var engine: ?Engine = null;
 
 export fn init_module() linksection(".init.text") c_int {
     progress.create(name ++ "_progress", null) catch return 1;
@@ -50,7 +50,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
             if (engine != null) return code(.BUSY);
 
             const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
-            engine = CausalEngine.init(progress_points_ptr) catch return code(.NOMEM);
+            engine = Engine.init(progress_points_ptr) catch return code(.NOMEM);
 
             const len = data.start.vma_name_len;
             data.start.vma_name[len] = 0;

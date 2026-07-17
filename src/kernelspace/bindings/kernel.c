@@ -18,7 +18,6 @@
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
 
-
 /* Forward declarations */
 
 /* Logging */
@@ -121,14 +120,12 @@ void c_sleep(unsigned long /*usecs*/);
 
 /* Tracepoints */
 void c_tracepoint_init(void);
-int c_register_sched_fork(void * /*callback*/, void * /*data*/);
-void c_unregister_sched_fork(void * /*callback*/, void * /*data*/);
 int c_register_sched_switch(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_switch(void * /*callback*/, void * /*data*/);
-int c_register_sched_exit(void * /*callback*/, void * /*data*/);
-void c_unregister_sched_exit(void * /*callback*/, void * /*data*/);
 int c_register_sched_waking(void * /*callback*/, void * /*data*/);
 void c_unregister_sched_waking(void * /*callback*/, void * /*data*/);
+int c_register_task_newtask(void * /*callback*/, void * /*data*/);
+void c_unregister_task_newtask(void * /*callback*/, void * /*data*/);
 void c_tracepoint_sync(void);
 
 /* Preemept */
@@ -402,44 +399,26 @@ void c_sleep(unsigned long usecs) {
   usleep_range(min, usecs + 5);
 }
 
-// This is the actual tracepoint object defined in the kernel core
-extern struct tracepoint tracepoint_sched_process_fork;
-
 /* Tracepoints */
 
 struct tracepoint_provider {
-  struct tracepoint *sched_fork;
-  struct tracepoint *sched_exit;
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
+  struct tracepoint *task_newtask;
 } __attribute__((aligned(32))) tp_prov = {0};
 
 static void lookup_all_tps(struct tracepoint *tp, void *priv) {
-  if (strcmp(tp->name, "sched_process_fork") == 0) {
-    tp_prov.sched_fork = tp;
-  } else if (strcmp(tp->name, "sched_process_exit") == 0) {
-    tp_prov.sched_exit = tp;
-  } else if (strcmp(tp->name, "sched_waking") == 0) {
+  if (strcmp(tp->name, "sched_waking") == 0) {
     tp_prov.sched_waking = tp;
   } else if (strcmp(tp->name, "sched_switch") == 0) {
     tp_prov.sched_switch = tp;
+  } else if (strcmp(tp->name, "task_newtask") == 0) {
+    tp_prov.task_newtask = tp;
   }
 }
 
 void c_tracepoint_init(void) {
   for_each_kernel_tracepoint(lookup_all_tps, NULL);
-}
-
-int c_register_sched_fork(void *callback, void *data) {
-  if (!tp_prov.sched_fork)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_fork, callback, data);
-}
-
-void c_unregister_sched_fork(void *callback, void *data) {
-  if (tp_prov.sched_fork) {
-    tracepoint_probe_unregister(tp_prov.sched_fork, callback, data);
-  }
 }
 
 int c_register_sched_switch(void *callback, void *data) {
@@ -451,18 +430,6 @@ int c_register_sched_switch(void *callback, void *data) {
 void c_unregister_sched_switch(void *callback, void *data) {
   if (tp_prov.sched_switch) {
     tracepoint_probe_unregister(tp_prov.sched_switch, callback, data);
-  }
-}
-
-int c_register_sched_exit(void *callback, void *data) {
-  if (!tp_prov.sched_exit)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_exit, callback, data);
-}
-
-void c_unregister_sched_exit(void *callback, void *data) {
-  if (tp_prov.sched_exit) {
-    tracepoint_probe_unregister(tp_prov.sched_exit, callback, data);
   }
 }
 
@@ -478,6 +445,16 @@ void c_unregister_sched_waking(void *callback, void *data) {
   }
 }
 
+int c_register_task_newtask(void *callback, void *data) {
+  if (!tp_prov.task_newtask)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.task_newtask, callback, data);
+}
+void c_unregister_task_newtask(void *callback, void *data) {
+  if (tp_prov.task_newtask) {
+    tracepoint_probe_unregister(tp_prov.task_newtask, callback, data);
+  }
+}
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
 
 /* Preemption */
