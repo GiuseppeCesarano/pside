@@ -18,7 +18,9 @@ const Engine = @This();
 
 const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 const initial_experiment_duration_us = 50 * std.time.us_per_ms;
+const max_experiment_duration_us = 1 * std.time.us_per_s;
 const min_progress_delta = 5;
+const decay_progress_delta = min_progress_delta * 4;
 const flush_retry_count = 3;
 const flush_retry_delay_us = 50;
 
@@ -221,9 +223,12 @@ fn doExperiment(this: *Engine, params: ExperimentParameters, baseline_prog: usiz
     while (prog_delta < min_progress_delta and
         !kernel.Thread.shouldThisStop()) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog)
     {
-        this.experiment_duration_us *|= 2;
+        this.experiment_duration_us = @min(max_experiment_duration_us, this.experiment_duration_us *| 2);
         kernel.time.sleep.us(this.experiment_duration_us / 2);
     }
+
+    if (prog_delta > decay_progress_delta)
+        this.experiment_duration_us = @max(initial_experiment_duration_us, this.experiment_duration_us / 2);
 
     this.sampler_tick_delay_us.store(0, .monotonic); // stop in flight ticks
     if (params.speedup_percent != 0) this.sampler.?.disable();
