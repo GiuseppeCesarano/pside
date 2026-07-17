@@ -539,7 +539,6 @@ html, body {
 	    (async () => {
 		try {
 		    sections = await (await fetch('/api/vmas')).json();
-		    sections.sort((a, b) => Math.abs(b.best_impact) - Math.abs(a.best_impact));
 		    document.getElementById('meta-sections').textContent = sections.length;
 		    renderSidebar(sections);
 		    if (sections.length === 1) loadSection(sections[0].name);
@@ -610,8 +609,7 @@ html, body {
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 
-		allSeries = data.filter(s => s.points.length > 0)
-		    .sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+		allSeries = data.filter(s => s.points.length > 0);
 
 		applyFilter();
 	    }

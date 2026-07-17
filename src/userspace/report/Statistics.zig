@@ -29,19 +29,11 @@ pub const Throughput = struct {
 
             location: []const u8,
             points: [Collapsed.Throughput.Vma.Experiments.speedups]Point,
-            // Total throughput swing (percentage points) from 0% to 100% simulated
-            // speedup: how much this location matters as an optimization target.
-            // Positive: speeding it up helps. Near zero: off the critical path.
-            // Negative: speeding it up hurts throughput (worth a second look).
             impact: f32,
         };
 
         name: []const u8,
         graphs: []Graph,
-        // Impact of the single most decisive graph in this Vma (largest |impact|),
-        // used to let a report surface its most interesting Vma without opening it.
-        best_impact: f32,
-        best_location: []const u8,
     };
 
     vmas: []Vma,
@@ -66,14 +58,7 @@ pub const Throughput = struct {
                 vma.graphs = new_alloc;
             } else vma.graphs = vma.graphs[0..i];
 
-            vma.best_impact = 0;
-            vma.best_location = "";
-            for (vma.graphs) |graph| {
-                if (@abs(graph.impact) > @abs(vma.best_impact)) {
-                    vma.best_impact = graph.impact;
-                    vma.best_location = graph.location;
-                }
-            }
+            std.mem.sort(Throughput.Vma.Graph, vma.graphs, {}, sortGraphsByImpactDescending);
         }
 
         return .{ .vmas = vmas };
@@ -121,7 +106,7 @@ pub const Throughput = struct {
             };
         }
 
-        graph.impact = graph.points[graph.points.len - 1].percent - graph.points[0].percent;
+        graph.impact = theilSen(&graph.points) * 100.0;
 
         return graph;
     }
@@ -135,3 +120,37 @@ pub const Throughput = struct {
         allocator.free(this.vmas);
     }
 };
+
+fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
+    const num_points = Collapsed.Throughput.Vma.Experiments.speedups;
+    if (num_points < 2) return 0.0;
+
+    const num_pairs = (num_points * (num_points - 1)) / 2;
+    var slopes: [num_pairs]f32 = undefined;
+    var k: usize = 0;
+    var i: usize = 0;
+
+    while (i < num_points) : (i += 1) {
+        var j: usize = i + 1;
+        while (j < num_points) : (j += 1) {
+            const dy = points[j].percent - points[i].percent;
+            const dx = @as(f32, @floatFromInt(j - i)) * 5.0;
+            slopes[k] = dy / dx;
+            k += 1;
+        }
+    }
+
+    std.mem.sort(f32, &slopes, {}, std.sort.asc(f32));
+
+    const mid = slopes.len / 2;
+    const median_slope = if (slopes.len % 2 == 0)
+        (slopes[mid - 1] + slopes[mid]) / 2.0
+    else
+        slopes[mid];
+
+    return median_slope;
+}
+
+fn sortGraphsByImpactDescending(_: void, lhs: Throughput.Vma.Graph, rhs: Throughput.Vma.Graph) bool {
+    return lhs.impact > rhs.impact;
+}
