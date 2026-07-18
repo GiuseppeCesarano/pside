@@ -508,6 +508,11 @@ pub const execution = struct {
     pub fn inTask() bool {
         return c_in_task() != 0;
     }
+
+    extern fn c_current_user_ip() usize;
+    pub fn currentUserSpaceIp() usize {
+        return c_current_user_ip();
+    }
 };
 
 pub const preempt = struct {

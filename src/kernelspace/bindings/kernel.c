@@ -61,6 +61,7 @@ int c_task_work_add(struct task_struct * /*task*/,
 struct task_struct *c_get_task_from_tid(pid_t);
 void c_get_task_struct(struct task_struct *t);
 void c_put_task_struct(struct task_struct *t);
+unsigned long c_current_user_ip(void);
 
 /* RCU */
 void c_rcu_read_lock(void);
@@ -190,6 +191,11 @@ int c_task_is_dead(struct task_struct *task) {
 int c_task_is_reaped(struct task_struct *task) {
   return task->exit_state == EXIT_DEAD;
 }
+
+unsigned long c_current_user_ip(void) {
+  return instruction_pointer(task_pt_regs(current));
+}
+
 struct callback_head **c_task_work_ptr(struct task_struct *task) {
   return &task->task_works;
 }

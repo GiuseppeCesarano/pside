@@ -150,18 +150,8 @@ pub fn unload(this: @This(), io: std.Io) !void {
     return DeleteModuleError.FdOpen;
 }
 
-pub fn startProfilerOnPid(this: *@This(), pid: linux.pid_t, fd: linux.fd_t, vma_name: []const u8) !void {
-    if (vma_name.len > std.math.maxInt(u8)) return error.VmaNameTooLong;
-
-    var data: communications.Data = .{ .start = .{
-        .pid = pid,
-        .output_fd = fd,
-        .vma_name = undefined,
-        .vma_name_len = @intCast(vma_name.len),
-    } };
-    @memcpy(data.start.vma_name[0..vma_name.len], vma_name);
-    data.start.vma_name[vma_name.len] = 0;
-
+pub fn startProfilerOnPid(this: *@This(), start: communications.StartOptions) !void {
+    const data: communications.Data = .{ .start = start };
     const rc = linux.ioctl(
         this.ctl.handle,
         @intFromEnum(communications.Commands.start_profiler),

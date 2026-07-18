@@ -56,7 +56,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
             data.start.vma_name[len] = 0;
             const raw = data.start.vma_name[0..len :0];
 
-            engine.?.profilePid(data.start.pid, data.start.output_fd, raw) catch {
+            engine.?.profilePid(data.start.pid, data.start.output_fd, raw, data.start.attribute_kernel_samples) catch {
                 engine.?.deinit();
                 engine = null;
                 return code(.IO);

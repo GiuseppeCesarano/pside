@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const cli = @import("cli");
+const communications = @import("communications");
 
 const elf_section_parser = @import("elf_section_parser.zig");
 const KernelInterface = @import("KernelInterface.zig");
@@ -18,6 +19,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         p: []const u8 = "",
         l: []const u8 = "",
         n: u32 = 1,
+        k: bool = false,
     });
 
     const io = init.io;
@@ -68,7 +70,12 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
             traced_process.kill() catch std.log.err("Failed to kill process after error", .{});
         }
 
-        try module.startProfilerOnPid(traced_process.pid, output_file.file.handle, vma_name);
+        try module.startProfilerOnPid(try .init(
+            traced_process.pid,
+            output_file.file.handle,
+            vma_name,
+            parsed_options.flags.k,
+        ));
 
         for (patch_addresses) |address| try traced_process.patchProgressPoint(address);
 

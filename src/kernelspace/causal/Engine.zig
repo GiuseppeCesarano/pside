@@ -108,7 +108,7 @@ pub fn deinit(this: *Engine) void {
     this.virtual_clocks.deinit(atomic_allocator);
 }
 
-pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8) !void {
+pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]const u8, attribute_kernel_samples: bool) !void {
     try this.delay_pool.init();
 
     const task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
@@ -152,7 +152,7 @@ pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]
             .exclude_guest = true,
             .exclude_hv = true,
             .exclude_idle = true,
-            .exclude_kernel = true,
+            .exclude_kernel = !attribute_kernel_samples,
         },
     };
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
@@ -302,9 +302,9 @@ fn captureProfilingTarget(this: *Engine, ip: usize) bool {
     }
 }
 
-fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
+fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, _: *kernel.PtRegs) callconv(.c) void {
     const this: *Engine = @ptrCast(@alignCast(event.context() orelse return));
-    const ip = regs.ip;
+    const ip = kernel.execution.currentUserSpaceIp();
 
     const target = this.target_ip.load(.monotonic);
     const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
