@@ -21,7 +21,7 @@ var engine: ?Engine = null;
 
 export fn init_module() linksection(".init.text") c_int {
     progress.create(name ++ "_progress", null) catch return 1;
-    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
+    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.sharedBuffer()));
     progress_points_ptr.* = .init(0);
     std.log.debug("chardev created at: /dev/" ++ name, .{});
 
@@ -49,7 +49,7 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
         .start_profiler => {
             if (engine != null) return code(.BUSY);
 
-            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.shared_buffer()));
+            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.sharedBuffer()));
             engine = Engine.init(progress_points_ptr) catch return code(.NOMEM);
 
             const len = data.start.vma_name_len;

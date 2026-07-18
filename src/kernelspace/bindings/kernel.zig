@@ -102,7 +102,7 @@ pub const heap = struct {
                 std.debug.assert(alignment_bytes < std.math.maxInt(Metadata));
 
                 // We will overallocate for the maximum alignment padding
-                // which is the alignement_bytes - 1 + @SizeOf(metadata)
+                // which is the alignment_bytes - 1 + @sizeOf(Metadata)
                 // to save how many bytes we skipped.
                 //
                 // The metadata will be the value preceding the returned ptr
@@ -128,8 +128,8 @@ pub const heap = struct {
 
             fn remap(context: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
                 // krealloc could potentially return an allocation that
-                // doesn't respect the alginment required so is not
-                // suitable to achive the remap implementation
+                // doesn't respect the alignment required so is not
+                // suitable to achieve the remap implementation
                 return if (resize(context, buf, alignment, new_len, return_address)) buf.ptr else null;
             }
 
@@ -144,7 +144,7 @@ pub const heap = struct {
         };
     }
 
-    // This allocator doesn't support alignments requiroments > 255 bytes.
+    // This allocator doesn't support alignments requirements > 255 bytes.
     extern fn c_kmalloc(c_ulong) ?*anyopaque;
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
@@ -240,6 +240,10 @@ pub const time = struct {
     };
 };
 
+fn cErrno(rc: c_int) linux.E {
+    return linux.errno(@as(usize, @bitCast(@as(isize, rc))));
+}
+
 pub const Task = opaque {
     extern fn c_current_task() *Task;
     pub fn current() *Task {
@@ -252,10 +256,10 @@ pub const Task = opaque {
     }
 
     extern fn c_task_work_resolve() c_int;
-    pub fn findAddWork() WorkAddError!void {
-        return switch (linux.errno(@as(u64, @bitCast(@as(i64, c_task_work_resolve()))))) {
+    pub fn resolveAddWork() WorkAddError!void {
+        return switch (cErrno(c_task_work_resolve())) {
             .SUCCESS => {},
-            .NOSYS => WorkAddError.KprobeLeakFaild,
+            .NOSYS => WorkAddError.KprobeLeakFailed,
             else => WorkAddError.Unknown,
         };
     }
@@ -263,11 +267,6 @@ pub const Task = opaque {
     extern fn c_pid(*Task) linux.pid_t;
     pub fn pid(this: *Task) linux.pid_t {
         return c_pid(this);
-    }
-
-    extern fn c_tid(*Task) linux.pid_t;
-    pub fn tid(this: *Task) linux.pid_t {
-        return c_tid(this);
     }
 
     extern fn c_task_is_running(*Task) c_int;
@@ -301,7 +300,7 @@ pub const Task = opaque {
     };
 
     pub const WorkAddError = error{
-        KprobeLeakFaild,
+        KprobeLeakFailed,
         BadConfig,
         TooLateShuttingDown,
         Unknown,
@@ -309,9 +308,9 @@ pub const Task = opaque {
 
     extern fn c_task_work_add(*Task, *Work, NotifyMode) c_int;
     pub fn addWork(this: *Task, work: *Work, notify_mode: NotifyMode) WorkAddError!void {
-        return switch (linux.errno(@as(u64, @bitCast(@as(i64, c_task_work_add(this, work, notify_mode)))))) {
+        return switch (cErrno(c_task_work_add(this, work, notify_mode))) {
             .SUCCESS => {},
-            .NOSYS => WorkAddError.KprobeLeakFaild,
+            .NOSYS => WorkAddError.KprobeLeakFailed,
             .INVAL => WorkAddError.BadConfig,
             .SRCH => WorkAddError.TooLateShuttingDown,
             else => WorkAddError.Unknown,
@@ -343,13 +342,40 @@ pub const rcu = struct {
     };
 };
 
+pub const vma = struct {
+    pub const Range = extern struct {
+        begin: usize,
+        end: usize,
+
+        pub fn contains(this: Range, ip: usize) bool {
+            return ip -% this.begin < this.end - this.begin;
+        }
+    };
+
+    extern fn c_snapshot_executable_vmas(*Task, ?[*:0]const u8, [*]Range, c_int) c_int;
+    pub fn snapshotExecutable(task: *Task, filter: ?[*:0]const u8, buffer: []Range) usize {
+        return @intCast(c_snapshot_executable_vmas(task, filter, buffer.ptr, @intCast(buffer.len)));
+    }
+};
+
 pub const CharDevice = extern struct {
     _: [512]u8 = undefined,
     pub const IoctlHandler = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
 
+    pub const RegisterError = error{
+        OutOfMemory,
+        Busy,
+        Unexpected,
+    };
+
     extern fn c_chardev_register(*CharDevice, [*:0]const u8, IoctlHandler) c_int;
-    pub fn create(this: *CharDevice, file_name: [:0]const u8, handler: IoctlHandler) !void {
-        if (c_chardev_register(this, file_name.ptr, handler) != 0) return error.CouldNotRegisterChardev;
+    pub fn create(this: *CharDevice, file_name: [:0]const u8, handler: IoctlHandler) RegisterError!void {
+        return switch (cErrno(c_chardev_register(this, file_name.ptr, handler))) {
+            .SUCCESS => {},
+            .NOMEM => RegisterError.OutOfMemory,
+            .BUSY => RegisterError.Busy,
+            else => RegisterError.Unexpected,
+        };
     }
 
     extern fn c_chardev_unregister(*CharDevice) void;
@@ -358,7 +384,7 @@ pub const CharDevice = extern struct {
     }
 
     extern fn c_get_shared_buffer(*CharDevice) *[std.heap.page_size_min]u8;
-    pub fn shared_buffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
+    pub fn sharedBuffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
         return c_get_shared_buffer(this);
     }
 };
@@ -418,22 +444,31 @@ pub const PerfEvent = opaque {
 
 pub const Thread = opaque {
     pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
+
+    pub const SpawnError = error{
+        OutOfMemory,
+        Interrupted,
+        Unexpected,
+    };
+
     extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) usize;
-    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) ?*Thread {
+    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) SpawnError!*Thread {
         const rc = c_kthread_run(thread_handler, data, name);
         return switch (linux.errno(rc)) {
             .SUCCESS => @ptrFromInt(rc),
-            else => null,
+            .NOMEM => SpawnError.OutOfMemory,
+            .INTR => SpawnError.Interrupted,
+            else => SpawnError.Unexpected,
         };
     }
 
     extern fn c_kthread_stop(*Thread) c_int;
-    pub fn stop(this: *Thread) void {
-        _ = c_kthread_stop(this); //TODO: this should return errors
+    pub fn stop(this: *Thread) c_int {
+        return c_kthread_stop(this);
     }
 
     extern fn c_kthread_should_stop() bool;
-    pub fn shouldThisStop() bool {
+    pub fn shouldStop() bool {
         return c_kthread_should_stop();
     }
 };

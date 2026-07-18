@@ -62,7 +62,7 @@ deinit_guard: std.atomic.Value(bool),
 error_has_occurred: std.atomic.Value(bool),
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
-    try kernel.Task.findAddWork();
+    try kernel.Task.resolveAddWork();
     kernel.tracepoint.init();
 
     return .{
@@ -91,7 +91,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
 pub fn deinit(this: *Engine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
 
-    if (this.profiler_thread) |t| t.stop();
+    if (this.profiler_thread) |t| _ = t.stop();
 
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
@@ -157,20 +157,20 @@ pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]
     };
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
 
-    this.profiler_thread = kernel.Thread.run(profilingLoop, this, "pside_loop") orelse return error.ThreadSpawnFailed;
+    this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
 }
 
 fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *Engine = @ptrCast(@alignCast(ctx));
 
-    while (!kernel.Thread.shouldThisStop() and !this.error_has_occurred.load(.monotonic)) {
+    while (!kernel.Thread.shouldStop() and !this.error_has_occurred.load(.monotonic)) {
         const params = this.generateRandomExperimentParameters();
         const snap = this.takeSnapshot();
 
         this.doExperiment(params, snap.progress);
 
         const target_ip = this.target_ip.load(.monotonic);
-        const should_stop = kernel.Thread.shouldThisStop() or this.error_has_occurred.load(.monotonic);
+        const should_stop = kernel.Thread.shouldStop() or this.error_has_occurred.load(.monotonic);
 
         if (should_stop or (target_ip == 0 and params.speedup_percent != 0)) continue;
 
@@ -221,7 +221,7 @@ fn doExperiment(this: *Engine, params: ExperimentParameters, baseline_prog: usiz
 
     var prog_delta = this.progress.load(.monotonic) -% baseline_prog;
     while (prog_delta < min_progress_delta and
-        !kernel.Thread.shouldThisStop()) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog)
+        !kernel.Thread.shouldStop()) : (prog_delta = this.progress.load(.monotonic) -% baseline_prog)
     {
         this.experiment_duration_us = @min(max_experiment_duration_us, this.experiment_duration_us *| 2);
         kernel.time.sleep.us(this.experiment_duration_us / 2);

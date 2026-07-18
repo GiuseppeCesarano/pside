@@ -5,35 +5,21 @@ const allocator = kernel.heap.allocator;
 
 const VmaRanges = @This();
 
-pub const Range = extern struct {
-    begin: usize,
-    end: usize,
-
-    pub fn contains(this: Range, ip: usize) bool {
-        return ip -% this.begin < this.end - this.begin;
-    }
-};
+pub const Range = kernel.vma.Range;
 
 entries: []Range,
 
 pub const empty: VmaRanges = .{ .entries = &.{} };
 
-extern fn c_snapshot_executable_vmas(
-    *kernel.Task,
-    ?[*:0]const u8,
-    [*]Range,
-    c_int,
-) c_int;
-
 pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
-    const filter_z: ?[*:0]const u8 = if (filter.len > 0) @ptrCast(filter.ptr) else null;
+    const filter_z: ?[*:0]const u8 = if (filter.len > 0) filter.ptr else null;
 
     var capacity: usize = 32;
     while (true) {
         const vma_ranges = try allocator.alloc(Range, capacity);
         errdefer allocator.free(vma_ranges);
 
-        const count: usize = @intCast(c_snapshot_executable_vmas(task, filter_z, vma_ranges.ptr, @intCast(capacity)));
+        const count = kernel.vma.snapshotExecutable(task, filter_z, vma_ranges);
 
         if (count <= capacity) {
             std.debug.assert(allocator.resize(vma_ranges, count));

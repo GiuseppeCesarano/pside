@@ -30,7 +30,7 @@ pub const empty: DiskWriter = .{
 pub fn deinit(this: *DiskWriter) void {
     if (this.thread == null) return;
     this.completion.signal();
-    this.thread.?.stop();
+    _ = this.thread.?.stop();
     this.file.?.put();
     allocator.free(this.buffer);
 }
@@ -49,7 +49,7 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
     this.file_offset = file.size();
     errdefer this.file = null;
 
-    this.thread = kernel.Thread.run(writerFn, this, "pside_disk_writer") orelse return error.ThreadSpawnFailed;
+    this.thread = try kernel.Thread.run(writerFn, this, "pside_disk_writer");
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
@@ -94,7 +94,7 @@ fn pushBytesUnchecked(this: *DiskWriter, bytes: []const u8) !void {
 fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *DiskWriter = @ptrCast(@alignCast(ctx.?));
 
-    while (!kernel.Thread.shouldThisStop()) {
+    while (!kernel.Thread.shouldStop()) {
         this.completion.wait();
         defer this.completion.reinit();
 

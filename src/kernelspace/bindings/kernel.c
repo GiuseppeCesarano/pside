@@ -19,69 +19,12 @@
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
 
-/* Forward declarations */
+/* Types shared with the Zig bindings */
 
-/* Logging */
-void c_pr_err(const char * /*msg*/);
-void c_pr_warn(const char * /*msg*/);
-void c_pr_info(const char * /*msg*/);
-void c_pr_debug(const char * /*msg*/);
-
-/* Copy from/to userspace */
-unsigned long c_copy_to_user(void * /*to*/, const void * /*from*/,
-                             unsigned long /*n*/);
-unsigned long c_copy_from_user(void * /*to*/, const void * /*from*/,
-                               unsigned long /*n*/);
-
-/* Memory management */
-void *c_kmalloc(size_t /*size*/);
-void c_kfree(void * /*ptr*/);
-void *c_kmalloc_atomic(size_t /*size*/);
-
-/* Delay utilities */
-void c_ndelay(unsigned long /*nsec*/);
-void c_udelay(unsigned long /*usec*/);
-void c_mdelay(unsigned long /*msec*/);
-
-/* Time */
-u64 c_ktime_get_ns(void);
-
-/* Task */
-struct task_struct *c_current_task(void);
-pid_t c_pid(struct task_struct *);
-pid_t c_tid(struct task_struct *);
-int c_task_is_running(struct task_struct * /*task*/);
-int c_task_is_dead(struct task_struct * /*task*/);
-int c_task_is_reaped(struct task_struct * /*task*/);
-struct callback_head **c_task_work_ptr(struct task_struct * /*task*/);
-typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
-                               int);
-int c_task_work_resolve(void);
-int c_task_work_add(struct task_struct * /*task*/,
-                    struct callback_head * /*twork*/, int /*notify_mode*/);
-struct task_struct *c_get_task_from_tid(pid_t);
-void c_get_task_struct(struct task_struct *t);
-void c_put_task_struct(struct task_struct *t);
-unsigned long c_current_user_ip(void);
-int c_regs_in_kernel(struct pt_regs * /*regs*/);
-long c_copy_from_user_nofault(void * /*dst*/, const void * /*src*/,
-                              unsigned long /*size*/);
-
-/* RCU */
-void c_rcu_read_lock(void);
-void c_rcu_read_unlock(void);
-
-/* VMA */
 struct VmaRange {
   unsigned long begin;
   unsigned long end;
 };
-
-int c_snapshot_executable_vmas(struct task_struct * /*task*/,
-                               const char * /*filter*/,
-                               struct VmaRange * /*ranges*/, int /*max*/);
-
-/* Chardev */
 
 struct chardev {
   dev_t dev;
@@ -98,42 +41,92 @@ _Static_assert(sizeof(struct chardev) <= 512,
 _Static_assert(sizeof(struct completion) <= 64,
                "Completion placeholder in kernel.zig is too small");
 
+typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
+                               int);
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
-int c_chardev_register(struct chardev * /*d*/, const char * /*name*/,
-                       ioctl_fn /*callback*/);
-void c_chardev_unregister(struct chardev * /*d*/);
-void *c_get_shared_buffer(struct chardev * /*d*/);
+
+/* Prototypes */
+
+/* Logging */
+void c_pr_err(const char *);
+void c_pr_warn(const char *);
+void c_pr_info(const char *);
+void c_pr_debug(const char *);
+
+/* Copy from/to userspace */
+unsigned long c_copy_to_user(void *, const void *, unsigned long);
+unsigned long c_copy_from_user(void *, const void *, unsigned long);
+
+/* Memory management */
+void *c_kmalloc(size_t);
+void c_kfree(void *);
+void *c_kmalloc_atomic(size_t);
+
+/* Delay utilities */
+void c_ndelay(unsigned long);
+void c_udelay(unsigned long);
+void c_mdelay(unsigned long);
+
+/* Time */
+u64 c_ktime_get_ns(void);
+
+/* Task */
+struct task_struct *c_current_task(void);
+pid_t c_pid(struct task_struct *);
+int c_task_is_running(struct task_struct *);
+int c_task_is_dead(struct task_struct *);
+int c_task_is_reaped(struct task_struct *);
+int c_task_work_resolve(void);
+int c_task_work_add(struct task_struct *, struct callback_head *, int);
+struct task_struct *c_get_task_from_tid(pid_t);
+void c_get_task_struct(struct task_struct *);
+void c_put_task_struct(struct task_struct *);
+unsigned long c_current_user_ip(void);
+int c_regs_in_kernel(struct pt_regs *);
+long c_copy_from_user_nofault(void *, const void *, unsigned long);
+
+/* RCU */
+void c_rcu_read_lock(void);
+void c_rcu_read_unlock(void);
+
+/* VMA */
+int c_snapshot_executable_vmas(struct task_struct *, const char *,
+                               struct VmaRange *, int);
+
+/* Chardev */
+int c_chardev_register(struct chardev *, const char *, ioctl_fn);
+void c_chardev_unregister(struct chardev *);
+void *c_get_shared_buffer(struct chardev *);
 
 /* Perf */
 struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
                                                       int, pid_t,
                                                       perf_overflow_handler_t,
                                                       void *);
-void c_perf_event_enable(struct perf_event * /*event*/);
-void c_perf_event_disable(struct perf_event * /*event*/);
-int c_perf_event_release_kernel(struct perf_event * /*event*/);
-void *c_perf_event_context(struct perf_event * /*event*/);
+void c_perf_event_enable(struct perf_event *);
+void c_perf_event_disable(struct perf_event *);
+int c_perf_event_release_kernel(struct perf_event *);
+void *c_perf_event_context(struct perf_event *);
 
 /* Kthread */
-struct task_struct *c_kthread_run(int (* /*threadfn*/)(void *), void * /*data*/,
-                                  const char * /*name*/);
-int c_kthread_stop(struct task_struct * /*k*/);
+struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
+int c_kthread_stop(struct task_struct *);
 bool c_kthread_should_stop(void);
 
 /* Sleep */
-void c_sleep(unsigned long /*usecs*/);
+void c_sleep(unsigned long);
 
 /* Tracepoints */
 void c_tracepoint_init(void);
-int c_register_sched_switch(void * /*callback*/, void * /*data*/);
-void c_unregister_sched_switch(void * /*callback*/, void * /*data*/);
-int c_register_sched_waking(void * /*callback*/, void * /*data*/);
-void c_unregister_sched_waking(void * /*callback*/, void * /*data*/);
-int c_register_task_newtask(void * /*callback*/, void * /*data*/);
-void c_unregister_task_newtask(void * /*callback*/, void * /*data*/);
+int c_register_sched_switch(void *, void *);
+void c_unregister_sched_switch(void *, void *);
+int c_register_sched_waking(void *, void *);
+void c_unregister_sched_waking(void *, void *);
+int c_register_task_newtask(void *, void *);
+void c_unregister_task_newtask(void *, void *);
 void c_tracepoint_sync(void);
 
-/* Preemept */
+/* Preemption */
 void c_preempt_disable(void);
 void c_preempt_enable(void);
 
@@ -147,8 +140,8 @@ void c_complete(struct completion *);
 void c_reinit_completion(struct completion *);
 
 /* File */
-struct file *c_fget(int /*fd*/);
-void c_fput(struct file * /*f*/);
+struct file *c_fget(int);
+void c_fput(struct file *);
 ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
 ssize_t c_file_size(struct file *);
 
@@ -185,7 +178,6 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 /* Task */
 struct task_struct *c_current_task(void) { return current; }
 pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
-pid_t c_tid(struct task_struct *task) { return task_pid_nr(task); }
 int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }
@@ -204,10 +196,6 @@ int c_regs_in_kernel(struct pt_regs *regs) { return !user_mode(regs); }
 
 long c_copy_from_user_nofault(void *dst, const void *src, unsigned long size) {
   return copy_from_user_nofault(dst, src, size);
-}
-
-struct callback_head **c_task_work_ptr(struct task_struct *task) {
-  return &task->task_works;
 }
 
 static task_work_add_t real_task_work_add = NULL;
@@ -257,30 +245,31 @@ void c_rcu_read_unlock(void) { rcu_read_unlock(); }
 /* VMA */
 int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
                                struct VmaRange *ranges, int max) {
-  if (!task->mm) {
+  struct mm_struct *mm = task->mm;
+  if (!mm)
     return 0;
-  }
+
   int count = 0;
-  mmap_read_lock(task->mm);
-  struct vm_area_struct *vma = find_vma(task->mm, 0);
-  while (vma) {
-    if (vma->vm_flags & VM_EXEC) {
-      if (!filter || !*filter) {
-        if (count < max)
-          ranges[count] = (struct VmaRange){vma->vm_start, vma->vm_end};
-        count++;
-      } else if (vma->vm_file) {
-        const char *name = vma->vm_file->f_path.dentry->d_name.name;
-        if (strcmp(name, filter) == 0) {
-          if (count < max)
-            ranges[count] = (struct VmaRange){vma->vm_start, vma->vm_end};
-          count++;
-        }
-      }
+  struct vm_area_struct *vma;
+  VMA_ITERATOR(vmi, mm, 0);
+
+  mmap_read_lock(mm);
+  for_each_vma(vmi, vma) {
+    if (!(vma->vm_flags & VM_EXEC))
+      continue;
+
+    if (filter && *filter) {
+      if (!vma->vm_file ||
+          strcmp(vma->vm_file->f_path.dentry->d_name.name, filter) != 0)
+        continue;
     }
-    vma = find_vma(task->mm, vma->vm_end);
+
+    if (count < max)
+      ranges[count] = (struct VmaRange){vma->vm_start, vma->vm_end};
+    count++;
   }
-  mmap_read_unlock(task->mm);
+  mmap_read_unlock(mm);
+
   return count;
 }
 
@@ -307,41 +296,49 @@ static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
 }
 
 int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
+  int rc;
+
   d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
   if (!d->shared_buffer)
     return -ENOMEM;
-  int rc = alloc_chrdev_region(&d->dev, 0, 1, name);
-  if (rc < 0) {
-    free_page((unsigned long)d->shared_buffer);
-    return rc;
-  }
+
+  rc = alloc_chrdev_region(&d->dev, 0, 1, name);
+  if (rc < 0)
+    goto free_page;
+
   d->fops.owner = THIS_MODULE;
   d->fops.open = internal_open;
   d->fops.mmap = internal_mmap;
   d->fops.unlocked_ioctl = callback;
   cdev_init(&d->cdev, &d->fops);
+
   rc = cdev_add(&d->cdev, d->dev, 1);
-  if (rc < 0) {
-    unregister_chrdev_region(d->dev, 1);
-    free_page((unsigned long)d->shared_buffer);
-    return rc;
-  }
+  if (rc < 0)
+    goto unregister_region;
+
   d->class = class_create(name);
   if (IS_ERR(d->class)) {
-    cdev_del(&d->cdev);
-    unregister_chrdev_region(d->dev, 1);
-    free_page((unsigned long)d->shared_buffer);
-    return PTR_ERR(d->class);
+    rc = PTR_ERR(d->class);
+    goto del_cdev;
   }
+
   d->device = device_create(d->class, NULL, d->dev, NULL, name);
   if (IS_ERR(d->device)) {
-    class_destroy(d->class);
-    cdev_del(&d->cdev);
-    unregister_chrdev_region(d->dev, 1);
-    free_page((unsigned long)d->shared_buffer);
-    return PTR_ERR(d->device);
+    rc = PTR_ERR(d->device);
+    goto destroy_class;
   }
+
   return 0;
+
+destroy_class:
+  class_destroy(d->class);
+del_cdev:
+  cdev_del(&d->cdev);
+unregister_region:
+  unregister_chrdev_region(d->dev, 1);
+free_page:
+  free_page((unsigned long)d->shared_buffer);
+  return rc;
 }
 
 void c_chardev_unregister(struct chardev *d) {
@@ -417,7 +414,7 @@ void c_sleep(unsigned long usecs) {
 
 /* Tracepoints */
 
-struct tracepoint_provider {
+static struct tracepoint_provider {
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
   struct tracepoint *task_newtask;
