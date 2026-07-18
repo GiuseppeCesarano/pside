@@ -510,8 +510,25 @@ pub const execution = struct {
     }
 
     extern fn c_current_user_ip() usize;
-    pub fn currentUserSpaceIp() usize {
-        return c_current_user_ip();
+    extern fn c_regs_in_kernel(*PtRegs) c_int;
+    extern fn c_copy_from_user_nofault(*anyopaque, usize, usize) c_long;
+    pub fn currentUserSpaceIp(sample_regs: *PtRegs) usize {
+        const syscall_instruction = switch (@import("builtin").cpu.arch) {
+            .x86_64 => [_]u8{ 0x0f, 0x05 },
+            else => @compileError("TODO: support other archs"),
+        };
+
+        if (c_regs_in_kernel(sample_regs) == 0) return sample_regs.ip;
+
+        const ip = c_current_user_ip();
+        const call_site = ip -% syscall_instruction.len;
+        var opcode: [syscall_instruction.len]u8 = undefined;
+
+        return if (c_copy_from_user_nofault(&opcode, call_site, opcode.len) != 0 or
+            !std.mem.eql(u8, &opcode, &syscall_instruction))
+            ip
+        else
+            call_site;
     }
 };
 

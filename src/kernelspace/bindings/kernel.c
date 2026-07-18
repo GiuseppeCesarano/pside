@@ -17,6 +17,7 @@
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
+#include <linux/uaccess.h>
 
 /* Forward declarations */
 
@@ -62,6 +63,9 @@ struct task_struct *c_get_task_from_tid(pid_t);
 void c_get_task_struct(struct task_struct *t);
 void c_put_task_struct(struct task_struct *t);
 unsigned long c_current_user_ip(void);
+int c_regs_in_kernel(struct pt_regs * /*regs*/);
+long c_copy_from_user_nofault(void * /*dst*/, const void * /*src*/,
+                              unsigned long /*size*/);
 
 /* RCU */
 void c_rcu_read_lock(void);
@@ -194,6 +198,12 @@ int c_task_is_reaped(struct task_struct *task) {
 
 unsigned long c_current_user_ip(void) {
   return instruction_pointer(task_pt_regs(current));
+}
+
+int c_regs_in_kernel(struct pt_regs *regs) { return !user_mode(regs); }
+
+long c_copy_from_user_nofault(void *dst, const void *src, unsigned long size) {
+  return copy_from_user_nofault(dst, src, size);
 }
 
 struct callback_head **c_task_work_ptr(struct task_struct *task) {

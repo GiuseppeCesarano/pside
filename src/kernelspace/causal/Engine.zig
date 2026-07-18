@@ -302,9 +302,9 @@ fn captureProfilingTarget(this: *Engine, ip: usize) bool {
     }
 }
 
-fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, _: *kernel.PtRegs) callconv(.c) void {
+fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *Engine = @ptrCast(@alignCast(event.context() orelse return));
-    const ip = kernel.execution.currentUserSpaceIp();
+    const ip = kernel.execution.currentUserSpaceIp(regs);
 
     const target = this.target_ip.load(.monotonic);
     const delay_per_tick = this.sampler_tick_delay_us.load(.monotonic);
