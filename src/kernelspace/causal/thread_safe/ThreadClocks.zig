@@ -263,11 +263,10 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
 }
 
 /// Returns the full lag a thread woken by an external event must repay itself.
-/// Interrupt safe: returns 0 without settling while the map is gated.
 pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
     const hash = key.hash();
 
-    this.ref.tryIncrement() catch return 0;
+    this.ref.increment();
     defer this.ref.decrement();
 
     const slot = this.getSlotUnsafe(key, hash).?;
