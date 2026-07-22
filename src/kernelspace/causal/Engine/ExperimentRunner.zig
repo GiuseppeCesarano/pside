@@ -82,6 +82,15 @@ pub fn profilePid(
 
     this.profiled_pid.store(pid, .monotonic);
     const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
+
+    // Only this task is seeded; the rest join via onNewTask, so tracking can
+    // be correct only if the target starts single-threaded.
+    if (task.threadCount() != 1) {
+        task.decrementReferences();
+        std.log.err("Refusing to profile pid {d}: target already has multiple threads", .{pid});
+        return error.MultiThreadedTarget;
+    }
+
     this.time_keeper.addFirst(keyFromTask(task));
 
     this.vma_ranges = try .snapshot(task, vma_name);

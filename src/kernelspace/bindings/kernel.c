@@ -15,6 +15,7 @@
 #include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
+#include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
@@ -73,6 +74,7 @@ u64 c_ktime_get_ns(void);
 /* Task */
 struct task_struct *c_current_task(void);
 pid_t c_pid(struct task_struct *);
+int c_task_thread_count(struct task_struct *);
 int c_task_is_running(struct task_struct *);
 int c_task_is_dead(struct task_struct *);
 int c_task_is_reaped(struct task_struct *);
@@ -178,6 +180,7 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 /* Task */
 struct task_struct *c_current_task(void) { return current; }
 pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
+int c_task_thread_count(struct task_struct *task) { return get_nr_threads(task); }
 int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }

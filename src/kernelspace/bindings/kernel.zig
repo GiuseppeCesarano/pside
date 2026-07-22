@@ -269,6 +269,11 @@ pub const Task = opaque {
         return c_pid(this);
     }
 
+    extern fn c_task_thread_count(*Task) c_int;
+    pub fn threadCount(this: *Task) usize {
+        return @intCast(c_task_thread_count(this));
+    }
+
     extern fn c_task_is_running(*Task) c_int;
     pub fn isRunning(this: *Task) bool {
         return c_task_is_running(this) != 0;
