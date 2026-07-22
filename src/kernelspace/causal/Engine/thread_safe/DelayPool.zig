@@ -41,6 +41,8 @@ pub fn init(this: *@This()) !void {
 }
 
 pub fn deinit(this: *@This()) void {
+    if (this.users_count.load(.monotonic) == std.math.maxInt(u32)) return;
+
     this.waitAllDelays();
 
     var pool: ?*Pool = this.pools.next.load(.monotonic);
@@ -53,7 +55,7 @@ pub fn deinit(this: *@This()) void {
     allocator.destroy(this.pools);
 }
 
-pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
+pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize, mode: kernel.Task.NotifyMode) !void {
     std.debug.assert(delay_time != 0);
 
     _ = this.users_count.fetchAdd(1, .monotonic);
@@ -63,7 +65,7 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) !void {
     errdefer this.pools.freeEntry(slot);
 
     slot.time.store(delay_time, .release);
-    try task.addWork(&slot.work, .@"resume");
+    try task.addWork(&slot.work, mode);
 }
 
 fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {

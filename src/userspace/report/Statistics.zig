@@ -6,6 +6,11 @@ const bootstrap_iterations = 1_000;
 const confidence_interval_low: usize = @intFromFloat(bootstrap_iterations * 0.025);
 const confidence_interval_high: usize = @intFromFloat(bootstrap_iterations * 0.975);
 
+// A line is reported once it has a baseline and at least this many distinct
+// speedup levels; empty buckets in between are skipped, not fatal.
+const min_baseline_samples = 5;
+const min_speedup_points = 3;
+
 fn sortAndGet75Percentile(data: []f32) f32 {
     @setFloatMode(.optimized);
     std.mem.sort(f32, data, {}, std.sort.asc(f32));
@@ -21,6 +26,7 @@ pub const Throughput = struct {
     pub const Vma = struct {
         pub const Graph = struct {
             pub const Point = struct {
+                present: bool,
                 percent: f32,
                 ci_low: f32,
                 ci_high: f32,
@@ -67,8 +73,13 @@ pub const Throughput = struct {
     fn computeGraph(allocator: std.mem.Allocator, experiments: Collapsed.Throughput.Vma.Experiments) !?Throughput.Vma.Graph {
         @setFloatMode(.optimized);
 
-        if (experiments.datapoints[0].items.len < 5) return null;
-        for (experiments.datapoints[1..]) |datapoint| if (datapoint.items.len == 0) return null;
+        if (experiments.datapoints[0].items.len < min_baseline_samples) return null;
+
+        var present_speedups: usize = 0;
+        for (experiments.datapoints[1..]) |datapoint| {
+            if (datapoint.items.len != 0) present_speedups += 1;
+        }
+        if (present_speedups < min_speedup_points) return null;
 
         var graph: Throughput.Vma.Graph = .{
             .location = try allocator.dupe(u8, experiments.location),
@@ -86,6 +97,11 @@ pub const Throughput = struct {
         const baseline = sortAndGet75Percentile(experiments.datapoints[0].items);
 
         for (graph.points[0..], experiments.datapoints) |*graph_point, datapoints| {
+            if (datapoints.items.len == 0) {
+                graph_point.* = .{ .present = false, .percent = 0, .ci_low = 0, .ci_high = 0, .singleton = false };
+                continue;
+            }
+
             if (resampled.len < datapoints.items.len) {
                 allocator.free(resampled);
                 resampled = try allocator.alloc(f32, datapoints.items.len);
@@ -99,10 +115,11 @@ pub const Throughput = struct {
             std.mem.sort(f32, bootstrap_distribution[0..], {}, std.sort.asc(f32));
 
             graph_point.* = .{
+                .present = true,
                 .percent = 100.0 * sortAndGet75Percentile(datapoints.items) / baseline,
                 .ci_low = bootstrap_distribution[confidence_interval_low],
                 .ci_high = bootstrap_distribution[confidence_interval_high],
-                .singleton = experiments.datapoints.len == 1,
+                .singleton = datapoints.items.len == 1,
             };
         }
 
@@ -123,7 +140,6 @@ pub const Throughput = struct {
 
 fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
     const num_points = Collapsed.Throughput.Vma.Experiments.speedups;
-    if (num_points < 2) return 0.0;
 
     const num_pairs = (num_points * (num_points - 1)) / 2;
     var slopes: [num_pairs]f32 = undefined;
@@ -131,8 +147,10 @@ fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
     var i: usize = 0;
 
     while (i < num_points) : (i += 1) {
+        if (!points[i].present) continue;
         var j: usize = i + 1;
         while (j < num_points) : (j += 1) {
+            if (!points[j].present) continue;
             const dy = points[j].percent - points[i].percent;
             const dx = @as(f32, @floatFromInt(j - i)) * 5.0;
             slopes[k] = dy / dx;
@@ -140,15 +158,15 @@ fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
         }
     }
 
-    std.mem.sort(f32, &slopes, {}, std.sort.asc(f32));
+    if (k == 0) return 0.0;
 
-    const mid = slopes.len / 2;
-    const median_slope = if (slopes.len % 2 == 0)
+    std.mem.sort(f32, slopes[0..k], {}, std.sort.asc(f32));
+
+    const mid = k / 2;
+    return if (k % 2 == 0)
         (slopes[mid - 1] + slopes[mid]) / 2.0
     else
         slopes[mid];
-
-    return median_slope;
 }
 
 fn sortGraphsByImpactDescending(_: void, lhs: Throughput.Vma.Graph, rhs: Throughput.Vma.Graph) bool {

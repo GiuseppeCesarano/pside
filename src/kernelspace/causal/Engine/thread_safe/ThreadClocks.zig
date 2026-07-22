@@ -34,14 +34,6 @@ pub const Key = packed struct(usize) {
         return (this_bits & collided_bit) != 0;
     }
 
-    pub fn fromPtr(ptr: *anyopaque) Key {
-        const int = @intFromPtr(ptr);
-        // kernel pointers shall always be aligned and we rely on that fact.
-        assert(int % 2 == 0);
-
-        return .{ .data = int };
-    }
-
     pub fn hash(this: Key) usize {
         const unsigned: Unsigned = @bitCast(this.data);
         return std.hash.int(unsigned);
@@ -63,13 +55,6 @@ pub const Value = packed struct(u64) {
 
     ticks: Ticks,
     master_at_sleep: Ticks,
-
-    pub fn setToMaster(this: *Value, master: Ticks) Ticks {
-        const lag = master - this.ticks;
-        this.* = .{ .ticks = master, .master_at_sleep = master };
-
-        return lag;
-    }
 };
 
 const Pair = struct {
@@ -114,6 +99,8 @@ pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
 fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
     const len = this.pairs.len;
 
+    // bit 0 is reserved for the collision flag; callers must pass it clear.
+    assert(!key.hasCollided());
     assert(@popCount(len) == 1);
     const bitmask = len - 1;
     const max_retries = @max(16, len / 32);
