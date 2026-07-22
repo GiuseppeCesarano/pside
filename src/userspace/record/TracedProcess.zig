@@ -68,7 +68,7 @@ fn childStart(tracee_exe: Program) !void {
 
     if (linux.getppid() == 1) return SpawnError.ParentDead;
 
-    if (!tracee_exe.is_sudo) {
+    if (linux.geteuid() == 0 and !tracee_exe.is_sudo) {
         const env = tracee_exe.enviroment_map;
         const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
         const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);

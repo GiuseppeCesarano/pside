@@ -205,6 +205,7 @@ pub fn execute(
 }
 
 fn functionName(function: anytype) [functionNameLen(function)]u8 {
+    @setEvalBranchQuota(10_000);
     const type_name = @typeName(@TypeOf(.{function}));
     const start_target = " (function '";
     const function_name_start = comptime std.mem.find(u8, type_name, start_target).? + start_target.len;
@@ -219,6 +220,7 @@ fn functionName(function: anytype) [functionNameLen(function)]u8 {
 }
 
 fn functionNameLen(function: anytype) usize {
+    @setEvalBranchQuota(10_000);
     if (@typeInfo(@TypeOf(function)) != .@"fn") @compileError("subcommand field must be populated with a tuple of structs.");
 
     const type_name = @typeName(@TypeOf(.{function}));

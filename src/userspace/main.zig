@@ -2,6 +2,7 @@ const std = @import("std");
 
 const cli = @import("cli");
 const record = @import("record").record;
+const driver = @import("record").driver;
 const report = @import("report").report;
 
 pub fn main(init: std.process.Init) !void {
@@ -10,6 +11,7 @@ pub fn main(init: std.process.Init) !void {
 
     try cli.execute(args, printHelp, .{
         record,
+        driver,
         report,
     }, .{init});
 }
@@ -24,12 +26,21 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\USAGE
         \\  sudo pside record [flags] <program> [args…]
+        \\       pside driver load | unload
         \\       pside report <file.pside>
         \\
         \\SUBCOMMANDS
         \\  record    Run <program> under the profiler and write the results to
-        \\            <program>.pside. Loading the profiler needs a kernel
-        \\            module, so record must be run as root (sudo).
+        \\            <program>.pside. Profiling needs the kernel module: either
+        \\            run record as root (sudo), or load the module once ahead of
+        \\            time with `sudo pside driver load` and then run record
+        \\            without sudo.
+        \\
+        \\  driver    Manage the kernel module out of band, so measurements can
+        \\            run unprivileged:
+        \\              sudo pside driver load     Load the module and hand its
+        \\                                         devices to the invoking user.
+        \\              sudo pside driver unload   Remove the module.
         \\
         \\  report    Parse a .pside file and open an interactive web report
         \\            in your browser.

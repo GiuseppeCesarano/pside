@@ -4,11 +4,14 @@ const linux = std.os.linux;
 const cli = @import("cli");
 const communications = @import("communications");
 
+const calling_user = @import("calling_user.zig");
 const elf_section_parser = @import("elf_section_parser.zig");
 const KernelInterface = @import("KernelInterface.zig");
 const OutputFile = @import("OutputFile.zig");
 const Program = @import("Program.zig");
 const TracedProcess = @import("TracedProcess.zig");
+
+pub const driver = @import("driver.zig").driver;
 
 var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
 var stopped: std.atomic.Value(bool) = .init(false);
@@ -33,12 +36,34 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const user_program: Program = try .initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io);
     defer user_program.deinit(allocator);
 
-    const calling_user = try getCallingUser(init.minimal.environ);
+    const owner = try calling_user.get(init.minimal.environ);
 
-    var module = try KernelInterface.loadModuleFromDefaultPath(calling_user, allocator, io);
-    defer module.unload(io) catch |err| {
-        std.log.warn("Could not remove the kernel module ({s}), please try manually with:\n\n\tsudo rmmod pside\n", .{@errorName(err)});
+    var loaded_by_us = false;
+    var module = KernelInterface.openControlDevice(io) catch |err| blk: {
+        if (err == error.FileNotFound and linux.geteuid() == 0) {
+            if (owner) |o| {
+                try KernelInterface.driverLoad(o, allocator, io);
+                loaded_by_us = true;
+                break :blk KernelInterface.openControlDevice(io) catch |reopen_err| {
+                    _ = KernelInterface.driverUnload(io) catch {};
+                    return reopen_err;
+                };
+            }
+        }
+
+        switch (err) {
+            error.FileNotFound => std.log.err("The pside module is not loaded\n\trun: sudo pside driver load", .{}),
+            error.AccessDenied => std.log.err("Cannot open {s}: load the module as the same user with `sudo pside driver load`", .{KernelInterface.chardev_ctl_path}),
+            else => std.log.err("Could not open {s}: {s}", .{ KernelInterface.chardev_ctl_path, @errorName(err) }),
+        }
+        return err;
     };
+    defer {
+        module.close(io);
+        if (loaded_by_us) {
+            if (KernelInterface.driverUnload(io)) |_| {} else |err| std.log.warn("Could not remove the kernel module ({s}); remove it manually with `sudo pside driver unload`.", .{@errorName(err)});
+        }
+    }
 
     const vma_name = resolveVmaName(parsed_options.flags.l, user_program.path);
 
@@ -55,7 +80,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     };
     defer allocator.free(patch_addresses);
 
-    const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), calling_user);
+    const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), owner);
     defer output_file.close(io);
 
     var i: usize = 0;
@@ -116,13 +141,7 @@ fn setIntHandler() void {
         .mask = linux.sigemptyset(),
     };
     if (linux.errno(linux.sigaction(.INT, &sa, null)) != .SUCCESS)
-        std.log.warn(
-            \\Could not set SIGINT handler.
-            \\If SIGINT is received, you will need to manually remove the kernel module with:
-            \\
-            \\    sudo rmmod {s}
-            \\
-        , .{KernelInterface.name});
+        std.log.warn("Could not set SIGINT handler; Ctrl-C may leave the traced process running.", .{});
 }
 
 fn stop(sig: linux.SIG) callconv(.c) void {
@@ -131,13 +150,6 @@ fn stop(sig: linux.SIG) callconv(.c) void {
         if (pid != 0) _ = linux.kill(pid, .KILL);
         stopped.store(true, .monotonic);
     }
-}
-
-fn getCallingUser(env: std.process.Environ) !?[2]u32 {
-    const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return null, 10);
-    const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return null, 10);
-
-    return .{ uid, gid };
 }
 
 fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {

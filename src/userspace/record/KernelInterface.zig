@@ -31,22 +31,19 @@ pub const DeleteModuleError = error{
     Unknown,
 };
 
-module: std.Io.File,
 ctl: std.Io.File,
 
-pub fn loadModuleFromDefaultPath(chardev_owner: ?[2]u32, allocator: std.mem.Allocator, io: std.Io) !@This() {
+pub fn driverLoad(owner: [2]u32, allocator: std.mem.Allocator, io: std.Io) !void {
     const path = try resolveModulePath(allocator, io);
     defer allocator.free(path);
 
-    var rt: @This() = .{
-        .module = try std.Io.Dir.cwd().openFile(io, path, .{}),
-        .ctl = undefined,
-    };
+    const module = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer module.close(io);
 
-    fInitModule(rt.module.handle) catch |err| {
+    fInitModule(module.handle) catch |err| {
         switch (err) {
-            FInitModuleError.ModuleAlreadyLoaded => std.log.err("The pside module is already loaded\n\trun: sudo rmmod pside", .{}),
-            FInitModuleError.NotPrivilegedOrLoadingDisabled => std.log.err("Loading kernel modules requires root, run with sudo", .{}),
+            FInitModuleError.ModuleAlreadyLoaded => std.log.err("The pside module is already loaded\n\trun: sudo pside driver unload", .{}),
+            FInitModuleError.NotPrivilegedOrLoadingDisabled => std.log.err("Loading the kernel module requires root, run with sudo", .{}),
             else => std.log.err("Loading kernel module returned: {s}", .{@errorName(err)}),
         }
 
@@ -54,16 +51,23 @@ pub fn loadModuleFromDefaultPath(chardev_owner: ?[2]u32, allocator: std.mem.Allo
     };
     errdefer deleteModule() catch |err| std.log.err("Could not unload kernel module: {s}", .{@errorName(err)});
 
-    rt.ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write });
+    try handDeviceToOwner(chardev_ctl_path, owner, io);
+    try handDeviceToOwner(chardev_progress_path, owner, io);
+}
 
-    if (chardev_owner) |owner| {
-        const progress = try std.Io.Dir.openFileAbsolute(io, chardev_progress_path, .{ .mode = .read_write });
-        try progress.setOwner(io, owner[0], owner[1]);
-        try progress.setPermissions(io, .fromMode(0o644));
-        progress.close(io);
-    }
+fn handDeviceToOwner(path: [:0]const u8, owner: [2]u32, io: std.Io) !void {
+    const dev = try std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write });
+    defer dev.close(io);
+    try dev.setOwner(io, owner[0], owner[1]);
+    try dev.setPermissions(io, .fromMode(0o600));
+}
 
-    return rt;
+pub fn openControlDevice(io: std.Io) !@This() {
+    return .{ .ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write }) };
+}
+
+pub fn close(this: @This(), io: std.Io) void {
+    this.ctl.close(io);
 }
 
 fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
@@ -127,17 +131,14 @@ fn deleteModule() DeleteModuleError!void {
     };
 }
 
-pub fn unload(this: @This(), io: std.Io) !void {
-    this.ctl.close(io);
-    this.module.close(io);
-
-    // If child gets killed but it's fds aren't closed yet this function
-    // will return an error, in such case we just need to wait for the
-    // os to clean up the child fds/mmaps.
+pub fn driverUnload(io: std.Io) !bool {
+    // If a record process was killed but its fds aren't closed yet this
+    // returns FdOpen; in that case we just wait for the os to clean up the
+    // child fds/mmaps.
     for (0..50) |_| {
         deleteModule() catch |err| {
             switch (err) {
-                DeleteModuleError.NoEntity => return,
+                DeleteModuleError.NoEntity => return false,
                 DeleteModuleError.FdOpen => {
                     try io.sleep(.fromMilliseconds(10), .real);
                     continue;
@@ -145,7 +146,7 @@ pub fn unload(this: @This(), io: std.Io) !void {
                 else => return err,
             }
         };
-        return;
+        return true;
     }
     return DeleteModuleError.FdOpen;
 }
