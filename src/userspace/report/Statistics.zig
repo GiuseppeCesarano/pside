@@ -123,7 +123,7 @@ pub const Throughput = struct {
             };
         }
 
-        graph.impact = theilSen(&graph.points) * 100.0;
+        graph.impact = rankMetric(&graph.points);
 
         return graph;
     }
@@ -139,6 +139,7 @@ pub const Throughput = struct {
 };
 
 fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
+    @setFloatMode(.optimized);
     const num_points = Collapsed.Throughput.Vma.Experiments.speedups;
 
     const num_pairs = (num_points * (num_points - 1)) / 2;
@@ -167,6 +168,29 @@ fn theilSen(points: []const Throughput.Vma.Graph.Point) f32 {
         (slopes[mid - 1] + slopes[mid]) / 2.0
     else
         slopes[mid];
+}
+
+// Ranking metric: opportunity * trust. A positive slope is the payoff of
+// optimizing this line; it's discounted by singletons (squared, so they weigh
+// most) and by how many points sit confidently above the baseline.
+fn rankMetric(points: []const Throughput.Vma.Graph.Point) f32 {
+    @setFloatMode(.optimized);
+
+    var present: f32 = 0;
+    var singletons: f32 = 0;
+    var beneficial: f32 = 0;
+    for (points) |point| {
+        if (!point.present) continue;
+        present += 1;
+        if (point.singleton) singletons += 1;
+        if (point.ci_low > 100.0) beneficial += 1;
+    }
+
+    const opportunity = @max(theilSen(points) * 100.0, 0.0);
+    const cleanliness = 1.0 - singletons / present;
+    const confidence = 0.5 + 0.5 * beneficial / present;
+
+    return opportunity * cleanliness * cleanliness * confidence;
 }
 
 fn sortGraphsByImpactDescending(_: void, lhs: Throughput.Vma.Graph, rhs: Throughput.Vma.Graph) bool {
