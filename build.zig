@@ -10,9 +10,7 @@ pub fn build(b: *std.Build) !void {
             .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
         }},
     });
-    var kernel_target = target;
-    kernel_target.query.cpu_arch = kernel_target.query.cpu_arch orelse @import("builtin").cpu.arch;
-    kernel_target.query = switch (kernel_target.query.cpu_arch.?) {
+    const kernel_target = b.resolveTargetQuery(switch (target.result.cpu.arch) {
         .x86_64 => .{
             .cpu_arch = .x86_64,
             .os_tag = .freestanding,
@@ -21,7 +19,7 @@ pub fn build(b: *std.Build) !void {
             .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
         },
         else => @panic("Correct feature flags unimplemented for target arch..."),
-    };
+    });
 
     const communications_mod = b.addModule("communications", .{
         .root_source_file = b.path("src/common/communications.zig"),
@@ -42,7 +40,7 @@ pub fn build(b: *std.Build) !void {
         .link_libc = true,
     });
 
-    const object_options: std.Build.ObjectOptions = .{
+    const kernel_obj_options: std.Build.ObjectOptions = .{
         .name = "pside_zig",
         .use_llvm = true,
         .root_module = b.createModule(.{
@@ -71,10 +69,10 @@ pub fn build(b: *std.Build) !void {
     };
 
     const check = b.step("check", "Check for compilation errors");
-    const check_obj = b.addObject(object_options);
+    const check_obj = b.addObject(kernel_obj_options);
     check.dependOn(&check_obj.step);
 
-    const zig_kernel_obj = b.addObject(object_options);
+    const zig_kernel_obj = b.addObject(kernel_obj_options);
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "init_module", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "cleanup_module", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "description", {});
@@ -84,10 +82,9 @@ pub fn build(b: *std.Build) !void {
     zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;
 
-    const cmd_name = std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" }) catch @panic("OOM");
-    const is_debug = optimize == .Debug;
-    const debug_flag = if (is_debug) "ccflags-y := -DDEBUG" else "";
-    const strip_zig_obj = b.fmt("strip --strip-debug {s}", .{zig_kernel_obj.out_filename});
+    // kbuild expects a .<obj>.cmd file for every prebuilt object it links.
+    const kbuild_cmd_name = try std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" });
+    const kbuild_debug_flags = if (kernel_optimize == .Debug) "ccflags-y := -DDEBUG" else "";
     const strip_kernel_mod = "strip --strip-debug" ++
         " --remove-section=.BTF" ++
         " --remove-section=.BTF.ext" ++
@@ -101,39 +98,35 @@ pub fn build(b: *std.Build) !void {
     const kernel_module_files = b.addWriteFiles();
     _ = kernel_module_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
     _ = kernel_module_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
-    _ = kernel_module_files.add(cmd_name, "");
+    _ = kernel_module_files.add(kbuild_cmd_name, "");
     _ = kernel_module_files.add("Makefile", b.fmt(
-        \\{s}
-        \\obj-m += pside.o
-        \\pside-objs := kernel.o {s}
-        \\
-        \\PWD := $(CURDIR)
-        \\
-        \\all:
-    ++ "\n\t{s}\n\t" ++
-        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-    ++ "\n\t{s}" ++
-        \\ 
-        \\clean:
-    ++ "\n\t" ++
-        \\$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean 
-    , .{ debug_flag, zig_kernel_obj.out_filename, strip_zig_obj, strip_kernel_mod }));
+        "{s}\n" ++
+            "obj-m += pside.o\n" ++
+            "pside-objs := kernel.o {s}\n" ++
+            "\n" ++
+            "PWD := $(CURDIR)\n" ++
+            "\n" ++
+            "# Zig can't emit rethunk/endbr yet, neutering objtool silences the mitigation warnings.\n" ++
+            "all:\n" ++
+            "\tstrip --strip-debug {s}\n" ++
+            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules objtool=true\n" ++
+            "\t{s}\n" ++
+            "\n" ++
+            "clean:\n" ++
+            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n",
+        .{ kbuild_debug_flags, zig_kernel_obj.out_filename, zig_kernel_obj.out_filename, strip_kernel_mod },
+    ));
     kernel_module_files.step.dependOn(&zig_kernel_obj.step);
 
-    const compile = b.addSystemCommand(&.{"make"});
-    compile.setCwd(kernel_module_files.getDirectory());
-    compile.step.dependOn(&kernel_module_files.step);
+    const run_kbuild = b.addSystemCommand(&.{"make"});
+    run_kbuild.setCwd(kernel_module_files.getDirectory());
+    run_kbuild.step.dependOn(&kernel_module_files.step);
 
-    const source = kernel_module_files.getDirectory().join(b.allocator, "pside.ko") catch @panic("OOM");
-    const dest = brk: {
-        var uts: std.os.linux.utsname = undefined;
-        _ = std.os.linux.uname(&uts);
-        const release = uts.release;
-        const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
-        break :brk std.mem.concat(b.allocator, u8, &.{ "lib/modules/", release[0..release_end], "/extra/pside.ko" }) catch @panic("OOM");
-    };
-    const install_ko = b.addInstallFile(source, dest);
-    install_ko.step.dependOn(&compile.step);
+    const built_ko = try kernel_module_files.getDirectory().join(b.allocator, "pside.ko");
+    const uts = std.posix.uname();
+    const ko_install_path = try std.mem.concat(b.allocator, u8, &.{ "lib/modules/", std.mem.sliceTo(&uts.release, 0), "/extra/pside.ko" });
+    const install_ko = b.addInstallFile(built_ko, ko_install_path);
+    install_ko.step.dependOn(&run_kbuild.step);
     b.getInstallStep().dependOn(&install_ko.step);
 
     const cli_mod = b.addModule("cli", .{
@@ -195,91 +188,41 @@ pub fn build(b: *std.Build) !void {
 
     const uplot = b.dependency("uplot", .{});
     const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
-
-    b.getInstallStep().dependOn(
-        &b.addInstallFileWithDir(
-            b.path("src/userspace/report/web/index.html"),
-            web_dir,
-            "index.html",
-        ).step,
-    );
-    b.getInstallStep().dependOn(
-        &b.addInstallFileWithDir(
-            uplot.path("dist/uPlot.iife.min.js"),
-            web_dir,
-            "uplot.min.js",
-        ).step,
-    );
-    b.getInstallStep().dependOn(
-        &b.addInstallFileWithDir(
-            uplot.path("dist/uPlot.min.css"),
-            web_dir,
-            "uplot.min.css",
-        ).step,
-    );
-
-    const cli_tests = b.addTest(.{ .root_module = cli_mod });
-    const run_cli_tests = b.addRunArtifact(cli_tests);
-
-    const bindings_tests = b.addTest(.{ .root_module = bindings_mod });
-    const run_bindings_tests = b.addRunArtifact(bindings_tests);
-
-    const refgate_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_refgate", .{
-        .root_source_file = b.path("src/kernelspace/causal/Engine/thread_safe/RefGate.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = true,
-    }) });
-    const run_refgate_tests = b.addRunArtifact(refgate_tests);
-
-    const threadclocks_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_threadclocks", .{
-        .root_source_file = b.path("src/kernelspace/causal/Engine/thread_safe/ThreadClocks.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = true,
-    }) });
-    const run_threadclocks_tests = b.addRunArtifact(threadclocks_tests);
-
-    const pool_tests = b.addTest(.{ .root_module = b.addModule("thread_safe_pool", .{
-        .root_source_file = b.path("src/kernelspace/causal/Engine/thread_safe/Pool.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = true,
-    }) });
-    const run_pool_tests = b.addRunArtifact(pool_tests);
-
-    const virtual_time_keeper_tests = b.addTest(.{ .root_module = b.addModule("virtual_time_keeper", .{
-        .root_source_file = b.path("src/kernelspace/causal/Engine/VirtualTimeKeeper.zig"),
-        .target = target,
-        .optimize = optimize,
-        .sanitize_thread = true,
-    }) });
-    const run_virtual_time_keeper_tests = b.addRunArtifact(virtual_time_keeper_tests);
-
-    const traced_x86_64_tests = b.addTest(.{ .root_module = b.addModule("traced_x86_64", .{
-        .root_source_file = b.path("src/userspace/record/traced/x86_64.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
-    const run_traced_x86_64_tests = b.addRunArtifact(traced_x86_64_tests);
-
-    const pside_include_tests = b.addTest(.{
-        .root_module = b.addModule("pside_include", .{
-            .root_source_file = b.path("include/pside.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-        .use_llvm = true,
-    });
-    const run_pside_include_tests = b.addRunArtifact(pside_include_tests);
+    const web_files = [_]struct { source: std.Build.LazyPath, dest: []const u8 }{
+        .{ .source = b.path("src/userspace/report/web/index.html"), .dest = "index.html" },
+        .{ .source = uplot.path("dist/uPlot.iife.min.js"), .dest = "uplot.min.js" },
+        .{ .source = uplot.path("dist/uPlot.min.css"), .dest = "uplot.min.css" },
+    };
+    for (web_files) |file|
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(file.source, web_dir, file.dest).step);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_cli_tests.step);
-    test_step.dependOn(&run_bindings_tests.step);
-    test_step.dependOn(&run_refgate_tests.step);
-    test_step.dependOn(&run_threadclocks_tests.step);
-    test_step.dependOn(&run_pool_tests.step);
-    test_step.dependOn(&run_virtual_time_keeper_tests.step);
-    test_step.dependOn(&run_traced_x86_64_tests.step);
-    test_step.dependOn(&run_pside_include_tests.step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bindings_mod })).step);
+
+    const standalone_tests = [_]struct {
+        name: []const u8,
+        path: []const u8,
+        sanitize_thread: bool = false,
+        use_llvm: ?bool = null,
+    }{
+        .{ .name = "thread_safe_refgate", .path = "src/kernelspace/causal/Engine/thread_safe/RefGate.zig", .sanitize_thread = true },
+        .{ .name = "thread_safe_threadclocks", .path = "src/kernelspace/causal/Engine/thread_safe/ThreadClocks.zig", .sanitize_thread = true },
+        .{ .name = "thread_safe_pool", .path = "src/kernelspace/causal/Engine/thread_safe/Pool.zig", .sanitize_thread = true },
+        .{ .name = "virtual_time_keeper", .path = "src/kernelspace/causal/Engine/VirtualTimeKeeper.zig", .sanitize_thread = true },
+        .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
+        .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
+    };
+    for (standalone_tests) |spec| {
+        const tests = b.addTest(.{
+            .root_module = b.addModule(spec.name, .{
+                .root_source_file = b.path(spec.path),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = spec.sanitize_thread,
+            }),
+            .use_llvm = spec.use_llvm,
+        });
+        test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 }
