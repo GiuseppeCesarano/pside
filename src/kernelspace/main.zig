@@ -45,6 +45,9 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
     const copied = kernel.mem.copyBytesFromUser(std.mem.asBytes(&data), std.mem.asBytes(in));
     if (copied.len != @sizeOf(communications.Data)) return code(.FAULT);
 
+    filp.lock();
+    defer filp.unlock();
+
     switch (@as(communications.Commands, @enumFromInt(command))) {
         .start_profiler => {
             if (filp.getEngine() != null) return code(.BUSY);

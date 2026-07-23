@@ -144,7 +144,6 @@ pub const heap = struct {
         };
     }
 
-    // This allocator doesn't support alignments requirements > 255 bytes.
     extern fn c_kmalloc(c_ulong) ?*anyopaque;
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
@@ -642,6 +641,16 @@ pub const File = opaque {
     extern fn c_session_set_engine(*File, ?*anyopaque) void;
     pub fn setEngine(this: *File, engine: ?*anyopaque) void {
         c_session_set_engine(this, engine);
+    }
+
+    extern fn c_session_lock(*File) void;
+    pub fn lock(this: *File) void {
+        c_session_lock(this);
+    }
+
+    extern fn c_session_unlock(*File) void;
+    pub fn unlock(this: *File) void {
+        c_session_unlock(this);
     }
 };
 

@@ -9,6 +9,7 @@
 #include <linux/kthread.h>
 #include <linux/ktime.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/namei.h>
 #include <linux/perf_event.h>
 #include <linux/pid.h>
@@ -38,7 +39,8 @@ struct chardev {
 struct session {
   struct chardev *dev;
   void *progress_page;
-  void *engine; 
+  void *engine;
+  struct mutex lock;
 };
 
 /* The Zig side mirrors these as fixed-size opaque byte arrays. */
@@ -106,6 +108,8 @@ void c_chardev_unregister(struct chardev *);
 void *c_session_progress_page(struct file *);
 void *c_session_get_engine(struct file *);
 void c_session_set_engine(struct file *, void *);
+void c_session_lock(struct file *);
+void c_session_unlock(struct file *);
 
 /* Defined in Zig (main.zig): tears down an engine owned by a session. */
 extern void pside_engine_release(void *);
@@ -300,6 +304,7 @@ static int internal_open(struct inode *inode, struct file *filp) {
     return -ENOMEM;
   }
 
+  mutex_init(&s->lock);
   s->dev = d;
   filp->private_data = s;
   return 0;
@@ -397,6 +402,16 @@ void *c_session_get_engine(struct file *filp) {
 void c_session_set_engine(struct file *filp, void *engine) {
   struct session *s = filp->private_data;
   s->engine = engine;
+}
+
+void c_session_lock(struct file *filp) {
+  struct session *s = filp->private_data;
+  mutex_lock(&s->lock);
+}
+
+void c_session_unlock(struct file *filp) {
+  struct session *s = filp->private_data;
+  mutex_unlock(&s->lock);
 }
 
 /* Perf */
