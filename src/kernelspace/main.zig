@@ -16,30 +16,30 @@ pub const std_options: std.Options = .{
 };
 
 var ctl: kernel.CharDevice = undefined;
-var progress: kernel.CharDevice = undefined;
-var engine: ?Engine = null;
 
 export fn init_module() linksection(".init.text") c_int {
-    progress.create(name ++ "_progress", null) catch return 1;
-    const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.sharedBuffer()));
-    progress_points_ptr.* = .init(0);
-    std.log.debug("chardev created at: /dev/" ++ name, .{});
+    kernel.Task.resolveAddWork() catch return 1;
+    kernel.tracepoint.init();
 
-    ctl.create(name, ioctlHandler) catch {
-        progress.remove();
-        return 1;
-    };
+    ctl.create(name, ioctlHandler) catch return 1;
+    std.log.debug("chardev created at: /dev/" ++ name, .{});
 
     return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
-    if (engine) |*e| e.deinit();
-    progress.remove();
     ctl.remove();
 }
 
-fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_long {
+export fn pside_engine_release(ptr: *anyopaque) void {
+    const engine: *Engine = @ptrCast(@alignCast(ptr));
+    engine.deinit();
+    kernel.heap.allocator.destroy(engine);
+}
+
+fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_long {
+    const filp: *kernel.File = @ptrCast(filp_ptr);
+
     const in: *const communications.Data = @ptrFromInt(arg);
     var data: communications.Data = undefined;
     const copied = kernel.mem.copyBytesFromUser(std.mem.asBytes(&data), std.mem.asBytes(in));
@@ -47,25 +47,32 @@ fn ioctlHandler(_: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c) c_lon
 
     switch (@as(communications.Commands, @enumFromInt(command))) {
         .start_profiler => {
-            if (engine != null) return code(.BUSY);
+            if (filp.getEngine() != null) return code(.BUSY);
 
-            const progress_points_ptr: *std.atomic.Value(usize) = @ptrCast(@alignCast(progress.sharedBuffer()));
-            engine = Engine.init(progress_points_ptr) catch return code(.NOMEM);
+            const engine = kernel.heap.allocator.create(Engine) catch return code(.NOMEM);
+            engine.* = Engine.init(filp.progressPage()) catch {
+                kernel.heap.allocator.destroy(engine);
+                return code(.NOMEM);
+            };
+            filp.setEngine(engine);
 
             const len = data.start.vma_name_len;
             data.start.vma_name[len] = 0;
             const raw = data.start.vma_name[0..len :0];
 
-            engine.?.profilePid(data.start.pid, data.start.output_fd, raw, data.start.attribute_kernel_samples) catch {
-                engine.?.deinit();
-                engine = null;
+            engine.profilePid(data.start.pid, data.start.output_fd, raw, data.start.attribute_kernel_samples) catch {
+                engine.deinit();
+                kernel.heap.allocator.destroy(engine);
+                filp.setEngine(null);
                 return code(.IO);
             };
         },
 
-        .stop_profiler => if (engine) |*e| {
-            e.deinit();
-            engine = null;
+        .stop_profiler => if (filp.getEngine()) |ptr| {
+            const engine: *Engine = @ptrCast(@alignCast(ptr));
+            engine.deinit();
+            kernel.heap.allocator.destroy(engine);
+            filp.setEngine(null);
         },
 
         else => return code(.INVAL),

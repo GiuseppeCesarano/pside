@@ -1,7 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const chardev_progress_path = @import("KernelInterface.zig").chardev_progress_path;
 const Program = @import("Program.zig");
 
 const TracedProcess = @This();
@@ -180,16 +179,14 @@ pub fn wait(this: TracedProcess) !void {
     return error.ChildKilledBySignal;
 }
 
-pub fn patchProgressPoint(this: TracedProcess, addr: usize) !void {
+pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
     const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
-    // We use the code_page to temporally store the path on the child memory
-    const path = chardev_progress_path.ptr[0 .. chardev_progress_path.len + 1]; // Include the null terminator
-    try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), path);
-
-    const chardev_fd = try this.open(code_page.ptr, .{ .ACCMODE = .RDWR }, 0);
-    const chardev_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .READ = true, .WRITE = true }), .{ .TYPE = .SHARED }, chardev_fd, 0);
+    // The child inherited the ctl fd (the same file description as the parent's
+    // session), so mmapping it at offset 0 maps this recording's own per-session
+    // progress page — no need to open /dev/pside_progress by path anymore.
+    const chardev_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .READ = true, .WRITE = true }), .{ .TYPE = .SHARED }, ctl_fd, 0);
 
     const trampoline = arch_specific.trampoline.get(@intFromPtr(code_page.ptr));
     try ptrace.poke(.text, this.pid, final_addr, &trampoline);

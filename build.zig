@@ -79,6 +79,7 @@ pub fn build(b: *std.Build) !void {
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "cleanup_module", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "description", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "license", {});
+    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "pside_engine_release", {});
     zig_kernel_obj.bundle_compiler_rt = true;
     zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;

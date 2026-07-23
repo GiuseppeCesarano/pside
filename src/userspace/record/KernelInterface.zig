@@ -5,7 +5,6 @@ const communications = @import("communications");
 
 pub const name = "pside";
 pub const chardev_ctl_path: [:0]const u8 = "/dev/" ++ name;
-pub const chardev_progress_path: [:0]const u8 = chardev_ctl_path ++ "_progress";
 
 pub const FInitModuleError = error{
     SignatureMisformatted,
@@ -52,7 +51,6 @@ pub fn driverLoad(owner: [2]u32, allocator: std.mem.Allocator, io: std.Io) !void
     errdefer deleteModule() catch |err| std.log.err("Could not unload kernel module: {s}", .{@errorName(err)});
 
     try handDeviceToOwner(chardev_ctl_path, owner, io);
-    try handDeviceToOwner(chardev_progress_path, owner, io);
 }
 
 fn handDeviceToOwner(path: [:0]const u8, owner: [2]u32, io: std.Io) !void {
@@ -63,7 +61,16 @@ fn handDeviceToOwner(path: [:0]const u8, owner: [2]u32, io: std.Io) !void {
 }
 
 pub fn openControlDevice(io: std.Io) !@This() {
-    return .{ .ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write }) };
+    const ctl = try std.Io.Dir.openFileAbsolute(io, chardev_ctl_path, .{ .mode = .read_write });
+
+    // The traced child inherits this fd across fork+exec and mmaps it to reach
+    // its per-session progress page, so it must survive exec (clear CLOEXEC).
+    if (linux.errno(linux.fcntl(ctl.handle, linux.F.SETFD, 0)) != .SUCCESS) {
+        ctl.close(io);
+        return error.CouldNotClearCloexec;
+    }
+
+    return .{ .ctl = ctl };
 }
 
 pub fn close(this: @This(), io: std.Io) void {

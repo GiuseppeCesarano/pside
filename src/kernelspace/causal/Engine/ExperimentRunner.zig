@@ -27,7 +27,6 @@ target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
 pub fn init() !ExperimentRunner {
-    kernel.tracepoint.init();
     return .{
         .profiled_pid = .init(0),
         .sampler = null,

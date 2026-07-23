@@ -388,10 +388,6 @@ pub const CharDevice = extern struct {
         c_chardev_unregister(this);
     }
 
-    extern fn c_get_shared_buffer(*CharDevice) *[std.heap.page_size_min]u8;
-    pub fn sharedBuffer(this: *CharDevice) *[std.heap.page_size_min]u8 {
-        return c_get_shared_buffer(this);
-    }
 };
 
 pub const PerfEvent = opaque {
@@ -631,6 +627,21 @@ pub const File = opaque {
     extern fn c_file_size(*File) isize;
     pub fn size(this: *File) isize {
         return c_file_size(this);
+    }
+
+    extern fn c_session_progress_page(*File) *anyopaque;
+    pub fn progressPage(this: *File) *std.atomic.Value(usize) {
+        return @ptrCast(@alignCast(c_session_progress_page(this)));
+    }
+
+    extern fn c_session_get_engine(*File) ?*anyopaque;
+    pub fn getEngine(this: *File) ?*anyopaque {
+        return c_session_get_engine(this);
+    }
+
+    extern fn c_session_set_engine(*File, ?*anyopaque) void;
+    pub fn setEngine(this: *File, engine: ?*anyopaque) void {
+        c_session_set_engine(this, engine);
     }
 };
 

@@ -102,7 +102,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
             parsed_options.flags.k,
         ));
 
-        for (patch_addresses) |address| try traced_process.patchProgressPoint(address);
+        for (patch_addresses) |address| try traced_process.patchProgressPoint(address, module.ctl.handle);
 
         try traced_process.start();
 

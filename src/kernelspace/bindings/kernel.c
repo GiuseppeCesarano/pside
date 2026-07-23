@@ -33,7 +33,12 @@ struct chardev {
   struct class *class;
   struct device *device;
   struct file_operations fops;
-  void *shared_buffer;
+};
+
+struct session {
+  struct chardev *dev;
+  void *progress_page;
+  void *engine; 
 };
 
 /* The Zig side mirrors these as fixed-size opaque byte arrays. */
@@ -98,7 +103,12 @@ int c_snapshot_executable_vmas(struct task_struct *, const char *,
 /* Chardev */
 int c_chardev_register(struct chardev *, const char *, ioctl_fn);
 void c_chardev_unregister(struct chardev *);
-void *c_get_shared_buffer(struct chardev *);
+void *c_session_progress_page(struct file *);
+void *c_session_get_engine(struct file *);
+void c_session_set_engine(struct file *, void *);
+
+/* Defined in Zig (main.zig): tears down an engine owned by a session. */
+extern void pside_engine_release(void *);
 
 /* Perf */
 struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
@@ -278,19 +288,47 @@ int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
 
 /* Chardev */
 static int internal_open(struct inode *inode, struct file *filp) {
-  filp->private_data = container_of(inode->i_cdev, struct chardev, cdev);
+  struct chardev *d = container_of(inode->i_cdev, struct chardev, cdev);
+
+  struct session *s = kzalloc(sizeof(*s), GFP_KERNEL);
+  if (!s)
+    return -ENOMEM;
+
+  s->progress_page = (void *)get_zeroed_page(GFP_KERNEL);
+  if (!s->progress_page) {
+    kfree(s);
+    return -ENOMEM;
+  }
+
+  s->dev = d;
+  filp->private_data = s;
+  return 0;
+}
+
+static int internal_release(struct inode *inode, struct file *filp) {
+  struct session *s = filp->private_data;
+  if (!s)
+    return 0;
+
+  if (s->engine)
+    pside_engine_release(s->engine);
+
+  if (s->progress_page)
+    free_page((unsigned long)s->progress_page);
+
+  kfree(s);
   return 0;
 }
 
 static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
-  struct chardev *d = filp->private_data;
+  struct session *s = filp->private_data;
 
   unsigned long size = vma->vm_end - vma->vm_start;
 
   if (vma->vm_pgoff != 0 || size > PAGE_SIZE)
     return -EINVAL;
 
-  unsigned long pfn = virt_to_phys(d->shared_buffer) >> PAGE_SHIFT;
+  unsigned long pfn = virt_to_phys(s->progress_page) >> PAGE_SHIFT;
 
   if (remap_pfn_range(vma, vma->vm_start, pfn, size, vma->vm_page_prot)) {
     return -EAGAIN;
@@ -301,16 +339,13 @@ static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
 int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
   int rc;
 
-  d->shared_buffer = (void *)get_zeroed_page(GFP_KERNEL);
-  if (!d->shared_buffer)
-    return -ENOMEM;
-
   rc = alloc_chrdev_region(&d->dev, 0, 1, name);
   if (rc < 0)
-    goto free_page;
+    return rc;
 
   d->fops.owner = THIS_MODULE;
   d->fops.open = internal_open;
+  d->fops.release = internal_release;
   d->fops.mmap = internal_mmap;
   d->fops.unlocked_ioctl = callback;
   cdev_init(&d->cdev, &d->fops);
@@ -339,8 +374,6 @@ del_cdev:
   cdev_del(&d->cdev);
 unregister_region:
   unregister_chrdev_region(d->dev, 1);
-free_page:
-  free_page((unsigned long)d->shared_buffer);
   return rc;
 }
 
@@ -349,14 +382,22 @@ void c_chardev_unregister(struct chardev *d) {
   class_destroy(d->class);
   cdev_del(&d->cdev);
   unregister_chrdev_region(d->dev, 1);
-
-  if (d->shared_buffer) {
-    free_page((unsigned long)d->shared_buffer);
-    d->shared_buffer = NULL;
-  }
 }
 
-void *c_get_shared_buffer(struct chardev *d) { return d->shared_buffer; }
+void *c_session_progress_page(struct file *filp) {
+  struct session *s = filp->private_data;
+  return s->progress_page;
+}
+
+void *c_session_get_engine(struct file *filp) {
+  struct session *s = filp->private_data;
+  return s->engine;
+}
+
+void c_session_set_engine(struct file *filp, void *engine) {
+  struct session *s = filp->private_data;
+  s->engine = engine;
+}
 
 /* Perf */
 struct perf_event *

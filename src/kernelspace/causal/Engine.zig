@@ -29,8 +29,6 @@ profiler_thread: ?*kernel.Thread,
 deinit_guard: std.atomic.Value(bool),
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
-    try kernel.Task.resolveAddWork();
-
     return .{
         .progress = progress_ptr,
         .experiment_duration = 0,
