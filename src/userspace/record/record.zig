@@ -28,8 +28,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.gpa;
 
-    try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
-    try validateOptions(parsed_options.parse_errors, "Could not parse: ");
+    try cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
+    try cli.validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
     setIntHandler();
 
@@ -80,7 +80,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     };
     defer allocator.free(patch_addresses);
 
-    const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), owner);
+    const output_file: OutputFile = try .open(allocator, io, std.mem.span(user_program.path), vma_name, owner);
     defer output_file.close(io);
 
     var i: usize = 0;
@@ -119,18 +119,6 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     if (!stopped.load(.monotonic)) {
         const program_name = std.fs.path.basename(std.mem.span(user_program.path));
         std.log.info("Done. View the report with: pside report {s}.pside", .{program_name});
-    }
-}
-
-fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
-    if (optional_errors) |errors| {
-        @branchHint(.cold);
-        var it = errors;
-        while (it.next()) |flag| {
-            std.log.err("{s}{s}", .{ msg, flag });
-        }
-
-        return error.InvalidOption;
     }
 }
 

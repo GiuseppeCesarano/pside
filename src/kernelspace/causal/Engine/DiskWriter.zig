@@ -17,6 +17,9 @@ buffer_end: std.atomic.Value(usize),
 
 completion: kernel.Completion,
 
+records_frame: serialization.RecordsFrame,
+healthy: bool,
+
 pub const empty: DiskWriter = .{
     .buffer = &.{},
     .buffer_begin = .init(0),
@@ -25,6 +28,8 @@ pub const empty: DiskWriter = .{
     .thread = null,
     .file = null,
     .completion = undefined,
+    .records_frame = undefined,
+    .healthy = true,
 };
 
 pub fn deinit(this: *DiskWriter) void {
@@ -35,7 +40,13 @@ pub fn deinit(this: *DiskWriter) void {
     allocator.free(this.buffer);
 }
 
-pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
+pub fn start(
+    this: *DiskWriter,
+    fd: std.os.linux.fd_t,
+    kind: serialization.MeasurementKind,
+    record_size: u16,
+    vma_id: u32,
+) !void {
     if (this.file != null) return;
 
     const file = kernel.File.get(fd) orelse return error.InvalidFd;
@@ -47,6 +58,8 @@ pub fn start(this: *DiskWriter, fd: std.os.linux.fd_t) !void {
     this.completion.init(); // init before thread spawns
     this.file = file;
     this.file_offset = file.size();
+    this.records_frame = .{ .kind = kind, .record_size = record_size, .vma_id = vma_id };
+    this.healthy = true;
     errdefer this.file = null;
 
     this.thread = try kernel.Thread.run(writerFn, this, "pside_disk_writer");
@@ -104,46 +117,49 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-fn writeAll(file: *kernel.File, bytes: []const u8, offset: *i64) !usize {
+fn writeFull(file: *kernel.File, bytes: []const u8, offset: *i64) !void {
     var written: usize = 0;
     while (written < bytes.len) {
         const n = try file.write(bytes[written..], offset);
-        if (n == 0) break;
+        if (n == 0) return error.WriteFailed;
         written += n;
     }
-    return written;
 }
 
 pub fn flush(this: *DiskWriter) void {
+    if (!this.healthy) return;
+
     const begin = this.buffer_begin.load(.monotonic);
     const end = this.buffer_end.load(.acquire);
     if (begin == end) return;
 
     const len = this.buffer.len;
+    const available = if (end > begin) end - begin else len - begin + end;
+
+    const frame_header: serialization.FrameHeader = .{
+        .tag = .records,
+        .length = @intCast(@sizeOf(serialization.RecordsFrame) + available),
+    };
+
+    this.writeRecordsFrame(frame_header, begin, end, len) catch |err| {
+        std.log.err("disk write failed: {s}", .{@errorName(err)});
+        this.healthy = false;
+        return;
+    };
+
+    this.buffer_begin.store(end, .monotonic);
+}
+
+fn writeRecordsFrame(this: *DiskWriter, frame_header: serialization.FrameHeader, begin: usize, end: usize, len: usize) !void {
     const file = this.file.?;
 
-    if (end > begin) {
-        const written = writeAll(file, this.buffer[begin..end], &this.file_offset) catch |err| {
-            std.log.err("disk write failed: {s}", .{@errorName(err)});
-            return;
-        };
-        this.buffer_begin.store(begin + written, .monotonic);
-    } else {
-        const tail = this.buffer[begin..len];
-        const tail_written = writeAll(file, tail, &this.file_offset) catch |err| {
-            std.log.err("disk write failed: {s}", .{@errorName(err)});
-            return;
-        };
-        if (tail_written < tail.len) {
-            this.buffer_begin.store(begin + tail_written, .monotonic);
-            return;
-        }
+    try writeFull(file, std.mem.asBytes(&frame_header), &this.file_offset);
+    try writeFull(file, std.mem.asBytes(&this.records_frame), &this.file_offset);
 
-        const head_written = writeAll(file, this.buffer[0..end], &this.file_offset) catch |err| {
-            std.log.err("disk write failed: {s}", .{@errorName(err)});
-            this.buffer_begin.store(0, .monotonic);
-            return;
-        };
-        this.buffer_begin.store(head_written, .monotonic);
+    if (end > begin) {
+        try writeFull(file, this.buffer[begin..end], &this.file_offset);
+    } else {
+        try writeFull(file, this.buffer[begin..len], &this.file_offset);
+        try writeFull(file, this.buffer[0..end], &this.file_offset);
     }
 }

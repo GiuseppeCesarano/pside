@@ -45,8 +45,6 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
 pub fn deinit(this: *Engine) void {
     if (this.deinit_guard.swap(true, .seq_cst)) return;
 
-    // Stopping the loop runs recorder.finish() from inside the thread, so the
-    // terminating record lands before the recorder is torn down below.
     if (this.profiler_thread) |t| _ = t.stop();
 
     this.runner.deinit();
@@ -59,7 +57,7 @@ pub fn profilePid(this: *Engine, pid: Pid, fd: std.os.linux.fd_t, vma_name: [:0]
 
     try this.runner.profilePid(pid, vma_name, attribute_kernel_samples);
 
-    try this.recorder.start(fd, vma_name);
+    try this.recorder.start(fd);
 
     this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
 }
@@ -84,9 +82,6 @@ fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
 
         this.runner.endExperiment();
     }
-
-    this.recorder.finish() catch
-        std.log.err("Could not emit last empty record, file corrupted", .{});
 
     return 0;
 }

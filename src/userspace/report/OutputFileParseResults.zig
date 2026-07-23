@@ -19,7 +19,7 @@ hash: [32]u8,
 path: []const u8,
 
 pub fn parse(arena_allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8) !OutputFileParseResults {
-    var res: OutputFileParseResults = undefined;
+    var res: OutputFileParseResults = .{ .vmas = .empty, .hash = undefined, .path = "" };
 
     const MiB = 1024 * 1024;
     const buffer = try arena_allocator.alignedAlloc(u8, .fromByteUnits(std.heap.pageSize()), 2 * MiB);
@@ -29,47 +29,77 @@ pub fn parse(arena_allocator: std.mem.Allocator, io: std.Io, path: [:0]const u8)
     defer file.close(io);
 
     var reader = file.reader(io, buffer);
+    const r = &reader.interface;
 
-    try checkHeader(&reader.interface);
+    const header = try r.takeStructPointer(serialization.Header);
+    if (!header.isValid()) return error.NotAPsideFile;
+    res.hash = header.binary_hash;
 
-    res.hash = (try reader.interface.takeArray(@sizeOf(serialization.Hash))).*;
-    res.path = try arena_allocator.dupe(u8, (try reader.interface.takeSentinel(0))[0..]);
+    var vma_names: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
 
-    res.vmas = try parseExperiments(arena_allocator, &reader.interface);
+    while (r.takeStructPointer(serialization.FrameHeader)) |frame| {
+        const tag = frame.tag;
+        const length = frame.length;
+
+        const payload = r.take(length) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+
+        switch (tag) {
+            .binary_path => res.path = try arena_allocator.dupe(u8, payload),
+            .vma => {
+                var pr: std.Io.Reader = .fixed(payload);
+                const vma_frame = try pr.takeStructPointer(serialization.VmaFrame);
+                const name = try arena_allocator.dupe(u8, payload[@sizeOf(serialization.VmaFrame)..]);
+                try vma_names.put(arena_allocator, vma_frame.vma_id, name);
+            },
+            .records => {
+                var pr: std.Io.Reader = .fixed(payload);
+                const records_frame = try pr.takeStructPointer(serialization.RecordsFrame);
+                try parseRecords(arena_allocator, &pr, records_frame, length, &res.vmas, vma_names);
+            },
+            else => {},
+        }
+
+        const pad = serialization.pad8(length) - length;
+        if (pad != 0) r.discardAll(pad) catch break;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => return err,
+    }
 
     return res;
 }
 
-fn checkHeader(reader: *std.Io.Reader) !void {
-    const header = try reader.takeStructPointer(serialization.Header);
-    if (!std.mem.eql(u8, &header.magic, &serialization.Header.default.magic)) return error.WrongMagic;
-    if (header.version.major != serialization.Header.default.version.major) return error.VersionMajorNotMatching;
-}
-
-fn parseExperiments(
+fn parseRecords(
     arena_allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
-) !Vmas {
-    var res: Vmas = .empty;
+    frame: *align(1) const serialization.RecordsFrame,
+    length: u32,
+    vmas: *Vmas,
+    vma_names: std.AutoHashMapUnmanaged(u32, []const u8),
+) !void {
+    if (frame.record_size == 0) return error.MalformedRecordsFrame;
 
-    return while (reader.takeStructPointer(serialization.SectionHeader)) |section| {
-        const vma = (try reader.takeSentinel(0))[0..];
+    const count = (length - @sizeOf(serialization.RecordsFrame)) / frame.record_size;
 
-        switch (section.kind) {
-            .throughput => {
-                const pair = try res.throughput.getOrPut(arena_allocator, vma);
-                if (!pair.found_existing) {
-                    pair.key_ptr.* = try arena_allocator.dupe(u8, vma);
-                    pair.value_ptr.* = .empty;
-                }
-                var record = try reader.takeStructPointer(serialization.record.Throughput);
-                while (!record.isEmpty()) : (record = try reader.takeStructPointer(serialization.record.Throughput))
-                    try pair.value_ptr.append(arena_allocator, record.*);
-            },
+    switch (frame.kind) {
+        .throughput => {
+            if (frame.record_size < @sizeOf(serialization.record.Throughput)) return error.MalformedRecordsFrame;
 
-            .latency => {
-                return error.UnsupportedSectionKind; // TODO
-            },
-        }
-    } else |err| if (err == std.Io.Reader.Error.EndOfStream) res else err;
+            const name = vma_names.get(frame.vma_id) orelse return error.UnknownVmaId;
+            const pair = try vmas.throughput.getOrPut(arena_allocator, name);
+            if (!pair.found_existing) pair.value_ptr.* = .empty;
+
+            const extra = frame.record_size - @sizeOf(serialization.record.Throughput);
+            for (0..count) |_| {
+                const sample = try reader.takeStructPointer(serialization.record.Throughput);
+                try pair.value_ptr.append(arena_allocator, sample.*);
+                if (extra != 0) try reader.discardAll(extra);
+            }
+        },
+        .latency => return error.UnsupportedSectionKind,
+        else => {},
+    }
 }
