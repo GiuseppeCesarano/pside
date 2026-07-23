@@ -206,8 +206,14 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) vo
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
     child.incrementReferences();
-    const delays = this.time_keeper.onFork(atomic_allocator, keyFromTask(parent), keyFromTask(child)) catch
-        return this.abort("Error while forking");
+    const delays = delays: {
+        //TODO: hoister the sweep and retry there instead of the deeper level
+        kernel.preempt.disable();
+        defer kernel.preempt.enable();
+
+        break :delays this.time_keeper.onFork(atomic_allocator, keyFromTask(parent), keyFromTask(child)) catch
+            return this.abort("Error while forking");
+    };
     this.applyDelays(&delays);
 }
 
