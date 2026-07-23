@@ -10,5 +10,5 @@ pub inline fn throughputPoint(comptime name: []const u8) void {
         \\   .quad 1b
     ++ "\n" ++ " .asciz \"" ++ name ++ "\"\n" ++
         \\   .popsection
-    ::: .{ .rax = true });
+    ::: .{ .rax = true, .cc = true });
 }

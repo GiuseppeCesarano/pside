@@ -10,4 +10,4 @@
       ".quad 1b\n\t"                                                           \
       ".asciz \"" name "\"\n\t"                                                \
       ".popsection\n\t" ::                                                     \
-          : "rax")
+          : "rax", "cc")
