@@ -22,7 +22,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.
 
     return .{
         .server = net_server,
-        .should_shut_down = undefined,
+        .should_shut_down = .init(false),
         .share_path = share_path,
         .throughput = throughput,
         .connections = .init,
@@ -55,7 +55,6 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
 }
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
-    this.should_shut_down.store(false, .monotonic);
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);
 

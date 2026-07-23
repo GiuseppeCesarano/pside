@@ -130,9 +130,14 @@ fn OptionsImpl(ItType: type) type {
             var positional_mask: Mask = .empty;
             var unknown_flags_mask: Mask = .empty;
             var parse_errors_mask: Mask = .empty;
-            var i: Mask.ShiftInt = 0;
+            var i: usize = 0;
 
-            while (args.next()) |arg| : (i +|= 1) {
+            while (args.next()) |arg| : (i += 1) {
+                if (i + 1 >= Mask.bit_length) {
+                    parse_errors_mask = .full;
+                    break;
+                }
+
                 const is_positional = !std.mem.startsWith(u8, arg, "-");
                 positional_mask.setValue(i, is_positional);
                 if (is_positional) continue;
@@ -146,7 +151,7 @@ fn OptionsImpl(ItType: type) type {
                     else if (flag_info.type_tag == .bool)
                         "true"
                     else if (args.next()) |target| blk: {
-                        i +|= 1;
+                        i += 1;
                         break :blk target;
                     } else break;
 
@@ -157,8 +162,6 @@ fn OptionsImpl(ItType: type) type {
                     unknown_flags_mask.set(i);
                 }
             }
-
-            if (i > std.math.maxInt(Mask.ShiftInt)) parse_errors_mask = .initFull();
 
             return .{
                 .flags = parsed_flags,
@@ -202,6 +205,15 @@ pub fn execute(
     }
 
     return @call(.auto, default_handler, prependTuple(data, Options{ .args = args_it }));
+}
+
+pub fn validateOptions(optional_errors: ?Options.Iterator, comptime msg: []const u8) !void {
+    if (optional_errors) |errors| {
+        @branchHint(.cold);
+        var it = errors;
+        while (it.next()) |flag| std.log.err("{s}{s}", .{ msg, flag });
+        return error.InvalidOption;
+    }
 }
 
 fn functionName(function: anytype) [functionNameLen(function)]u8 {

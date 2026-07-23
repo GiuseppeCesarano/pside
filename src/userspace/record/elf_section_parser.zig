@@ -23,17 +23,10 @@ pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.
 }
 
 fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem.Allocator) ![]const u8 {
-    const shstrndx_offset = header.shoff + (@as(u64, header.shstrndx) * header.shentsize);
-    try reader.seekTo(shstrndx_offset);
-
     var it = header.iterateSectionHeaders(reader);
     var current_idx: usize = 0;
-    var strtab_sh: std.elf.Elf64_Shdr = undefined;
-    while (try it.next()) |sh| : (current_idx += 1) {
-        if (current_idx == header.shstrndx) {
-            strtab_sh = sh;
-            break;
-        }
+    const strtab_sh = while (try it.next()) |sh| : (current_idx += 1) {
+        if (current_idx == header.shstrndx) break sh;
     } else return error.BadElf;
 
     try reader.seekTo(strtab_sh.sh_offset);

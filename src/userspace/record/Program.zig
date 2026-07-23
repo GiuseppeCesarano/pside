@@ -31,7 +31,16 @@ pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allo
 }
 
 pub fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
-    return initWithIterator(std.mem.splitScalar(u8, string, ' '), std.mem.countScalar(u8, string, ' ') + 1, environ, allocator, io);
+    var count: usize = 0;
+    var counter = std.mem.tokenizeScalar(u8, string, ' ');
+    while (counter.next()) |_| count += 1;
+
+    if (count == 0) {
+        std.log.err("No program to profile.", .{});
+        return error.UnspecifiedCommand;
+    }
+
+    return initWithIterator(std.mem.tokenizeScalar(u8, string, ' '), count, environ, allocator, io);
 }
 
 pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {

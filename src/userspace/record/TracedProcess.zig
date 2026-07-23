@@ -251,7 +251,7 @@ fn mmap(
         prot,
         @as(u32, @bitCast(flags)),
         @as(usize, @bitCast(@as(isize, fd))),
-        @as(u64, @bitCast(offset)) / std.heap.pageSize(),
+        offset,
     });
 
     const err = linux.errno(rc);

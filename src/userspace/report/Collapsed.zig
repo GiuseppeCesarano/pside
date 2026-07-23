@@ -81,8 +81,10 @@ fn openDwarf(arena_allocator: std.mem.Allocator, elf_header: std.elf.Header, buf
 fn computeTextVaddr(elf_header: std.elf.Header, bytes: []const u8) !u64 {
     var program_header_iterator = elf_header.iterateProgramHeadersBuffer(bytes);
     return while (try program_header_iterator.next()) |header| {
-        if (header.p_type == std.elf.PT_LOAD and header.p_flags & std.elf.PF_X != 0)
-            break header.p_vaddr - (header.p_offset % header.p_align);
+        if (header.p_type == std.elf.PT_LOAD and header.p_flags & std.elf.PF_X != 0) {
+            const misalign = if (header.p_align == 0) 0 else header.p_offset % header.p_align;
+            break header.p_vaddr - misalign;
+        }
     } else 0;
 }
 

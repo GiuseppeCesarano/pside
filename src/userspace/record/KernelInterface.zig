@@ -188,6 +188,9 @@ pub fn stop(this: *@This()) !void {
     const e = linux.errno(rc);
     switch (e) {
         .SUCCESS => {},
-        else => std.log.err("{s}", .{@tagName(e)}),
+        else => {
+            std.log.err("Stopping profiler returned: {s}", .{@tagName(e)});
+            return error.ChardevWrite;
+        },
     }
 }

@@ -13,8 +13,8 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     const io = init.io;
 
     const parsed_options = options.parse(struct { json: bool = false });
-    try validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
-    try validateOptions(parsed_options.parse_errors, "Could not parse: ");
+    try cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
+    try cli.validateOptions(parsed_options.parse_errors, "Could not parse: ");
 
     var positional = parsed_options.positional_arguments orelse {
         std.log.err("Usage: pside report <file.pside>", .{});
@@ -25,23 +25,24 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     const path_null = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_null);
 
-    var arena: std.heap.ArenaAllocator = .init(allocator);
-    const arena_allocator = arena.allocator();
+    const throughput = throughput: {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
-    const parsed_results: OutputFileParseResults = parse: {
-        errdefer std.log.err("Could not read profile '{s}' (missing, not a pside file, or wrong version).", .{path});
-        break :parse try .parse(arena_allocator, io, path_null);
+        const parsed_results: OutputFileParseResults = parse: {
+            errdefer std.log.err("Could not read profile '{s}' (missing, not a pside file, or wrong version).", .{path});
+            break :parse try .parse(arena_allocator, io, path_null);
+        };
+
+        const collapsed: Collapsed = collapse: {
+            errdefer std.log.err("Could not resolve symbols from '{s}' (is the profiled binary present and built with -g?).", .{parsed_results.path});
+            break :collapse try .onDwarfSymbol(arena_allocator, io, parsed_results);
+        };
+
+        break :throughput try Statistics.Throughput.compute(allocator, collapsed.throughput);
     };
-
-    const collapsed: Collapsed = collapse: {
-        errdefer std.log.err("Could not resolve symbols from '{s}' (is the profiled binary present and built with -g?).", .{parsed_results.path});
-        break :collapse try .onDwarfSymbol(arena_allocator, io, parsed_results);
-    };
-
-    const throughput = try Statistics.Throughput.compute(allocator, collapsed.throughput);
     defer throughput.deinit(allocator);
-
-    arena.deinit();
 
     if (parsed_options.flags.json) {
         try writeJson(allocator, io, path, throughput);
@@ -76,13 +77,4 @@ fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, through
     try writer.flush();
 
     std.log.info("JSON report written to {s}", .{out_name});
-}
-
-fn validateOptions(optional_errors: ?cli.Options.Iterator, comptime msg: []const u8) !void {
-    if (optional_errors) |errors| {
-        @branchHint(.cold);
-        var it = errors;
-        while (it.next()) |flag| std.log.err("{s}{s}", .{ msg, flag });
-        return error.InvalidOption;
-    }
 }

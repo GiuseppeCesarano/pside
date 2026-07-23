@@ -8,7 +8,7 @@ pub const Commands = enum(c_uint) {
     _,
 };
 
-pub const vma_name_max_len = 256;
+pub const vma_name_max_len = std.math.maxInt(u8);
 
 pub const StartOptions = extern struct {
     pid: std.os.linux.pid_t,
