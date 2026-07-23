@@ -105,7 +105,7 @@ pub fn profilePid(
 
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
-        .config = @intFromEnum(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
+        .config = @backingInt(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
         .sample_period_or_freq = sampler_frequency,
         .flags = .{
             .freq = true,

@@ -92,7 +92,7 @@ pub const UserRegs = struct {
         std.debug.assert(args.len <= fields.len);
         const len = @min(args.len, fields.len);
 
-        this.rax = @intFromEnum(syscall_id);
+        this.rax = @backingInt(syscall_id);
         inline for (args, fields[0..len]) |arg, field| {
             const field_ptr: *usize = @ptrFromInt(@as(usize, @intFromPtr(this)) + field);
             field_ptr.* = arg;
