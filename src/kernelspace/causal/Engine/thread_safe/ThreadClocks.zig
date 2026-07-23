@@ -180,7 +180,7 @@ pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
 
     const slot = try this.reserveSlotUnsafe(key, hash);
 
-    slot.value.store(.{ .ticks = ticks, .master_at_sleep = undefined }, .monotonic);
+    slot.value.store(.{ .ticks = ticks, .master_at_sleep = ticks }, .monotonic);
 
     this.publishReservedUnsafe(key, slot);
 }
@@ -242,8 +242,8 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
     const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
     const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
-    wakee_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
-    if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+    wakee_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
+    if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
 
     const waker_lag = master - waker_ticks;
     return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
@@ -259,7 +259,7 @@ pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
     const slot = this.getSlotUnsafe(key, hash).?;
 
     const master = this.master.load(.acquire);
-    const old = slot.value.swap(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+    const old = slot.value.swap(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
 
     return master - old.ticks;
 }
@@ -296,8 +296,8 @@ pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
     const master = this.master.load(.acquire);
     const parent_ticks = parent_slot.value.load(.monotonic).ticks;
 
-    parent_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
-    child_slot.value.store(.{ .ticks = master, .master_at_sleep = undefined }, .monotonic);
+    parent_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
+    child_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
 
     this.publishReservedUnsafe(child, child_slot);
 
@@ -464,6 +464,29 @@ test "ThreadClocks: sleep and wake logic" {
 
     try testing.expectEqual(20, clocks.get(waker, .ticks));
     try testing.expectEqual(20, clocks.get(wakee, .ticks));
+}
+
+test "ThreadClocks: wake without prepareForSleep yields zero wakee lag" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const waker: ThreadClocks.Key = .{ .data = 2 };
+    const wakee: ThreadClocks.Key = .{ .data = 4 };
+
+    try clocks.put(waker, 10);
+    try clocks.put(wakee, 5);
+    clocks.master.store(20, .release);
+
+    const first = clocks.wake(waker, wakee);
+    try testing.expectEqual(10, first[0]);
+    try testing.expectEqual(10, first[1]);
+
+    const second = clocks.wake(waker, wakee);
+    try testing.expectEqual(0, second[0]);
+    try testing.expectEqual(0, second[1]);
+
+    try testing.expectEqual(0, clocks.externalWake(wakee));
 }
 
 test "ThreadClocks: fork" {

@@ -54,7 +54,7 @@ pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (*Key) bool, releaseKey: fn (*K
                     assert(keys_and_lags.used < 64);
 
                     const lag = master - value.ticks;
-                    value.* = .{ .ticks = master, .master_at_sleep = undefined };
+                    value.* = .{ .ticks = master, .master_at_sleep = master };
 
                     keys_and_lags.data[keys_and_lags.used] = .{ .key = key.*, .lag = lag };
                     keys_and_lags.used += 1;
