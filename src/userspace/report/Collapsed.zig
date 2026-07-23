@@ -152,6 +152,6 @@ fn getSrcString(allocator: std.mem.Allocator, dwarf: *std.debug.Dwarf, endian: s
     const file_index = line_entry.file - @intFromBool(slc.version < 5);
     if (file_index >= slc.files.len) return error.InvalidFileIndex;
 
-    const file_name = std.fs.path.basename(slc.files[file_index].path);
-    return std.fmt.allocPrint(allocator, "{s}:{}", .{ file_name, line_entry.line });
+    const file_path = slc.files[file_index].path;
+    return std.fmt.allocPrint(allocator, "{s}:{}", .{ file_path, line_entry.line });
 }

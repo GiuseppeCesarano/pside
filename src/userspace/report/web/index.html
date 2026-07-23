@@ -37,14 +37,14 @@ html, body {
     overflow: hidden;
 }
 
-/* ── Perspective floor, sits behind the floating panels ── */
 #bg-grid {
     position: fixed;
     inset: 0;
     z-index: 0;
     overflow: hidden;
     perspective: 400px;
-    perspective-origin: 50% 30%;
+    perspective-origin: calc(50% + var(--gx, 0px)) calc(30% + var(--gy, 0px));
+    transition: perspective-origin 0.4s ease-out;
 }
 #bg-grid::before {
     content: '';
@@ -207,8 +207,13 @@ html, body {
 }
 @keyframes itemIn { to { opacity: 1; transform: none; } }
 .section-item:hover  { background: var(--bg3-glass); border-left-color: var(--border2); padding-left: 17px; }
-.section-item.active { background: var(--bg3-glass); border-left-color: var(--accent); }
+.section-item.active {
+    background: var(--bg3-glass);
+    border-left-color: var(--accent);
+    box-shadow: inset 12px 0 20px -18px var(--accent);
+}
 .section-item:active { transform: scale(0.98); }
+.section-item.static { animation: none; opacity: 1; transform: none; }
 
 .section-item .name {
     color: var(--text);
@@ -229,8 +234,6 @@ html, body {
 }
 
 #main {
-    /* translucent: the collapsed-card list has a lot of open space, let the
-       floor grid show through it instead of painting it over flatly */
     background: var(--bg2-glass);
     backdrop-filter: blur(18px) saturate(160%);
     -webkit-backdrop-filter: blur(18px) saturate(160%);
@@ -289,6 +292,7 @@ html, body {
 #charts-scroll {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 12px 20px 24px;
     display: flex;
     flex-direction: column;
@@ -302,6 +306,7 @@ html, body {
 .ip-card {
     --rx: 0deg;
     --ry: 0deg;
+    --sc: 1;
     background: var(--bg2-glass);
     backdrop-filter: blur(14px) saturate(160%);
     -webkit-backdrop-filter: blur(14px) saturate(160%);
@@ -310,7 +315,7 @@ html, body {
     overflow: hidden;
     opacity: 0;
     position: relative;
-    transform: translateY(6px) perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry));
+    transform: translateY(6px) perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--sc));
     transform-style: preserve-3d;
     animation: cardIn 0.2s ease forwards;
     flex-shrink: 0;
@@ -318,9 +323,8 @@ html, body {
 }
 .ip-card.tilt-settle { transition: border-color 0.15s, box-shadow 0.2s, transform 0.4s var(--ease-bounce); }
 .ip-card:hover { border-color: var(--border2); box-shadow: 0 20px 40px -18px rgba(0, 0, 0, 0.6); }
-@keyframes cardIn { to { opacity:1; transform: perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry)); } }
+@keyframes cardIn { to { opacity:1; transform: perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--sc)); } }
 
-/* mouse-tracked glare sheen, follows --mx/--my set by the tilt handler */
 .ip-card::after {
     content: '';
     position: absolute;
@@ -352,14 +356,27 @@ html, body {
 }
 
 .loc-ip {
+    color: var(--text);
     font-size: 12px;
     font-weight: 500;
     letter-spacing: .04em;
     flex: 1;
     min-width: 0;
-    white-space: nowrap;
+    display: flex;
+    align-items: center;
+}
+.loc-dot {
+    flex-shrink: 0;
+    width: 9px; height: 9px;
+    border-radius: 2px;
+    margin-right: 8px;
+    box-shadow: 0 0 7px -1px currentColor;
+}
+.loc-txt {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
@@ -403,6 +420,34 @@ html, body {
 .u-wrap   { background: transparent !important; }
 .u-over   { cursor: crosshair; }
 
+.u-cursor-x { border-right: 1px dashed rgba(124,135,152,0.35) !important; }
+.u-cursor-pt {
+    box-shadow: 0 0 10px 1px rgba(255,255,255,0.35);
+    animation: ptPop 0.16s var(--ease-bounce);
+}
+@keyframes ptPop { from { transform: translate(-50%, -50%) scale(0.1); } }
+.chart-tip {
+    position: absolute;
+    z-index: 6;
+    transform: translate(-50%, calc(-100% - 9px));
+    pointer-events: none;
+    display: flex; align-items: baseline; gap: 7px;
+    padding: 3px 8px;
+    background: var(--bg3-glass);
+    backdrop-filter: blur(8px) saturate(160%);
+    -webkit-backdrop-filter: blur(8px) saturate(160%);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    font-size: 11px; line-height: 1.4; white-space: nowrap;
+    color: var(--text-mid);
+    box-shadow: 0 8px 20px -10px rgba(0,0,0,0.75);
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+.chart-tip .tip-val { font-weight: 600; font-size: 13px; letter-spacing: .02em; }
+.chart-tip .tip-spd { color: var(--text-mid); }
+.chart-tip .tip-ci  { color: var(--text-dim); }
+
 .chart-legend {
     display: flex;
     align-items: center;
@@ -410,8 +455,8 @@ html, body {
     padding: 5px 8px 2px;
     margin-top: 4px;
     border-top: 1px solid var(--border);
-    font-size: 10px;
-    color: var(--text-dim);
+    font-size: 11px;
+    color: var(--text-mid);
     flex-wrap: wrap;
 }
 .chart-legend-item {
@@ -432,7 +477,6 @@ html, body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Click sparks ── */
 .spark {
     position: fixed;
     width: 4px; height: 4px;
@@ -452,12 +496,9 @@ html, body {
     .section-item, .ip-card { opacity: 1; transform: none; }
     .ip-card::after { display: none !important; }
     .ip-chart-body-inner { transform: none !important; }
+    .u-cursor-pt { animation: none !important; }
 }
 
-/* Without backdrop-filter (unsupported, or disabled e.g. in hardened Firefox
-   profiles) the glass panels would just look like flat, unblurred, half-see-
-   through boxes over the grid. Go solid instead — closer to the original
-   opaque-panel look than a broken glass effect. */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     #topbar, #sidebar, #main, .ip-card { background: var(--bg2); }
     .section-item:hover, .section-item.active,
@@ -473,8 +514,8 @@ html, body {
 		<div class="logo">p<span>side</span><span class="cursor">_</span></div>
 		<div class="sep"></div>
 		<div id="top-meta">
-		    <span><b id="meta-binary">—</b> binary</span>
-		    <span><b id="meta-sections">—</b> sections</span>
+		    <span><b id="meta-sections">—</b> <span id="meta-sections-l">sections</span></span>
+		    <span><b id="meta-graphs">—</b> <span id="meta-graphs-l">graphs</span></span>
 		</div>
 		<div class="status"><div class="dot"></div>local</div>
 	    </header>
@@ -504,9 +545,8 @@ html, body {
 	</div>
 	<script>
 	    const PALETTE = [
-		'#4af0b0','#3dd8fb','#f0a44a','#a78bfa',
-		'#f05a5a','#facc15','#34d399','#f472b6',
-		'#60a5fa','#fb923c',
+		'#199e70','#3987e5','#9085e9','#d55181',
+		'#d95926','#c98500','#008300','#e66767',
 	    ];
 
 	    const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -517,6 +557,17 @@ html, body {
 	    let activeVma = null;
 	    let allSeries = [];
 	    const cardState = new Map();
+
+	    function countUp(el, target) {
+		if (reducedMotion || target <= 0) { el.textContent = target; return; }
+		const dur = 600, start = performance.now();
+		const tick = now => {
+		    const p = Math.min(1, (now - start) / dur);
+		    el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+		    if (p < 1) requestAnimationFrame(tick);
+		};
+		requestAnimationFrame(tick);
+	    }
 
 	    function spawnSparks(x, y, color, count) {
 		if (reducedMotion) return;
@@ -539,7 +590,11 @@ html, body {
 	    (async () => {
 		try {
 		    sections = await (await fetch('/api/vmas')).json();
-		    document.getElementById('meta-sections').textContent = sections.length;
+		    const graphTotal = sections.reduce((n, s) => n + s.graph_count, 0);
+		    countUp(document.getElementById('meta-sections'), sections.length);
+		    countUp(document.getElementById('meta-graphs'), graphTotal);
+		    document.getElementById('meta-sections-l').textContent = sections.length === 1 ? 'section' : 'sections';
+		    document.getElementById('meta-graphs-l').textContent = graphTotal === 1 ? 'graph' : 'graphs';
 		    renderSidebar(sections);
 		    if (sections.length === 1) loadSection(sections[0].name);
 		} catch {
@@ -547,7 +602,7 @@ html, body {
 		}
 	    })();
 
-	    function renderSidebar(items) {
+	    function renderSidebar(items, animate = true) {
 		const list = document.getElementById('section-list');
 		list.innerHTML = '';
 		if (!items.length) {
@@ -556,13 +611,13 @@ html, body {
 		}
 		items.forEach((s, i) => {
 		    const el = document.createElement('div');
-		    el.className = 'section-item' + (s.name === activeVma ? ' active' : '');
+		    el.className = 'section-item' + (s.name === activeVma ? ' active' : '') + (animate ? '' : ' static');
 		    el.dataset.vma = s.name;
-		    el.style.animationDelay = Math.min(i * 20, 300) + 'ms';
+		    if (animate) el.style.animationDelay = Math.min(i * 20, 300) + 'ms';
 		    el.innerHTML = `
 		      <div class="name" title="${esc(s.name)}">${esc(s.name)}</div>
 		      <div class="stats">
-			<span class="pill">${s.graph_count} graphs</span>
+			<span class="pill">${s.graph_count} graph${s.graph_count !== 1 ? 's' : ''}</span>
 		      </div>`;
 		    el.addEventListener('click', (e) => {
 			spawnSparks(e.clientX, e.clientY, 'var(--accent)', 5);
@@ -574,7 +629,7 @@ html, body {
 
 	    document.getElementById('search').addEventListener('input', e => {
 		const q = e.target.value.toLowerCase();
-		renderSidebar(sections.filter(s => s.name.toLowerCase().includes(q)));
+		renderSidebar(sections.filter(s => s.name.toLowerCase().includes(q)), false);
 	    });
 
 	    async function loadSection(vma) {
@@ -603,6 +658,8 @@ html, body {
 		}
 	    }
 
+	    const AUTO_EXPAND_COUNT = 3;
+
 	    function renderSection(data) {
 		const scroll = document.getElementById('charts-scroll');
 		scroll.innerHTML = '';
@@ -611,23 +668,14 @@ html, body {
 
 		allSeries = data.filter(s => s.points.length > 0);
 
-		applyFilter();
-	    }
+		const displays = shortenLocations(allSeries.map(s => s.location));
+		allSeries.forEach((s, i) => { s._display = displays[i]; });
 
-	    const AUTO_EXPAND_COUNT = 3;
+		const summary = document.getElementById('section-summary');
+		summary.innerHTML = `<b>0</b> location${allSeries.length !== 1 ? 's' : ''}`;
+		countUp(summary.querySelector('b'), allSeries.length);
 
-	    function applyFilter() {
-		const visible = allSeries;
-
-		const scroll = document.getElementById('charts-scroll');
-		scroll.innerHTML = '';
-		cardState.forEach(s => s.plot?.destroy());
-		cardState.clear();
-
-		document.getElementById('section-summary').innerHTML =
-		    `<b>${visible.length}</b> location${visible.length !== 1 ? 's' : ''}`;
-
-		if (visible.length === 0) {
+		if (allSeries.length === 0) {
 		    showEmpty('no locations');
 		    return;
 		}
@@ -635,7 +683,7 @@ html, body {
 		document.getElementById('empty-state').classList.add('hidden');
 		scroll.style.display = 'flex';
 
-		visible.forEach((series, i) => {
+		allSeries.forEach((series, i) => {
 		    const color = PALETTE[i % PALETTE.length];
 		    const card = buildCard(series, color, i);
 		    scroll.appendChild(card);
@@ -643,19 +691,36 @@ html, body {
 		});
 	    }
 
-	    const MAX_TILT = 4; // degrees
+	    function shortenLocations(locs) {
+		const paths = locs.filter(l => l.includes('/'));
+		if (paths.length < 2) return locs;
+
+		let prefix = paths[0];
+		for (const p of paths) {
+		    let k = 0;
+		    while (k < prefix.length && k < p.length && prefix[k] === p[k]) k++;
+		    prefix = prefix.slice(0, k);
+		}
+		const cut = prefix.lastIndexOf('/');
+		const common = cut >= 0 ? prefix.slice(0, cut + 1) : '';
+		if (!common) return locs;
+		return locs.map(l => l.startsWith(common) ? l.slice(common.length) : l);
+	    }
+
+	    const MAX_TILT = 4;
 
 	    function resetTilt(card) {
 		card.classList.add('tilt-settle');
 		card.style.setProperty('--rx', '0deg');
 		card.style.setProperty('--ry', '0deg');
+		card.style.setProperty('--sc', '1');
 		setTimeout(() => card.classList.remove('tilt-settle'), 400);
 	    }
 
 	    function expandCard(card) {
 		if (card.classList.contains('expanded')) return;
 		card.classList.add('expanded');
-		resetTilt(card); // flatten so the chart stays legible/interactive while open
+		resetTilt(card);
 
 		const state = cardState.get(card);
 		const chartEl = card.querySelector('.ip-chart');
@@ -665,6 +730,7 @@ html, body {
 		requestAnimationFrame(() => {
 		    const w = chartBodyInner.clientWidth - 16;
 		    if (w > 0) state.plot.setSize({ width: w, height: chartHeight(w) });
+		    state.plot._animateIn();
 		});
 	    }
 
@@ -675,8 +741,7 @@ html, body {
 	    function buildLocationEl(loc, color) {
 		const el = document.createElement('span');
 		el.className = 'loc-ip';
-		el.style.color = color;
-		el.textContent = loc;
+		el.innerHTML = `<span class="loc-dot" style="background:${color};color:${color}"></span><span class="loc-txt">${esc(loc)}</span>`;
 		return el;
 	    }
 
@@ -695,6 +760,7 @@ html, body {
 			const py = (e.clientY - rect.top) / rect.height;
 			card.style.setProperty('--ry', ((px - 0.5) * MAX_TILT * 2).toFixed(2) + 'deg');
 			card.style.setProperty('--rx', ((0.5 - py) * MAX_TILT * 2).toFixed(2) + 'deg');
+			card.style.setProperty('--sc', '0.985');
 			card.style.setProperty('--mx', (px * 100).toFixed(1) + '%');
 			card.style.setProperty('--my', (py * 100).toFixed(1) + '%');
 		    });
@@ -705,7 +771,7 @@ html, body {
 		header.className = 'ip-card-header';
 		header.title = series.location;
 
-		header.appendChild(buildLocationEl(series.location, color));
+		header.appendChild(buildLocationEl(series._display || series.location, color));
 
 		const pills = document.createElement('div');
 		pills.className = 'ip-pills';
@@ -765,37 +831,53 @@ html, body {
 		const gv = parseInt(color.slice(3,5),16);
 		const bv = parseInt(color.slice(5,7),16);
 
+		let animT = reducedMotion ? 1 : 0;
+		const grow = arr => arr.map(v => 100 + (v - 100) * animT);
+
+		const tip = document.createElement('div');
+		tip.className = 'chart-tip';
+
+		const allY = percents.concat(ciHigh);
+		const yMax = Math.max((allY.length ? Math.max(...allY) : 0) + 10, 200);
+
 		const opts = {
 		    width:  800,
 		    height: chartHeight(800),
 		    legend: { show: false },
-		    cursor: { show: true, points: { show: false } },
+		    cursor: {
+			show: true,
+			y: false,
+			points: { show: true, size: 8, width: 2, stroke: () => 'rgba(255,255,255,0.9)', fill: () => color },
+		    },
 		    scales: {
 			x: { time: false },
-			y: { range: (u, mn, mx) => [0, Math.max(mx + 10, 200)] },
+			y: { range: () => [0, yMax] },
 		    },
 		    series: [
 			{},
-			{ stroke: color, width: 2, paths: uPlot.paths.spline(), points: { show: false } },
+			{ stroke: color, width: 2.5, paths: uPlot.paths.spline(), points: { show: false } },
 			{ show: false, points: { show: false } },
 			{ show: false, points: { show: false } },
 		    ],
 		    hooks: {
+			init: [u => { u.over.appendChild(tip); }],
 			drawClear: [u => {
 			    const { ctx, bbox: { left, top, width, height } } = u;
 			    const y100 = u.valToPos(100, 'y', true);
 
 			    const gradUp = ctx.createLinearGradient(0, y100, 0, top);
-			    gradUp.addColorStop(0,   'rgba(74, 240, 176, 0)');
-			    gradUp.addColorStop(0.5, 'rgba(74, 240, 176, 0.04)');
-			    gradUp.addColorStop(1,   'rgba(74, 240, 176, 0.09)');
+			    gradUp.addColorStop(0,    'rgba(40, 190, 125, 0)');
+			    gradUp.addColorStop(0.5,  'rgba(40, 190, 125, 0.05)');
+			    gradUp.addColorStop(0.8,  'rgba(40, 190, 125, 0.12)');
+			    gradUp.addColorStop(1,    'rgba(40, 190, 125, 0.24)');
 			    ctx.fillStyle = gradUp;
 			    ctx.fillRect(left, top, width, y100 - top);
 
 			    const gradDown = ctx.createLinearGradient(0, y100, 0, top + height);
-			    gradDown.addColorStop(0,    'rgba(240, 75, 75, 0)');
-			    gradDown.addColorStop(0.45, 'rgba(240, 75, 75, 0.05)');
-			    gradDown.addColorStop(1,    'rgba(240, 75, 75, 0.11)');
+			    gradDown.addColorStop(0,    'rgba(232, 84, 84, 0)');
+			    gradDown.addColorStop(0.5,  'rgba(232, 84, 84, 0.06)');
+			    gradDown.addColorStop(0.8,  'rgba(232, 84, 84, 0.15)');
+			    gradDown.addColorStop(1,    'rgba(232, 84, 84, 0.28)');
 			    ctx.fillStyle = gradDown;
 			    ctx.fillRect(left, y100, width, (top + height) - y100);
 
@@ -815,8 +897,9 @@ html, body {
 			    ctx.save();
 			    ctx.beginPath(); ctx.rect(left, top, width, height); ctx.clip();
 
-			    const hiPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciHigh[i],'y',true) }));
-			    const loPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(ciLow[i], 'y',true) }));
+			    const LO = u.data[2], HI = u.data[3];
+			    const hiPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(HI[i],'y',true) }));
+			    const loPts = xVals.map((x, i) => ({ x: u.valToPos(x,'x',true), y: u.valToPos(LO[i],'y',true) }));
 
 			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.18)`;
 			    ctx.beginPath();
@@ -840,7 +923,7 @@ html, body {
 			    series.points.forEach((p, i) => {
 				if (!p.singleton) return;
 				const x = u.valToPos(i,'x',true);
-				const y = u.valToPos(p.percent, 'y',true);
+				const y = u.valToPos(100 + (p.percent - 100) * animT, 'y',true);
 				ctx.beginPath();
 				ctx.moveTo(x, y-7); ctx.lineTo(x-5, y+4); ctx.lineTo(x+5, y+4);
 				ctx.closePath(); ctx.fill();
@@ -848,10 +931,21 @@ html, body {
 
 			    ctx.restore();
 			}],
+			setCursor: [u => {
+			    const idx = u.cursor.idx;
+			    if (idx == null) { tip.style.opacity = '0'; return; }
+			    tip.innerHTML =
+				`<span class="tip-val" style="color:${color}">${percents[idx].toFixed(1)}%</span>` +
+				`<span class="tip-ci">${ciLow[idx].toFixed(0)}–${ciHigh[idx].toFixed(0)}</span>` +
+				`<span class="tip-spd">@${xVals[idx] * 5}%</span>`;
+			    tip.style.left = u.valToPos(xVals[idx], 'x') + 'px';
+			    tip.style.top  = u.valToPos(ciHigh[idx], 'y') + 'px';
+			    tip.style.opacity = '1';
+			}],
 		    },
 		    axes: [
 			{
-			    font: '11px monospace', stroke: '#7c8798',
+			    font: '11px monospace', stroke: '#9aa6b6',
 			    grid: { stroke: '#2a3040', width: 1 },
 			    ticks: { stroke: '#252a33', width: 1 },
 			    label: 'speedup %',
@@ -864,19 +958,40 @@ html, body {
 			    values: (u, splits) => splits.map(v => v == null ? '' : (v * 5).toFixed(0) + '%'),
 			},
 			{
-			    font: '11px monospace', stroke: '#7c8798',
+			    font: '11px monospace', stroke: '#9aa6b6',
 			    grid: { stroke: '#2a3040', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
 			    label: 'throughput %', labelFont: '10px monospace',
 			    splits: (u, ax, scMin, scMax) => {
-				const major = [0, 25, 50, 75, 100, 125, 150, 175, 200];
-				return major.filter(v => v >= scMin - 1 && v <= scMax + 1);
+				const raw = Math.max(scMax, 1) / 5;
+				const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+				const norm = raw / mag;
+				const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+				const ticks = [];
+				for (let v = 0; v <= scMax + 0.001; v += step) ticks.push(v);
+				return ticks;
 			    },
 			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
 			},
 		    ],
 		};
 
-		return new uPlot(opts, [xVals, percents, ciLow, ciHigh], chartEl);
+		const u = new uPlot(opts, [xVals, grow(percents), grow(ciLow), grow(ciHigh)], chartEl);
+
+		u._animateIn = () => {
+		    if (reducedMotion) { animT = 1; u.setData([xVals, percents, ciLow, ciHigh]); return; }
+		    animT = 0;
+		    u.setData([xVals, grow(percents), grow(ciLow), grow(ciHigh)]);
+		    const dur = 480, start = performance.now();
+		    const tick = now => {
+			const p = Math.min(1, (now - start) / dur);
+			animT = 1 - Math.pow(1 - p, 3);
+			u.setData([xVals, grow(percents), grow(ciLow), grow(ciHigh)]);
+			if (p < 1) requestAnimationFrame(tick);
+		    };
+		    requestAnimationFrame(tick);
+		};
+
+		return u;
 	    }
 
 	    function drawSpline(ctx, points, reverse) {
@@ -920,6 +1035,22 @@ html, body {
 
 	    function esc(s) {
 		return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+	    }
+
+	    if (!reducedMotion) {
+		const grid = document.getElementById('bg-grid');
+		let queued = false, mx = 0, my = 0;
+		window.addEventListener('pointermove', e => {
+		    mx = (e.clientX / window.innerWidth  - 0.5) * -18;
+		    my = (e.clientY / window.innerHeight - 0.5) * -12;
+		    if (queued) return;
+		    queued = true;
+		    requestAnimationFrame(() => {
+			grid.style.setProperty('--gx', mx.toFixed(1) + 'px');
+			grid.style.setProperty('--gy', my.toFixed(1) + 'px');
+			queued = false;
+		    });
+		}, { passive: true });
 	    }
 	</script>
     </body>
