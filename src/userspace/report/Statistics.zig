@@ -87,7 +87,7 @@ pub const Throughput = struct {
             .impact = undefined,
         };
 
-        var rng_ctx: std.Random.DefaultPrng = .init(experiments.datapoints.len);
+        var rng_ctx: std.Random.DefaultPrng = .init(std.hash.Wyhash.hash(0, experiments.location));
         const rng = rng_ctx.random();
         const bootstrap_distribution = try allocator.create([bootstrap_iterations]f32);
         defer allocator.destroy(bootstrap_distribution);
