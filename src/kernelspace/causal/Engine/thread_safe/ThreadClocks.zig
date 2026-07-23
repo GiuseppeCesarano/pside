@@ -155,11 +155,10 @@ fn getSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) ?*Pair {
 
     assert(@popCount(len) == 1);
     const bitmask = len - 1;
-    const max_retries = @max(16, len / 32);
 
     var i: usize = 0;
     var current_key: Key = .empty_collided;
-    return slot: while (current_key.hasCollided() and i < max_retries) : (i += 1) {
+    return slot: while (current_key.hasCollided() and i < len) : (i += 1) {
         const index = (hash + i) & bitmask;
         current_key = this.pairs[index].key.load(.acquire);
         if (current_key.isEql(key)) break :slot &this.pairs[index];
@@ -328,7 +327,6 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     this.bitmask = new_bitmask;
 
     const bitmask = new_len - 1;
-    const max_retries = @max(16, new_len / 32);
     for (old_pairs) |pair| {
         const key = pair.key.load(.unordered).withoutCollisionBit();
         if (!key.isEql(.empty)) {
@@ -336,7 +334,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
             const hash = key.hash();
 
             var i: usize = 0;
-            while (i < max_retries) : (i += 1) {
+            while (i < new_len) : (i += 1) {
                 const index = (hash + i) & bitmask;
 
                 if (new_pairs[index].key.load(.unordered).isEql(.empty)) {
@@ -346,7 +344,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
                 }
 
                 new_pairs[index].key.raw.data |= @bitCast(Key.empty_collided);
-            } else return error.NoSpace;
+            } else unreachable;
         }
     }
 
