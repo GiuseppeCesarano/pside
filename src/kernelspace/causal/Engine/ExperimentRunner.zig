@@ -123,6 +123,7 @@ pub fn profilePid(
 pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
     this.delay_per_tick.store(delay_per_tick, .monotonic);
     this.target_ip.store(0, .seq_cst);
+    this.vma_base.store(0, .seq_cst);
     this.sampler.?.enable();
 }
 
@@ -136,7 +137,7 @@ pub fn getMasterClock(this: *ExperimentRunner) VirtualTimeKeeper.Ticks {
 }
 
 pub fn capturedRelativeIp(this: *ExperimentRunner) ?usize {
-    const target = this.target_ip.load(.monotonic);
+    const target = this.target_ip.load(.acquire);
     if (target == 0) return null;
     return target - this.vma_base.load(.monotonic);
 }
@@ -189,14 +190,14 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 fn captureProfilingTarget(this: *ExperimentRunner, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
 
-    const we_exchanged_first = this.target_ip.cmpxchgStrong(0, ip, .release, .monotonic) == null;
+    const we_claimed_first = this.vma_base.cmpxchgStrong(0, vma_base, .monotonic, .monotonic) == null;
 
-    if (we_exchanged_first) {
+    if (we_claimed_first) {
         @branchHint(.likely);
-        this.vma_base.store(vma_base, .release);
+        this.target_ip.store(ip, .release);
     }
 
-    return we_exchanged_first;
+    return we_claimed_first;
 }
 
 fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) void {
