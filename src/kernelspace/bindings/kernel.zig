@@ -386,7 +386,6 @@ pub const CharDevice = extern struct {
     pub fn remove(this: *CharDevice) void {
         c_chardev_unregister(this);
     }
-
 };
 
 pub const PerfEvent = opaque {
@@ -590,6 +589,11 @@ pub const Completion = extern struct {
     extern fn c_wait_for_completion(*Completion) void;
     pub fn wait(this: *Completion) void {
         c_wait_for_completion(this);
+    }
+
+    extern fn c_wait_for_completion_timeout(*Completion, c_ulong) c_ulong;
+    pub fn timedWait(this: *Completion, timeout_ms: c_ulong) bool {
+        return c_wait_for_completion_timeout(this, timeout_ms) != 0;
     }
 
     extern fn c_complete(*Completion) void;

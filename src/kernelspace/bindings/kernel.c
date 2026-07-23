@@ -152,6 +152,7 @@ int c_in_task(void);
 /* Completion */
 void c_init_completion(struct completion *);
 void c_wait_for_completion(struct completion *);
+unsigned long c_wait_for_completion_timeout(struct completion *, unsigned long);
 void c_complete(struct completion *);
 void c_reinit_completion(struct completion *);
 
@@ -539,6 +540,10 @@ int c_in_task(void) { return in_task(); }
 /* Completion */
 void c_init_completion(struct completion *c) { init_completion(c); }
 void c_wait_for_completion(struct completion *c) { wait_for_completion(c); }
+unsigned long c_wait_for_completion_timeout(struct completion *c,
+                                            unsigned long timeout_ms) {
+  return wait_for_completion_timeout(c, msecs_to_jiffies(timeout_ms));
+}
 void c_complete(struct completion *c) { complete(c); }
 void c_reinit_completion(struct completion *c) { reinit_completion(c); }
 
