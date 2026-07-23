@@ -867,6 +867,68 @@ test "bitmask: grow with partial removes — only live entries retain their bit"
             try testing.expect(bitIsSet(&clocks, key));
 }
 
+test "ThreadClocks: grow preserves ticks and pending lag" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    var keys: [8]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, @intCast(i * 10));
+    }
+
+    clocks.master.store(100, .release);
+    for (keys, 0..) |key, i| if (i % 2 == 0) clocks.prepareForSleep(key);
+
+    const old = try clocks.grow(allocator);
+    allocator.free(old[0]);
+    allocator.free(old[1]);
+
+    for (keys, 0..) |key, i| {
+        const expected_lag: ThreadClocks.Ticks = if (i % 2 == 0) @intCast(100 - i * 10) else 0;
+        try testing.expectEqual(i * 10, clocks.get(key, .ticks));
+        try testing.expectEqual(expected_lag, clocks.get(key, .lag));
+    }
+}
+
+test "ThreadClocks: repeated grow keeps every entry reachable" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    var keys: [min_cap / 2]ThreadClocks.Key = undefined;
+    for (&keys, 0..) |*key, i| {
+        key.* = .{ .data = @intCast((i + 1) * 2) };
+        try clocks.put(key.*, @intCast(i));
+    }
+
+    for (0..2) |_| {
+        const old = try clocks.grow(allocator);
+        allocator.free(old[0]);
+        allocator.free(old[1]);
+    }
+
+    try testing.expectEqual(min_cap * 4, clocks.pairs.len);
+    try testing.expectEqual(keys.len, countLiveBits(&clocks));
+    for (keys, 0..) |key, i| try testing.expectEqual(i, clocks.get(key, .ticks));
+}
+
+test "ThreadClocks: slot reuse after remove" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const key: ThreadClocks.Key = .{ .data = 42 };
+
+    try clocks.put(key, 7);
+    clocks.remove(key);
+    try clocks.put(key, 9);
+
+    try testing.expectEqual(9, clocks.get(key, .ticks));
+    try testing.expectEqual(1, countLiveBits(&clocks));
+}
+
 test "ThreadClocks: forEach visits all live entries exactly once" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);

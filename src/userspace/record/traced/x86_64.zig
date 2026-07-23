@@ -99,3 +99,43 @@ pub const UserRegs = struct {
         }
     }
 };
+
+const testing = std.testing;
+
+test "payload: immediates land at the patched offsets" {
+    const inc_addr: usize = 0x1122334455667788;
+    const ret_addr: usize = 0x99aabbccddeeff00;
+    const p = payload.get(inc_addr, ret_addr);
+
+    try testing.expectEqual(26, payload.len);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xb8 }, p[0..2]);
+    try testing.expectEqual(inc_addr, std.mem.readInt(usize, p[2..10], .little));
+    try testing.expectEqualSlices(u8, &.{ 0xf0, 0x48, 0xff, 0x00 }, p[10..14]);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xb8 }, p[14..16]);
+    try testing.expectEqual(ret_addr, std.mem.readInt(usize, p[16..24], .little));
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xe0 }, p[24..26]);
+}
+
+test "trampoline: destination lands at the patched offset" {
+    const dest: usize = 0x0102030405060708;
+    const t = trampoline.get(dest);
+
+    try testing.expectEqual(12, trampoline.len);
+    try testing.expectEqualSlices(u8, &.{ 0x48, 0xb8 }, t[0..2]);
+    try testing.expectEqual(dest, std.mem.readInt(usize, t[2..10], .little));
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0xe0 }, t[10..12]);
+}
+
+test "UserRegs: prep_syscall fills id and argument registers" {
+    var regs: UserRegs = std.mem.zeroes(UserRegs);
+
+    regs.prep_syscall(.openat, .{ 1, 2, 3, 4, 5, 6 });
+
+    try testing.expectEqual(@backingInt(std.os.linux.SYS.openat), regs.rax);
+    try testing.expectEqual(1, regs.rdi);
+    try testing.expectEqual(2, regs.rsi);
+    try testing.expectEqual(3, regs.rdx);
+    try testing.expectEqual(4, regs.r10);
+    try testing.expectEqual(5, regs.r8);
+    try testing.expectEqual(6, regs.r9);
+}

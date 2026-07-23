@@ -12,3 +12,8 @@ pub inline fn throughputPoint(comptime name: []const u8) void {
         \\   .popsection
     ::: .{ .rax = true, .cc = true });
 }
+
+test throughputPoint {
+    throughputPoint("pside_test_point");
+    throughputPoint("pside_test_point_2");
+}

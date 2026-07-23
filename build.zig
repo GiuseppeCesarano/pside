@@ -248,10 +248,38 @@ pub fn build(b: *std.Build) !void {
     }) });
     const run_pool_tests = b.addRunArtifact(pool_tests);
 
+    const virtual_time_keeper_tests = b.addTest(.{ .root_module = b.addModule("virtual_time_keeper", .{
+        .root_source_file = b.path("src/kernelspace/causal/Engine/VirtualTimeKeeper.zig"),
+        .target = target,
+        .optimize = optimize,
+        .sanitize_thread = true,
+    }) });
+    const run_virtual_time_keeper_tests = b.addRunArtifact(virtual_time_keeper_tests);
+
+    const traced_x86_64_tests = b.addTest(.{ .root_module = b.addModule("traced_x86_64", .{
+        .root_source_file = b.path("src/userspace/record/traced/x86_64.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_traced_x86_64_tests = b.addRunArtifact(traced_x86_64_tests);
+
+    const pside_include_tests = b.addTest(.{
+        .root_module = b.addModule("pside_include", .{
+            .root_source_file = b.path("include/pside.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+        .use_llvm = true,
+    });
+    const run_pside_include_tests = b.addRunArtifact(pside_include_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_cli_tests.step);
     test_step.dependOn(&run_bindings_tests.step);
     test_step.dependOn(&run_refgate_tests.step);
     test_step.dependOn(&run_threadclocks_tests.step);
     test_step.dependOn(&run_pool_tests.step);
+    test_step.dependOn(&run_virtual_time_keeper_tests.step);
+    test_step.dependOn(&run_traced_x86_64_tests.step);
+    test_step.dependOn(&run_pside_include_tests.step);
 }
