@@ -58,6 +58,8 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\                     to whichever progress point is found first.
         \\  -l <name>          VMA / section name to restrict profiling to.
         \\                     Defaults to the program name without its extension.
+        \\  -prepare <cmd>     Command run through `sh -c` before every run, e.g.
+        \\                     -prepare "make clean". Recording aborts if it fails.
         \\  -n <count>         Number of runs to execute (default: 1). More runs
         \\                     give a cleaner, higher-confidence profile; further
         \\                     runs against the same .pside file are aggregated.
@@ -77,6 +79,9 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\  # Restrict profiling to a specific shared-library section
         \\  sudo pside record ./my_app -l libfoo -n 10
+        \\
+        \\  # Reset state before each of the 20 runs
+        \\  sudo pside record ./my_app -prepare "rm -rf ./scratch" -n 20
         \\
     , .{});
 }

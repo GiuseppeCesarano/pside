@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
+const calling_user = @import("calling_user.zig");
 const Program = @import("Program.zig");
 
 const TracedProcess = @This();
@@ -15,9 +16,6 @@ const SpawnError = error{
     ChildDead,
     ParentDead,
     UnexpectedSignal,
-    NoSudoUserID,
-    NoSudoGroupID,
-    CouldNotSetGroups,
 };
 
 pid: linux.pid_t,
@@ -67,28 +65,7 @@ fn childStart(tracee_exe: Program) !void {
 
     if (linux.getppid() == 1) return SpawnError.ParentDead;
 
-    if (linux.geteuid() == 0 and !tracee_exe.is_sudo) {
-        const env = tracee_exe.enviroment_map;
-        const gid = try std.fmt.parseInt(u32, env.getPosix("SUDO_GID") orelse return SpawnError.NoSudoGroupID, 10);
-        const uid = try std.fmt.parseInt(u32, env.getPosix("SUDO_UID") orelse return SpawnError.NoSudoUserID, 10);
-
-        if (linux.errno(linux.setgroups(1, &.{gid})) != .SUCCESS) return SpawnError.CouldNotSetGroups;
-
-        switch (linux.errno(linux.setgid(gid))) {
-            .SUCCESS => {},
-            .AGAIN => return error.ResourceLimitReached,
-            .INVAL => return error.InvalidUserId,
-            .PERM => return error.PermissionDenied,
-            else => return error.Unexpected,
-        }
-
-        switch (linux.errno(linux.setuid(uid))) {
-            .SUCCESS => {},
-            .INVAL => return error.InvalidUserId,
-            .PERM => return error.PermissionDenied,
-            else => return error.Unexpected,
-        }
-    }
+    if (!tracee_exe.is_sudo) try calling_user.dropToCallingUser(tracee_exe.enviroment_map);
 
     try ptrace.traceMe();
     try raise(.STOP);

@@ -21,6 +21,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         c: []const u8 = "",
         p: []const u8 = "",
         l: []const u8 = "",
+        prepare: []const u8 = "",
         n: u32 = 1,
         k: bool = false,
     });
@@ -87,6 +88,9 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     while (i < parsed_options.flags.n and !stopped.load(.monotonic)) : (i += 1) {
         std.log.info("Run {}/{}", .{ i + 1, parsed_options.flags.n });
 
+        if (parsed_options.flags.prepare.len != 0)
+            try runPrepare(parsed_options.flags.prepare, owner, io);
+
         var traced_process: TracedProcess = try .spawn(user_program, io);
         global_traced_pid.store(traced_process.pid, .release);
 
@@ -119,6 +123,24 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     if (!stopped.load(.monotonic)) {
         const program_name = std.fs.path.basename(std.mem.span(user_program.path));
         std.log.info("Done. View the report with: pside report {s}.pside", .{program_name});
+    }
+}
+
+fn runPrepare(command: []const u8, owner: ?[2]u32, io: std.Io) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "/bin/sh", "-c", command },
+        .uid = if (owner) |o| o[0] else null,
+        .gid = if (owner) |o| o[1] else null,
+    });
+
+    const term = child.wait(io) catch |err| {
+        std.log.err("Could not run prepare command '{s}': {s}", .{ command, @errorName(err) });
+        return err;
+    };
+
+    if (!term.success()) {
+        std.log.err("Prepare command '{s}' {f}", .{ command, term });
+        return error.PrepareCommandFailed;
     }
 }
 
