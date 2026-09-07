@@ -1,55 +1,38 @@
 const std = @import("std");
 
 const cli = @import("cli");
-const OutputFileParseResults = @import("OutputFileParseResults");
-const Statistics = @import("Statistics.zig");
 
+const Graph = @import("Graph.zig");
+const Profile = @import("Profile.zig");
 const Server = @import("Server.zig");
-
-const Collapsed = @import("Collapsed.zig");
 
 pub fn report(options: cli.Options, init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
     const parsed_options = options.parse(struct { json: bool = false });
-    try cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ");
-    try cli.validateOptions(parsed_options.parse_errors, "Could not parse: ");
+    cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ") catch std.process.exit(1);
+    cli.validateOptions(parsed_options.parse_errors, "Could not parse: ") catch std.process.exit(1);
 
-    var positional = parsed_options.positional_arguments orelse {
-        std.log.err("Usage: pside report <file.pside>", .{});
-        return error.MissingArgument;
-    };
+    var positional = parsed_options.positional_arguments orelse
+        std.process.fatal("Usage: pside report <file.pside>", .{});
 
     const path = positional.next().?;
-    const path_null = try allocator.dupeSentinel(u8, path, 0);
-    defer allocator.free(path_null);
 
-    const throughput = throughput: {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        defer arena.deinit();
-        const arena_allocator = arena.allocator();
-
-        const parsed_results: OutputFileParseResults = parse: {
-            errdefer std.log.err("Could not read profile '{s}' (missing, not a pside file, or wrong version).", .{path});
-            break :parse try .parse(arena_allocator, io, path_null);
-        };
-
-        const collapsed: Collapsed = collapse: {
-            errdefer std.log.err("Could not resolve symbols from '{s}' (is the profiled binary present and built with -g?).", .{parsed_results.path});
-            break :collapse try .onDwarfSymbol(arena_allocator, io, parsed_results);
-        };
-
-        break :throughput try Statistics.Throughput.compute(allocator, collapsed.throughput);
+    var profile = Profile.fromFilePath(allocator, io, path) catch |err| switch (err) {
+        Profile.Error.DebugInfoUnreadable => std.process.fatal("Could not read debug info for the binary recorded in '{s}'.", .{path}),
+        else => std.process.fatal("Could not read profile '{s}' ({s}).", .{ path, @errorName(err) }),
     };
-    defer throughput.deinit(allocator);
+    defer profile.deinit(allocator);
 
     if (parsed_options.flags.json) {
-        try writeJson(allocator, io, path, throughput);
+        writeJson(allocator, io, path, profile) catch |err|
+            std.process.fatal("Could not write json file ({s})", .{@errorName(err)});
+
         return;
     }
 
-    var server: Server = try .init(allocator, io, &throughput);
+    var server: Server = try .init(allocator, io, &profile);
     defer server.deinit(allocator, io);
     var server_run = try io.concurrent(Server.run, .{ &server, allocator, io });
 
@@ -59,13 +42,14 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
     _ = try server_run.await(io);
 }
 
-fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, throughput: Statistics.Throughput) !void {
+fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, profile: Profile) !void {
     const suffix = ".pside";
     const stem = if (std.mem.endsWith(u8, path, suffix)) path[0 .. path.len - suffix.len] else path;
+
     const out_name = try std.mem.concat(allocator, u8, &.{ stem, ".json" });
     defer allocator.free(out_name);
 
-    const body = try std.json.Stringify.valueAlloc(allocator, throughput.vmas, .{});
+    const body = try std.json.Stringify.valueAlloc(allocator, profile.vmas, .{});
     defer allocator.free(body);
 
     const file = try std.Io.Dir.cwd().createFile(io, out_name, .{});
@@ -77,4 +61,9 @@ fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, through
     try writer.flush();
 
     std.log.info("JSON report written to {s}", .{out_name});
+}
+
+test {
+    _ = Profile;
+    _ = Graph;
 }

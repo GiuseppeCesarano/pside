@@ -3,17 +3,17 @@ const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
 
-const Statistics = @import("Statistics.zig");
+const Profile = @import("Profile.zig");
 
 const Server = @This();
 
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
-throughput: *const Statistics.Throughput,
+profile: *const Profile,
 connections: Io.Group,
 
-pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.Throughput) !Server {
+pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
     errdefer net_server.deinit(io);
 
@@ -24,7 +24,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, throughput: *const Statistics.
         .server = net_server,
         .should_shut_down = .init(false),
         .share_path = share_path,
-        .throughput = throughput,
+        .profile = profile,
         .connections = .init,
     };
 }
@@ -136,15 +136,13 @@ fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.S
         graph_count: usize,
     };
 
-    var list: std.ArrayListUnmanaged(VmaInfo) = .empty;
+    var list: std.ArrayListUnmanaged(VmaInfo) = try .initCapacity(allocator, this.profile.vmas.len);
     defer list.deinit(allocator);
 
-    for (this.throughput.vmas) |vma| {
-        try list.append(allocator, .{
-            .name = vma.name,
-            .graph_count = vma.graphs.len,
-        });
-    }
+    for (this.profile.vmas) |vma| list.appendAssumeCapacity(.{
+        .name = vma.name,
+        .graph_count = vma.graphs.len,
+    });
 
     const body = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
     defer allocator.free(body);
@@ -155,20 +153,14 @@ fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.S
 }
 
 fn serveVma(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request, name: []const u8) !void {
-    var vma_ptr: ?*const Statistics.Throughput.Vma = null;
-    for (this.throughput.vmas) |*vma| {
-        if (std.mem.eql(u8, vma.name, name)) {
-            vma_ptr = vma;
-            break;
-        }
-    }
-
-    if (vma_ptr == null) {
+    const vma_ptr: *const Profile.Vma = for (this.profile.vmas) |*vma| {
+        if (std.mem.eql(u8, vma.name, name)) break vma;
+    } else {
         try request.respond("", .{ .status = .not_found });
         return;
-    }
+    };
 
-    const body = try std.json.Stringify.valueAlloc(allocator, vma_ptr.?.graphs, .{});
+    const body = try std.json.Stringify.valueAlloc(allocator, vma_ptr.graphs, .{});
     defer allocator.free(body);
 
     try request.respond(body, .{
