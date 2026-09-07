@@ -39,7 +39,7 @@ pub inline fn tryIncrement(this: *RefGate) !void {
 }
 
 pub inline fn decrement(this: *RefGate) void {
-    assert(this.references.fetchSub(1, .release) & references_mask != 0);
+    assert((this.references.fetchSub(1, .release) & references_mask) != 0);
 }
 
 pub inline fn close(this: *RefGate) void {

@@ -1,11 +1,14 @@
 const std = @import("std");
 
 const communications = @import("communications");
+const name = communications.name;
 const kernel = @import("kernel");
 
 const Engine = @import("causal/Engine.zig");
 
-const name = "pside";
+comptime {
+    _ = @import("soft_float.zig");
+}
 
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL".*;
@@ -48,7 +51,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
     filp.lock();
     defer filp.unlock();
 
-    switch (@as(communications.Commands, @enumFromInt(command))) {
+    switch (@as(communications.Commands, @fromBackingInt(@intCast(command)))) {
         .start_profiler => {
             if (filp.getEngine() != null) return code(.BUSY);
 
@@ -85,5 +88,5 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
 }
 
 fn code(return_code: std.os.linux.E) c_long {
-    return -@as(c_long, @intCast(@intFromEnum(return_code)));
+    return -@as(c_long, @intCast(@backingInt(return_code)));
 }

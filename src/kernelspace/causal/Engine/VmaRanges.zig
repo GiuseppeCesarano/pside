@@ -19,7 +19,7 @@ pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
         const vma_ranges = try allocator.alloc(Range, capacity);
         errdefer allocator.free(vma_ranges);
 
-        const count = kernel.vma.snapshotExecutable(task, filter_z, vma_ranges);
+        const count = task.snapshotExecutableVmas(filter_z, vma_ranges);
 
         if (count <= capacity) {
             std.debug.assert(allocator.resize(vma_ranges, count));

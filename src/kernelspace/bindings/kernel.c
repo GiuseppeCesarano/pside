@@ -195,7 +195,9 @@ u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
 /* Task */
 struct task_struct *c_current_task(void) { return current; }
 pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
-int c_task_thread_count(struct task_struct *task) { return get_nr_threads(task); }
+int c_task_thread_count(struct task_struct *task) {
+  return get_nr_threads(task);
+}
 int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }

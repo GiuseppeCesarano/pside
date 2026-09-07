@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+
 const RefGate = @import("RefGate.zig");
 
 /// Concurrent map optimized for thread-local clock propagation.
@@ -404,6 +405,31 @@ pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
 
 const min_cap = @bitSizeOf(usize);
 
+/// Count the total number of set bits across all bitmask words.
+fn countLiveBits(this: *ThreadClocks) usize {
+    var total: usize = 0;
+    for (this.bitmask) |word| total += @popCount(word.load(.monotonic));
+    return total;
+}
+
+/// Return true if the bit for the slot occupied by `key` is set.
+fn bitIsSet(this: *ThreadClocks, key: ThreadClocks.Key) bool {
+    const hash = key.hash();
+    const len = this.pairs.len;
+    const mask = len - 1;
+    const max_retries = @max(16, len / 32);
+
+    return for (0..max_retries) |i| {
+        const index = (hash + i) & mask;
+        const current_key = this.pairs[index].key.load(.acquire);
+        if (current_key.isEql(key)) {
+            const bucket = index / @bitSizeOf(usize);
+            const bit = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
+            break this.bitmask[bucket].load(.monotonic) & bit != 0;
+        }
+    } else false;
+}
+
 test "ThreadClocks: basic lifecycle" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
@@ -671,31 +697,6 @@ test "ThreadClocks: concurrent grow" {
     }
 }
 
-/// Count the total number of set bits across all bitmask words.
-fn countLiveBits(clocks: *ThreadClocks) usize {
-    var total: usize = 0;
-    for (clocks.bitmask) |word| total += @popCount(word.load(.monotonic));
-    return total;
-}
-
-/// Return true if the bit for the slot occupied by `key` is set.
-fn bitIsSet(clocks: *ThreadClocks, key: ThreadClocks.Key) bool {
-    const hash = key.hash();
-    const len = clocks.pairs.len;
-    const mask = len - 1;
-    const max_retries = @max(16, len / 32);
-
-    return for (0..max_retries) |i| {
-        const index = (hash + i) & mask;
-        const current_key = clocks.pairs[index].key.load(.acquire);
-        if (current_key.isEql(key)) {
-            const bucket = index / @bitSizeOf(usize);
-            const bit = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
-            break clocks.bitmask[bucket].load(.monotonic) & bit != 0;
-        }
-    } else false;
-}
-
 test "ThreadClocks: removeIf removes only matching entries" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
@@ -707,18 +708,18 @@ test "ThreadClocks: removeIf removes only matching entries" {
         try clocks.put(key.*, 0);
     }
 
-    const odd_data = struct {
-        fn pred(key: *ThreadClocks.Key) bool {
+    const scoped = struct {
+        fn isOddData(key: *ThreadClocks.Key) bool {
             return (key.withoutCollisionBit().data / 2) % 2 == 1;
         }
-    }.pred;
+    };
 
-    clocks.removeIf(odd_data, .{});
+    clocks.removeIf(scoped.isOddData, .{});
 
-    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len / 2, clocks.countLiveBits());
     for (keys, 0..) |key, i| {
         const expect_alive = (i + 1) % 2 == 0;
-        try testing.expectEqual(expect_alive, bitIsSet(&clocks, key));
+        try testing.expectEqual(expect_alive, clocks.bitIsSet(key));
     }
 }
 
@@ -752,10 +753,10 @@ test "ThreadClocks: remove tolerates untracked keys" {
     try clocks.put(tracked, 10);
 
     clocks.remove(untracked);
-    try testing.expectEqual(1, countLiveBits(&clocks));
+    try testing.expectEqual(1, clocks.countLiveBits());
 
     clocks.remove(tracked);
-    try testing.expectEqual(0, countLiveBits(&clocks));
+    try testing.expectEqual(0, clocks.countLiveBits());
 }
 
 test "bitmask: put sets bit, remove clears it" {
@@ -763,18 +764,18 @@ test "bitmask: put sets bit, remove clears it" {
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
 
-    try testing.expectEqual(0, countLiveBits(&clocks));
+    try testing.expectEqual(0, clocks.countLiveBits());
 
     const key: ThreadClocks.Key = .{ .data = 42 };
     try clocks.put(key, 0);
 
-    try testing.expect(bitIsSet(&clocks, key));
-    try testing.expectEqual(1, countLiveBits(&clocks));
+    try testing.expect(clocks.bitIsSet(key));
+    try testing.expectEqual(1, clocks.countLiveBits());
 
     _ = clocks.remove(key);
 
-    try testing.expect(!bitIsSet(&clocks, key));
-    try testing.expectEqual(0, countLiveBits(&clocks));
+    try testing.expect(!clocks.bitIsSet(key));
+    try testing.expectEqual(0, clocks.countLiveBits());
 }
 
 test "bitmask: popcount tracks live entry count across multiple puts and removes" {
@@ -786,7 +787,7 @@ test "bitmask: popcount tracks live entry count across multiple puts and removes
     for (&keys, 0..) |*key, i| {
         key.* = .{ .data = @intCast((i + 1) * 2) };
         try clocks.put(key.*, 0);
-        try testing.expectEqual(i + 1, countLiveBits(&clocks));
+        try testing.expectEqual(i + 1, clocks.countLiveBits());
     }
 
     var live = keys.len;
@@ -794,7 +795,7 @@ test "bitmask: popcount tracks live entry count across multiple puts and removes
         if (i % 2 == 1) continue;
         _ = clocks.remove(key.*);
         live -= 1;
-        try testing.expectEqual(live, countLiveBits(&clocks));
+        try testing.expectEqual(live, clocks.countLiveBits());
     }
 }
 
@@ -808,13 +809,13 @@ test "bitmask: fork sets child bit without clearing parent bit" {
 
     try clocks.put(parent, 10);
     clocks.master.store(10, .release); // master must be >= ticks to avoid underflow in fork
-    try testing.expectEqual(1, countLiveBits(&clocks));
+    try testing.expectEqual(1, clocks.countLiveBits());
 
     _ = try clocks.fork(parent, child);
 
-    try testing.expect(bitIsSet(&clocks, parent));
-    try testing.expect(bitIsSet(&clocks, child));
-    try testing.expectEqual(2, countLiveBits(&clocks));
+    try testing.expect(clocks.bitIsSet(parent));
+    try testing.expect(clocks.bitIsSet(child));
+    try testing.expectEqual(2, clocks.countLiveBits());
 }
 
 test "bitmask: grow migrates all live bits and clears none" {
@@ -828,15 +829,15 @@ test "bitmask: grow migrates all live bits and clears none" {
         try clocks.put(key.*, @intCast(i * 10));
     }
 
-    try testing.expectEqual(keys.len, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len, clocks.countLiveBits());
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
     allocator.free(old[1]);
 
-    for (keys) |key| try testing.expect(bitIsSet(&clocks, key));
+    for (keys) |key| try testing.expect(clocks.bitIsSet(key));
 
-    try testing.expectEqual(keys.len, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len, clocks.countLiveBits());
 }
 
 test "bitmask: grow with partial removes — only live entries retain their bit" {
@@ -852,19 +853,19 @@ test "bitmask: grow with partial removes — only live entries retain their bit"
 
     for (&keys, 0..) |key, i| _ = if (i % 2 == 0) clocks.remove(key);
 
-    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len / 2, clocks.countLiveBits());
 
     const old = try clocks.grow(allocator);
     allocator.free(old[0]);
     allocator.free(old[1]);
 
-    try testing.expectEqual(keys.len / 2, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len / 2, clocks.countLiveBits());
 
     for (&keys, 0..) |key, i|
         if (i % 2 == 0)
-            try testing.expect(!bitIsSet(&clocks, key))
+            try testing.expect(!clocks.bitIsSet(key))
         else
-            try testing.expect(bitIsSet(&clocks, key));
+            try testing.expect(clocks.bitIsSet(key));
 }
 
 test "ThreadClocks: grow preserves ticks and pending lag" {
@@ -910,7 +911,7 @@ test "ThreadClocks: repeated grow keeps every entry reachable" {
     }
 
     try testing.expectEqual(min_cap * 4, clocks.pairs.len);
-    try testing.expectEqual(keys.len, countLiveBits(&clocks));
+    try testing.expectEqual(keys.len, clocks.countLiveBits());
     for (keys, 0..) |key, i| try testing.expectEqual(i, clocks.get(key, .ticks));
 }
 
@@ -926,7 +927,7 @@ test "ThreadClocks: slot reuse after remove" {
     try clocks.put(key, 9);
 
     try testing.expectEqual(9, clocks.get(key, .ticks));
-    try testing.expectEqual(1, countLiveBits(&clocks));
+    try testing.expectEqual(1, clocks.countLiveBits());
 }
 
 test "ThreadClocks: forEach visits all live entries exactly once" {
@@ -946,14 +947,14 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     var count: usize = 0;
     var ticks_sum: u32 = 0;
 
-    const cb = struct {
-        fn cb(_: ThreadClocks.Ticks, _: *ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
+    const scoped = struct {
+        fn accumulate(_: ThreadClocks.Ticks, _: *ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
             c.* += 1;
             sum.* += value.ticks;
         }
-    }.cb;
+    };
 
-    clocks.forEach(cb, .{ &count, &ticks_sum });
+    clocks.forEach(scoped.accumulate, .{ &count, &ticks_sum });
 
     try testing.expectEqual(keys.len - 1, count);
     try testing.expectEqual(250, ticks_sum);

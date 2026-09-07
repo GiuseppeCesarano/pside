@@ -246,7 +246,7 @@ test "VirtualTimeKeeper: delayEveryoneLagging visits everyone across batches" {
 
     keeper.clocks.master.store(77, .release);
 
-    const Collector = struct {
+    const scoped = struct {
         fn apply(visited: *usize, lag_sum: *usize, keys_and_lags: []const KeyAndLag) void {
             visited.* += keys_and_lags.len;
             for (keys_and_lags) |kl| lag_sum.* += kl.lag;
@@ -255,7 +255,7 @@ test "VirtualTimeKeeper: delayEveryoneLagging visits everyone across batches" {
 
     var visited: usize = 0;
     var lag_sum: usize = 0;
-    keeper.delayEveryoneLagging(Collector.apply, .{ &visited, &lag_sum });
+    keeper.delayEveryoneLagging(scoped.apply, .{ &visited, &lag_sum });
 
     try testing.expectEqual(100, visited);
     try testing.expectEqual(77 * 100, lag_sum);
@@ -263,7 +263,7 @@ test "VirtualTimeKeeper: delayEveryoneLagging visits everyone across batches" {
 
     visited = 0;
     lag_sum = 0;
-    keeper.delayEveryoneLagging(Collector.apply, .{ &visited, &lag_sum });
+    keeper.delayEveryoneLagging(scoped.apply, .{ &visited, &lag_sum });
 
     try testing.expectEqual(100, visited);
     try testing.expectEqual(0, lag_sum);

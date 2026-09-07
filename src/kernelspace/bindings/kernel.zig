@@ -321,6 +321,11 @@ pub const Task = opaque {
         };
     }
 
+    extern fn c_snapshot_executable_vmas(*Task, ?[*:0]const u8, [*]vma.Range, c_int) c_int;
+    pub fn snapshotExecutableVmas(this: *Task, filter: ?[*:0]const u8, buffer: []vma.Range) usize {
+        return @intCast(c_snapshot_executable_vmas(this, filter, buffer.ptr, @intCast(buffer.len)));
+    }
+
     extern fn c_get_task_struct(*Task) void;
     pub fn incrementReferences(this: *Task) void {
         c_get_task_struct(this);
@@ -355,11 +360,6 @@ pub const vma = struct {
             return ip -% this.begin < this.end - this.begin;
         }
     };
-
-    extern fn c_snapshot_executable_vmas(*Task, ?[*:0]const u8, [*]Range, c_int) c_int;
-    pub fn snapshotExecutable(task: *Task, filter: ?[*:0]const u8, buffer: []Range) usize {
-        return @intCast(c_snapshot_executable_vmas(task, filter, buffer.ptr, @intCast(buffer.len)));
-    }
 };
 
 pub const CharDevice = extern struct {
@@ -391,7 +391,7 @@ pub const CharDevice = extern struct {
 pub const PerfEvent = opaque {
     const PerfOverflowHandler = *const fn (*PerfEvent, *anyopaque, *PtRegs) callconv(.c) void;
 
-    pub const InitErrors = error{
+    pub const InitError = error{
         InvalidConfiguration,
         TaskNotFound,
         CpuOffline,
@@ -404,20 +404,25 @@ pub const PerfEvent = opaque {
     };
 
     extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
-    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitErrors!*PerfEvent {
+    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitError!*PerfEvent {
         const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, cntxt);
         return switch (linux.errno(rc)) {
             .SUCCESS => @ptrFromInt(rc),
-            .INVAL => InitErrors.InvalidConfiguration,
-            .SRCH => InitErrors.TaskNotFound,
-            .NODEV => InitErrors.CpuOffline,
-            .BUSY => InitErrors.HardwareBusy,
-            .OPNOTSUPP => InitErrors.NotSupported,
-            .NOMEM => InitErrors.OutOfMemory,
-            .NOENT => InitErrors.HardwareNotFound,
-            .@"2BIG" => InitErrors.InvalidAttributeSize,
-            else => InitErrors.Unexpected,
+            .INVAL => InitError.InvalidConfiguration,
+            .SRCH => InitError.TaskNotFound,
+            .NODEV => InitError.CpuOffline,
+            .BUSY => InitError.HardwareBusy,
+            .OPNOTSUPP => InitError.NotSupported,
+            .NOMEM => InitError.OutOfMemory,
+            .NOENT => InitError.HardwareNotFound,
+            .@"2BIG" => InitError.InvalidAttributeSize,
+            else => InitError.Unexpected,
         };
+    }
+
+    extern fn c_perf_event_release_kernel(*PerfEvent) c_int;
+    pub fn deinit(this: ?*PerfEvent) void {
+        if (this) |t| _ = c_perf_event_release_kernel(t);
     }
 
     extern fn c_perf_event_enable(*PerfEvent) void;
@@ -428,11 +433,6 @@ pub const PerfEvent = opaque {
     extern fn c_perf_event_disable(*PerfEvent) void;
     pub fn disable(this: *PerfEvent) void {
         c_perf_event_disable(this);
-    }
-
-    extern fn c_perf_event_release_kernel(*PerfEvent) c_int;
-    pub fn deinit(this: ?*PerfEvent) void {
-        if (this) |t| _ = c_perf_event_release_kernel(t);
     }
 
     extern fn c_perf_event_context(*PerfEvent) ?*anyopaque;
@@ -573,6 +573,7 @@ pub const preempt = struct {
     pub inline fn disable() void {
         c_preempt_disable();
     }
+
     pub inline fn enable() void {
         c_preempt_enable();
     }
@@ -625,6 +626,15 @@ pub const File = opaque {
         const rc = c_kernel_write(this, buf.ptr, buf.len, offset);
         if (rc < 0) return WriteError.WriteFailed;
         return @intCast(rc);
+    }
+
+    pub fn writeAll(this: *File, bytes: []const u8, offset: *i64) WriteError!void {
+        var written: usize = 0;
+        while (written < bytes.len) {
+            const n = try this.write(bytes[written..], offset);
+            if (n == 0) return WriteError.WriteFailed;
+            written += n;
+        }
     }
 
     extern fn c_file_size(*File) isize;

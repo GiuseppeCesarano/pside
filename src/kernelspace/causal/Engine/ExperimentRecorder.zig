@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const serialization = @import("serialization");
+const payload = @import("serialization").payload;
 
 const DiskWriter = @import("DiskWriter.zig");
 
@@ -21,7 +21,7 @@ pub fn deinit(this: *ExperimentRecorder) void {
 }
 
 pub fn start(this: *ExperimentRecorder, fd: std.os.linux.fd_t) !void {
-    try this.disk_writer.start(fd, .throughput, @sizeOf(serialization.record.Throughput), 0);
+    try this.disk_writer.start(fd, .throughput, @sizeOf(payload.records.Throughput), 0);
 }
 
 pub fn recordThroughput(
@@ -38,7 +38,7 @@ pub fn recordThroughput(
     const progress_delta: f32 = @floatFromInt(end.progress -% base.progress);
     const virtual_time: f32 = @floatFromInt(wall - injected_delay);
 
-    try this.disk_writer.push(serialization.record.Throughput{
+    try this.disk_writer.push(payload.records.Throughput{
         .relative_ip = relative_ip,
         .throughput = progress_delta / virtual_time,
         .speedup_percent = @truncate(speedup_percent),
