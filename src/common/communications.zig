@@ -1,6 +1,8 @@
 const std = @import("std");
 const iow = std.os.linux.IOCTL.IOW;
 
+pub const name = "pside";
+
 pub const Commands = enum(c_uint) {
     pub const Tag = @typeInfo(Commands).@"enum".tag_type;
     start_profiler = iow('k', 0, Data),
@@ -8,17 +10,25 @@ pub const Commands = enum(c_uint) {
     _,
 };
 
-pub const vma_name_max_len = std.math.maxInt(u8);
+pub const vma_name_max_len = std.math.maxInt(u8) + 1;
 
 pub const StartOptions = extern struct {
     pid: std.os.linux.pid_t,
     output_fd: std.os.linux.fd_t,
-    vma_name: [vma_name_max_len + 1]u8,
+    vma_name: [vma_name_max_len]u8,
     vma_name_len: u8,
     attribute_kernel_samples: bool,
 
-    pub fn init(pid: std.os.linux.pid_t, output_fd: std.os.linux.fd_t, vma_name: []const u8, attribute_kernel_samples: bool) !StartOptions {
-        if (vma_name.len > std.math.maxInt(u8)) return error.VmaNameTooLong;
+    pub const InitError = error{
+        VmaNameTooLong,
+    };
+
+    pub fn vmaNameFits(vma_name: []const u8) bool {
+        return vma_name.len <= std.math.maxInt(u8);
+    }
+
+    pub fn init(pid: std.os.linux.pid_t, output_fd: std.os.linux.fd_t, vma_name: []const u8, attribute_kernel_samples: bool) InitError!StartOptions {
+        if (!vmaNameFits(vma_name)) return InitError.VmaNameTooLong;
 
         var start_options: StartOptions = .{
             .pid = pid,
