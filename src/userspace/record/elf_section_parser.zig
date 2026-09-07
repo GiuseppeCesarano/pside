@@ -3,12 +3,34 @@ const elf = std.elf;
 
 const Program = @import("Program.zig");
 
-pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const usize {
+pub const ParseError = error{
+    ProgramUnreadable,
+    BadElf,
+    MalformedElfSection,
+    NoPsideSection,
+    NoProgressPointsWithSuchName,
+    OutOfMemory,
+    Unexpected,
+};
+
+pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ParseError![]const usize {
+    return parse(user_program, name, allocator, io) catch |err| switch (err) {
+        error.ProgramUnreadable => ParseError.ProgramUnreadable,
+        error.BadElf => ParseError.BadElf,
+        error.MalformedElfSection => ParseError.MalformedElfSection,
+        error.NoPsideSection => ParseError.NoPsideSection,
+        error.NoProgressPointsWithSuchName => ParseError.NoProgressPointsWithSuchName,
+        error.OutOfMemory => ParseError.OutOfMemory,
+        else => ParseError.Unexpected,
+    };
+}
+
+fn parse(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ![]const usize {
     const path = std.mem.span(user_program.path);
-    var file = try if (std.fs.path.isAbsolute(path))
+    var file = (if (std.fs.path.isAbsolute(path))
         std.Io.Dir.openFileAbsolute(io, path, .{})
     else
-        std.Io.Dir.cwd().openFile(io, path, .{});
+        std.Io.Dir.cwd().openFile(io, path, .{})) catch return error.ProgramUnreadable;
     defer file.close(io);
 
     var buffer: [255]u8 = undefined;
@@ -19,7 +41,7 @@ pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.
     defer allocator.free(strtab);
 
     const pside_shdr = try getSectionByName(header, &reader, ".pside_throughput", strtab) orelse return error.NoPsideSection;
-    return try findCorrectProgressPoint(header, pside_shdr, &reader, name, allocator);
+    return findCorrectProgressPoint(header, pside_shdr, &reader, name, allocator);
 }
 
 fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem.Allocator) ![]const u8 {
@@ -30,7 +52,7 @@ fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem
     } else return error.BadElf;
 
     try reader.seekTo(strtab_sh.sh_offset);
-    return try reader.interface.readAlloc(allocator, strtab_sh.sh_size);
+    return reader.interface.readAlloc(allocator, strtab_sh.sh_size);
 }
 
 fn getSectionByName(header: elf.Header, reader: *std.Io.File.Reader, target_name: []const u8, strtab: []const u8) !?std.elf.Elf64_Shdr {
@@ -58,13 +80,10 @@ fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader
         if (read_name.len == 0) return error.MalformedElfSection;
 
         // If user didn't provide a name, we take the first one we find as the target
-        if (target.len == 0) {
-            target = read_name;
-        }
+        if (target.len == 0) target = read_name;
 
-        if (std.mem.eql(u8, read_name, target)) {
+        if (std.mem.eql(u8, read_name, target))
             try list.append(allocator, addr -% header.entry);
-        }
     }
 
     if (list.items.len == 0) return error.NoProgressPointsWithSuchName;

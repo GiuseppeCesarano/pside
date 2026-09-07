@@ -2,7 +2,7 @@ const std = @import("std");
 
 const cli = @import("cli");
 const record = @import("record").record;
-const driver = @import("record").driver;
+const driver = @import("driver").driver;
 const report = @import("report").report;
 
 pub fn main(init: std.process.Init) !void {
@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn printHelp(_: cli.Options, _: std.process.Init) void {
     std.log.info(
-        \\pside — a causal profiler for Linux
+        \\pside: a causal profiler for Linux
         \\
         \\  Causal profiling measures the actual impact of speeding up a code
         \\  location on overall program throughput, by virtually "optimizing"

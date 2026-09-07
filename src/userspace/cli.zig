@@ -53,7 +53,7 @@ fn OptionsImpl(ItType: type) type {
                 const index = std.mem.findScalar(type, &map.types, Type) orelse
                     @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
 
-                return @enumFromInt(index);
+                return @fromBackingInt(@intCast(index));
             }
         };
 
@@ -85,7 +85,7 @@ fn OptionsImpl(ItType: type) type {
                 const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
 
                 inline for (allowed_types.map.types, 0..) |Type, i| {
-                    if (i == @intFromEnum(this.type_tag)) {
+                    if (i == @backingInt(this.type_tag)) {
                         @as(*Type, @ptrCast(@alignCast(field_ptr))).* = @field(value, allowed_types.map.names[i]);
                         return;
                     }
@@ -174,9 +174,7 @@ fn OptionsImpl(ItType: type) type {
         fn createFlagsInfo(FlagsSchema: type) [@typeInfo(FlagsSchema).@"struct".field_names.len]FlagInfo {
             const info = @typeInfo(FlagsSchema);
 
-            if (info != .@"struct") {
-                @compileError("Input must be a struct\n");
-            }
+            if (info != .@"struct") @compileError("Input must be a struct\n");
 
             comptime var runtime_flags: [info.@"struct".field_names.len]FlagInfo = undefined;
             comptime for (info.@"struct".field_names, info.@"struct".field_types, &runtime_flags) |name, Type, *runtime_flag| {
@@ -278,7 +276,7 @@ test "all types via =value" {
         b: bool = false,
     };
 
-    const parsed = ((OptionsTest{ .args = std.mem.splitScalar(u8, "-i32=10 -i64=20 -u32=30 -u64=40 -f32=1.5 -f64=2.25 -b=true", ' ') }).parse(Flags)).flags;
+    const parsed = (OptionsTest{ .args = std.mem.splitScalar(u8, "-i32=10 -i64=20 -u32=30 -u64=40 -f32=1.5 -f64=2.25 -b=true", ' ') }).parse(Flags).flags;
 
     try std.testing.expect(parsed.i32 == 10);
     try std.testing.expect(parsed.i64 == 20);
@@ -296,7 +294,7 @@ test "space separated" {
         s: []const u8 = "default",
     };
 
-    const parsed = ((OptionsTest{ .args = std.mem.splitScalar(u8, "-x 999 -y 123.75 -s hello", ' ') }).parse(Flags)).flags;
+    const parsed = (OptionsTest{ .args = std.mem.splitScalar(u8, "-x 999 -y 123.75 -s hello", ' ') }).parse(Flags).flags;
 
     try std.testing.expect(parsed.x == 999);
     try std.testing.expect(std.math.approxEqAbs(f64, parsed.y, 123.75, 0.0001));
@@ -305,21 +303,21 @@ test "space separated" {
 
 test "bool auto-true" {
     const Flags = struct { verbose: bool = false };
-    const parsed = ((OptionsTest{ .args = std.mem.splitScalar(u8, "-verbose", ' ') }).parse(Flags)).flags;
+    const parsed = (OptionsTest{ .args = std.mem.splitScalar(u8, "-verbose", ' ') }).parse(Flags).flags;
 
     try std.testing.expect(parsed.verbose == true);
 }
 
 test "string with =" {
     const Flags = struct { name: []const u8 = "" };
-    const parsed = ((OptionsTest{ .args = std.mem.splitScalar(u8, "-name=alpha", ' ') }).parse(Flags)).flags;
+    const parsed = (OptionsTest{ .args = std.mem.splitScalar(u8, "-name=alpha", ' ') }).parse(Flags).flags;
 
     try std.testing.expect(std.mem.eql(u8, parsed.name, "alpha"));
 }
 
 test "last wins" {
     const Flags = struct { x: i32 = 0 };
-    const parsed = ((OptionsTest{ .args = std.mem.splitScalar(u8, "-x=1 -x=2 -x=3", ' ') }).parse(Flags)).flags;
+    const parsed = (OptionsTest{ .args = std.mem.splitScalar(u8, "-x=1 -x=2 -x=3", ' ') }).parse(Flags).flags;
 
     try std.testing.expect(parsed.x == 3);
 }

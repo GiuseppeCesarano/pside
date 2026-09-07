@@ -1,7 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const calling_user = @import("calling_user.zig");
+const UserIds = @import("UserIds");
 const Program = @import("Program.zig");
 
 const TracedProcess = @This();
@@ -12,17 +12,40 @@ const arch_specific = switch (@import("builtin").cpu.arch) {
 };
 
 const UserRegs = arch_specific.UserRegs;
-const SpawnError = error{
+const ChildStartError = error{
     ChildDead,
     ParentDead,
     UnexpectedSignal,
 };
 
+pub const SpawnError = error{
+    CouldNotFork,
+    ChildDied,
+    ChildNotTraceable,
+    CouldNotReadEntrypoint,
+    Unexpected,
+};
+
+pub const StartError = error{ ChildDied, ChildNotTraceable, Unexpected };
+pub const KillError = error{ PermissionDenied, ProcessNotFound, Unexpected };
+pub const WaitError = error{WaitFailed};
+pub const PatchError = error{ ChildDied, ChildNotTraceable, CouldNotMapInChild, Unexpected };
+
 pid: linux.pid_t,
 elf_entrypoint: usize,
 old_entry_ins: usize,
 
-pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
+pub fn spawn(tracee_exe: Program, io: std.Io) SpawnError!TracedProcess {
+    return spawnTraced(tracee_exe, io) catch |err| switch (err) {
+        error.SystemResources => SpawnError.CouldNotFork,
+        error.ChildExited, error.ChildKilled => SpawnError.ChildDied,
+        error.ProcessNotFound, error.PermissionDenied, error.DeviceBusy, error.InputOutput => SpawnError.ChildNotTraceable,
+        error.EndOfStream, error.ReadFailed => SpawnError.CouldNotReadEntrypoint,
+        else => SpawnError.Unexpected,
+    };
+}
+
+fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     const fork_rc = linux.fork();
     const child_pid: linux.pid_t = switch (linux.errno(fork_rc)) {
         .SUCCESS => @intCast(fork_rc),
@@ -50,7 +73,7 @@ pub fn spawn(tracee_exe: Program, io: std.Io) !TracedProcess {
 }
 
 fn childStart(tracee_exe: Program) !void {
-    switch (linux.errno(linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0))) {
+    switch (linux.errno(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0))) {
         .SUCCESS => {},
         .ACCES => return error.AccessDenied,
         .BADF => return error.InvalidFileDescriptor,
@@ -63,9 +86,12 @@ fn childStart(tracee_exe: Program) !void {
         else => return error.Unexpected,
     }
 
-    if (linux.getppid() == 1) return SpawnError.ParentDead;
+    if (linux.getppid() == 1) return error.ParentDead;
 
-    if (!tracee_exe.is_sudo) try calling_user.dropToCallingUser(tracee_exe.enviroment_map);
+    if (!tracee_exe.is_sudo and linux.geteuid() == 0) {
+        if (try UserIds.sudoCallerFromEnviron(tracee_exe.enviroment_map)) |calling_user|
+            try calling_user.setCurrentProcessIds();
+    }
 
     try ptrace.traceMe();
     try raise(.STOP);
@@ -121,10 +147,18 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
         if (try reader.interface.discardShort(@sizeOf(usize)) < @sizeOf(usize)) return std.Io.Reader.Error.EndOfStream;
     }
 
-    return try reader.interface.takeInt(usize, .native);
+    return reader.interface.takeInt(usize, .native);
 }
 
-pub fn start(this: TracedProcess) !void {
+pub fn start(this: TracedProcess) StartError!void {
+    return this.startTraced() catch |err| switch (err) {
+        error.ProcessNotFound => StartError.ChildDied,
+        error.PermissionDenied, error.DeviceBusy, error.InputOutput => StartError.ChildNotTraceable,
+        else => StartError.Unexpected,
+    };
+}
+
+fn startTraced(this: TracedProcess) !void {
     var regs = try ptrace.getRegs(this.pid);
     regs.setIp(this.elf_entrypoint);
     try ptrace.setRegs(this.pid, regs);
@@ -133,30 +167,30 @@ pub fn start(this: TracedProcess) !void {
     try ptrace.detach(this.pid);
 }
 
-pub fn kill(this: TracedProcess) !void {
+pub fn kill(this: TracedProcess) KillError!void {
     return switch (linux.errno(linux.kill(this.pid, .KILL))) {
         .SUCCESS => {},
-        .PERM => error.PermissionDenied,
-        .SRCH => error.ProcessNotFound,
-        else => error.Unexpected,
+        .PERM => KillError.PermissionDenied,
+        .SRCH => KillError.ProcessNotFound,
+        else => KillError.Unexpected,
     };
 }
 
-pub fn wait(this: TracedProcess) !void {
+pub fn wait(this: TracedProcess) WaitError!void {
     var status: i32 = undefined;
-    if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return error.WaitPidError;
-
-    const u_status: u32 = @bitCast(status);
-    if (linux.W.IFEXITED(u_status)) {
-        const code = linux.W.EXITSTATUS(u_status);
-        if (code != 0) return error.ChildExitedWithFailure;
-        return;
-    }
-
-    return error.ChildKilledBySignal;
+    if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return WaitError.WaitFailed;
 }
 
-pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
+pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
+    return this.patchTraced(addr, ctl_fd) catch |err| switch (err) {
+        error.ProcessNotFound => PatchError.ChildDied,
+        error.PermissionDenied, error.DeviceBusy, error.InputOutput => PatchError.ChildNotTraceable,
+        error.OutOfMemory, error.AccessDenied, error.MappingAlreadyExists, error.MemoryMappingNotSupported, error.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
+        else => PatchError.Unexpected,
+    };
+}
+
+fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
     const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
@@ -170,46 +204,6 @@ pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) 
 
     const payload = arch_specific.payload.get(@intFromPtr(chardev_page.ptr), final_addr + arch_specific.trampoline.len);
     try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), &payload);
-}
-
-pub fn open(
-    this: TracedProcess,
-    file_path: *anyopaque,
-    flags: linux.O,
-    perm: linux.mode_t,
-) !linux.fd_t {
-    while (true) {
-        const rc = try this.syscall(
-            .open,
-            .{ @as(u64, @intFromPtr(file_path)), @as(u32, @bitCast(flags)), perm },
-        );
-
-        return switch (linux.errno(rc)) {
-            .SUCCESS => @intCast(rc),
-            .INTR => continue,
-
-            .INVAL => error.BadPathName,
-            .ACCES => error.AccessDenied,
-            .FBIG => error.FileTooBig,
-            .OVERFLOW => error.FileTooBig,
-            .ISDIR => error.IsDir,
-            .LOOP => error.SymLinkLoop,
-            .MFILE => error.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => error.NameTooLong,
-            .NFILE => error.SystemFdQuotaExceeded,
-            .NODEV => error.NoDevice,
-            .NOENT => error.FileNotFound,
-            .SRCH => error.FileNotFound,
-            .NOMEM => error.SystemResources,
-            .NOSPC => error.NoSpaceLeft,
-            .NOTDIR => error.NotDir,
-            .PERM => error.PermissionDenied,
-            .EXIST => error.PathAlreadyExists,
-            .BUSY => error.DeviceBusy,
-            .ILSEQ => error.BadPathName,
-            else => error.Unexpected,
-        };
-    }
 }
 
 fn mmap(
@@ -252,6 +246,46 @@ fn mmap(
     }
 }
 
+pub fn open(
+    this: TracedProcess,
+    file_path: *anyopaque,
+    flags: linux.O,
+    perm: linux.mode_t,
+) !linux.fd_t {
+    while (true) {
+        const rc = try this.syscall(
+            .open,
+            .{ @as(u64, @intFromPtr(file_path)), @as(u32, @bitCast(flags)), perm },
+        );
+
+        return switch (linux.errno(rc)) {
+            .SUCCESS => @intCast(rc),
+            .INTR => continue,
+
+            .INVAL => error.BadPathName,
+            .ACCES => error.AccessDenied,
+            .FBIG => error.FileTooBig,
+            .OVERFLOW => error.FileTooBig,
+            .ISDIR => error.IsDir,
+            .LOOP => error.SymLinkLoop,
+            .MFILE => error.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => error.NameTooLong,
+            .NFILE => error.SystemFdQuotaExceeded,
+            .NODEV => error.NoDevice,
+            .NOENT => error.FileNotFound,
+            .SRCH => error.FileNotFound,
+            .NOMEM => error.SystemResources,
+            .NOSPC => error.NoSpaceLeft,
+            .NOTDIR => error.NotDir,
+            .PERM => error.PermissionDenied,
+            .EXIST => error.PathAlreadyExists,
+            .BUSY => error.DeviceBusy,
+            .ILSEQ => error.BadPathName,
+            else => error.Unexpected,
+        };
+    }
+}
+
 pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) !usize {
     const saved_regs = try ptrace.getRegs(this.pid);
     const ip = saved_regs.ip();
@@ -260,7 +294,7 @@ pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) !usize
     try ptrace.poke(.text, this.pid, ip, arch_specific.syscall);
 
     var tmp_regs = saved_regs;
-    tmp_regs.prep_syscall(syscall_id, args);
+    tmp_regs.prepSyscall(syscall_id, args);
     try ptrace.setRegs(this.pid, tmp_regs);
 
     try ptrace.singleStep(this.pid);
@@ -299,7 +333,7 @@ const ptrace = struct {
             .IO => PtraceError.InputOutput,
             .PERM => PtraceError.PermissionDenied,
             .BUSY => PtraceError.DeviceBusy,
-            else => error.Unexpected,
+            else => PtraceError.Unexpected,
         };
     }
 
@@ -338,7 +372,7 @@ const ptrace = struct {
                     .stop => if (sig == linux.SIG.STOP and event == 0) return,
                 }
 
-                const signal_to_forward: u32 = if (sig == linux.SIG.TRAP or sig == linux.SIG.STOP) 0 else @intFromEnum(sig);
+                const signal_to_forward: u32 = if (sig == linux.SIG.TRAP or sig == linux.SIG.STOP) 0 else @backingInt(sig);
 
                 try ptraceSysCall(linux.PTRACE.CONT, pid, 0, signal_to_forward);
             }

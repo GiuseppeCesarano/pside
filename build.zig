@@ -2,8 +2,8 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) !void {
     const is_release_bundle = b.option(bool, "release", "Build CLI in ReleaseSmall and Kernel in ReleaseFast") orelse false;
-    const optimize = if (is_release_bundle) .ReleaseSmall else b.standardOptimizeOption(.{});
-    const kernel_optimize = if (is_release_bundle) .ReleaseFast else optimize;
+    const optimize = if (is_release_bundle) .small else b.standardOptimizeOption(.{});
+    const kernel_optimize = if (is_release_bundle) .fast else optimize;
     const target = b.standardTargetOptions(.{
         .whitelist = &.{.{
             .os_tag = .linux,
@@ -78,13 +78,13 @@ pub fn build(b: *std.Build) !void {
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "description", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "license", {});
     try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "pside_engine_release", {});
-    zig_kernel_obj.bundle_compiler_rt = true;
+    zig_kernel_obj.bundle_compiler_rt = false;
     zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;
 
     // kbuild expects a .<obj>.cmd file for every prebuilt object it links.
     const kbuild_cmd_name = try std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" });
-    const kbuild_debug_flags = if (kernel_optimize == .Debug) "ccflags-y := -DDEBUG" else "";
+    const kbuild_debug_flags = if (kernel_optimize == .debug) "ccflags-y := -DDEBUG" else "";
     const strip_kernel_mod = "strip --strip-debug" ++
         " --remove-section=.BTF" ++
         " --remove-section=.BTF.ext" ++
@@ -135,6 +135,23 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    const user_ids_mod = b.addModule("UserIds", .{
+        .root_source_file = b.path("src/userspace/UserIds.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const driver_mod = b.addModule("driver", .{
+        .root_source_file = b.path("src/userspace/driver/driver.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "cli", .module = cli_mod },
+            .{ .name = "communications", .module = communications_mod },
+            .{ .name = "UserIds", .module = user_ids_mod },
+        },
+    });
+
     const record_mod = b.addModule("record", .{
         .root_source_file = b.path("src/userspace/record/record.zig"),
         .target = target,
@@ -143,15 +160,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
             .{ .name = "serialization", .module = serialization_mod },
-        },
-    });
-
-    const output_file_parse_results_mod = b.addModule("OutputFileParseResults", .{
-        .root_source_file = b.path("src/userspace/report/OutputFileParseResults.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "serialization", .module = serialization_mod },
+            .{ .name = "UserIds", .module = user_ids_mod },
         },
     });
 
@@ -162,7 +171,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
-            .{ .name = "OutputFileParseResults", .module = output_file_parse_results_mod },
+            .{ .name = "serialization", .module = serialization_mod },
         },
     });
 
@@ -174,6 +183,7 @@ pub fn build(b: *std.Build) !void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "cli", .module = cli_mod },
+                .{ .name = "driver", .module = driver_mod },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "report", .module = report_mod },
             },
@@ -199,6 +209,9 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli_mod })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bindings_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = report_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = record_mod })).step);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = driver_mod })).step);
 
     const standalone_tests = [_]struct {
         name: []const u8,

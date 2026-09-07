@@ -1,68 +1,61 @@
 const std = @import("std");
-
 const Program = @This();
+
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
 enviroment_map: std.process.Environ,
 is_sudo: bool,
 
-pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
-    if (!std.mem.eql(u8, parsed.flags.c, "")) {
-        if (parsed.positional_arguments != null) {
-            std.log.err("Give the program either positionally or with -c, not both.", .{});
-            return error.ExtraPositionalArguments;
-        }
+pub const InitError = error{
+    ExtraPositionalArguments,
+    UnspecifiedCommand,
+    NoPath,
+    NotFoundInPath,
+    ProgramNotFound,
+    ProgramAccessDenied,
+    OutOfMemory,
+    Unexpected,
+};
 
-        return try initFromString(parsed.flags.c, environ, allocator, io);
+pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError!Program {
+    if (!std.mem.eql(u8, parsed.flags.c, "")) {
+        if (parsed.positional_arguments != null) return InitError.ExtraPositionalArguments;
+
+        return initFromString(parsed.flags.c, environ, allocator, io);
     }
 
     if (parsed.positional_arguments) |args| {
         std.debug.assert(args.count() != 0);
         if (args.count() == 1) {
             var it = args;
-            return try initFromString(it.next().?, environ, allocator, io);
+            return initFromString(it.next().?, environ, allocator, io);
         }
 
         return initWithIterator(args, args.count(), environ, allocator, io);
     }
 
-    std.log.err("No program to profile.\n\tUsage: sudo pside record <program> [args…]", .{});
-    return error.UnspecifiedCommand;
+    return InitError.UnspecifiedCommand;
 }
 
-pub fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
+fn initFromString(string: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError!Program {
     var count: usize = 0;
     var counter = std.mem.tokenizeScalar(u8, string, ' ');
     while (counter.next()) |_| count += 1;
 
-    if (count == 0) {
-        std.log.err("No program to profile.", .{});
-        return error.UnspecifiedCommand;
-    }
+    if (count == 0) return InitError.UnspecifiedCommand;
 
     return initWithIterator(std.mem.tokenizeScalar(u8, string, ' '), count, environ, allocator, io);
 }
 
-pub fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) !Program {
+fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError!Program {
     var it = iterator;
 
-    var first_token = it.next().?;
+    var first_token = it.next() orelse return InitError.UnspecifiedCommand;
     const is_sudo = isSudo(first_token);
 
-    if (is_sudo) {
-        first_token = it.next().?;
-    }
+    if (is_sudo) first_token = it.next() orelse return InitError.UnspecifiedCommand;
 
-    const path = expandBinaryPath(first_token, environ, allocator, io) catch |err| {
-        switch (err) {
-            error.NoPath => std.log.err("'PATH' environment variable is not set", .{}),
-            error.NotFoundInPath => std.log.err("Command not found: {s}", .{first_token}),
-            error.FileNotFound => std.log.err("No such file or directory: {s}", .{first_token}),
-            error.AccessDenied => std.log.err("Permission denied: {s}", .{first_token}),
-            else => std.log.err("Failed to resolve path for '{s}': {s}", .{ first_token, @errorName(err) }),
-        }
-        return err;
-    };
+    const path = try expandBinaryPath(first_token, environ, allocator, io);
 
     const path_span = std.mem.span(path);
     const name = std.fs.path.basename(path_span);
@@ -90,14 +83,18 @@ fn isSudo(path: []const u8) bool {
     return std.mem.eql(u8, path[start..], "sudo");
 }
 
-fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) ![*:0]const u8 {
+fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError![*:0]const u8 {
     if (std.mem.findScalar(u8, binary_path, '/') != null) {
-        _ = try std.Io.Dir.cwd().statFile(io, binary_path, .{});
+        _ = std.Io.Dir.cwd().statFile(io, binary_path, .{}) catch |err| return switch (err) {
+            error.FileNotFound => InitError.ProgramNotFound,
+            error.AccessDenied => InitError.ProgramAccessDenied,
+            else => InitError.Unexpected,
+        };
         const copy = try allocator.dupeSentinel(u8, binary_path, 0);
         return @ptrCast(copy.ptr);
     }
 
-    const path_env = environ.getPosix("PATH") orelse return error.NoPath;
+    const path_env = environ.getPosix("PATH") orelse return InitError.NoPath;
     var path_it = std.mem.tokenizeScalar(u8, path_env, ':');
 
     return file: while (path_it.next()) |current_path| {
@@ -108,7 +105,7 @@ fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, alloc
             const path = try std.mem.concatWithSentinel(allocator, u8, &.{ current_path, "/", binary_path }, 0);
             break :file @ptrCast(path.ptr);
         } else |_| {}
-    } else break :file error.NotFoundInPath;
+    } else break :file InitError.NotFoundInPath;
 }
 
 pub fn deinit(this: Program, allocator: std.mem.Allocator) void {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing = std.testing;
 
 pub const syscall: []const u8 = &.{ 0x0f, 0x05 }; // syscall
 pub const interrupt: []const u8 = &.{0xcc}; // int3
@@ -80,7 +81,7 @@ pub const UserRegs = struct {
         return this.rax;
     }
 
-    pub fn prep_syscall(this: *UserRegs, syscall_id: std.os.linux.SYS, args: anytype) void {
+    pub fn prepSyscall(this: *UserRegs, syscall_id: std.os.linux.SYS, args: anytype) void {
         const fields = [_]usize{
             @offsetOf(UserRegs, "rdi"),
             @offsetOf(UserRegs, "rsi"),
@@ -99,8 +100,6 @@ pub const UserRegs = struct {
         }
     }
 };
-
-const testing = std.testing;
 
 test "payload: immediates land at the patched offsets" {
     const inc_addr: usize = 0x1122334455667788;
@@ -126,10 +125,10 @@ test "trampoline: destination lands at the patched offset" {
     try testing.expectEqualSlices(u8, &.{ 0xff, 0xe0 }, t[10..12]);
 }
 
-test "UserRegs: prep_syscall fills id and argument registers" {
+test "UserRegs: prepSyscall fills id and argument registers" {
     var regs: UserRegs = std.mem.zeroes(UserRegs);
 
-    regs.prep_syscall(.openat, .{ 1, 2, 3, 4, 5, 6 });
+    regs.prepSyscall(.openat, .{ 1, 2, 3, 4, 5, 6 });
 
     try testing.expectEqual(@backingInt(std.os.linux.SYS.openat), regs.rax);
     try testing.expectEqual(1, regs.rdi);
