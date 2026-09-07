@@ -3,6 +3,12 @@
 Pside is a modern causal profiler built leveraging Linux tracepoints and advanced OS features, with a specific focus on the performance of the measurement engine.
 While Pside’s measurement algorithm is not identical to [Coz](https://www.youtube.com/watch?v=jE0V-p1odPg), their talk remains the best resource for understanding the underlying principles of how such a profiler operates.
 
+## Supported platforms
+
+Linux on **x86_64 only** (for now). `build.zig` whitelists `x86_64-linux`, so anything else
+fails at configure time; the kernel-side register layouts and the syscall-patching
+path (`bindings/kernel.zig`, `record/traced/x86_64.zig`) are x86_64-specific.
+
 ## Build
 
 To use Pside, you will need the Zig master compiler, kernel headers, and the standard toolchain for building kernel modules. Once these requirements are satisfied, you can compile the profiler by running:
@@ -36,7 +42,7 @@ To generate a cleaner profile, you can aggregate more data. If you have already 
 
 Pside will automatically aggregate the new runs into the existing file.
 
-**NOTE:** If you recompile your target binary, you should delete or rename the old profile file. Otherwise, Pside will aggregate the new runs with the old data, resulting in an incoherent profile. A feature to automatically detect binary changes is planned.
+**NOTE:** Pside hashes the profiled binary into the profile header, so recording against a recompiled binary is refused rather than silently aggregated into an incoherent profile. The hash currently covers only the main executable, not libraries passed with `-l`.
 
 ## Benchmarks 
 

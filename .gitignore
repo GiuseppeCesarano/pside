@@ -3,3 +3,7 @@ zig-out/
 zig-pkg/
 *.pside
 *.o
+
+*.json
+/examples/*
+!/examples/*.cpp
