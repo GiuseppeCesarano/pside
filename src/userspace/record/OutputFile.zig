@@ -1,35 +1,55 @@
 const std = @import("std");
 
 const serialization = @import("serialization");
+const payload = serialization.payload;
+const UserIds = @import("UserIds");
 
 const OutputFile = @This();
 
 file: std.Io.File,
 
-pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, vma_name: []const u8, owner: ?[2]u32) !OutputFile {
+pub const WriteError = error{CouldNotWrite};
+
+pub const OpenError = error{
+    HashDontMatch,
+    NotAPsideFile,
+    ProgramUnreadable,
+    CouldNotCreate,
+    OutOfMemory,
+    Unexpected,
+};
+
+pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, vma_name: []const u8, owner: ?UserIds) OpenError!OutputFile {
     const file_name = std.fs.path.basename(program_path);
 
     const out_name = try std.mem.concat(allocator, u8, &.{ file_name, ".pside" });
     defer allocator.free(out_name);
 
-    const full_path = try std.Io.Dir.cwd().realPathFileAlloc(io, program_path, allocator);
+    const full_path = std.Io.Dir.cwd().realPathFileAlloc(io, program_path, allocator) catch |err| return switch (err) {
+        error.OutOfMemory => OpenError.OutOfMemory,
+        else => OpenError.ProgramUnreadable,
+    };
     defer allocator.free(full_path);
 
-    const program_hash = try computeFileHash(allocator, io, program_path);
+    const program_hash = computeFileHash(allocator, io, program_path) catch |err| return switch (err) {
+        error.OutOfMemory => OpenError.OutOfMemory,
+        else => OpenError.ProgramUnreadable,
+    };
 
-    return .{ .file = if (std.Io.Dir.cwd().openFile(io, out_name, .{ .mode = .read_write })) |f| blk: {
+    if (std.Io.Dir.cwd().openFile(io, out_name, .{ .mode = .read_write })) |f| {
         errdefer f.close(io);
-        validate(f, io, program_hash) catch |err| {
-            if (err == error.HashDontMatch)
-                std.log.err("{s} was recorded from a different build of the binary; delete it to start a fresh profile.", .{out_name});
-            return err;
-        };
+        try validate(f, io, program_hash);
         std.log.info("Aggregating runs into existing {s}", .{out_name});
-        break :blk f;
-    } else |_| blk: {
+        return .{ .file = f };
+    } else |_| {
         std.log.info("Recording to new {s}", .{out_name});
-        break :blk try create(io, out_name, owner, full_path, vma_name, program_hash);
-    } };
+        const f = create(io, out_name, owner, full_path, vma_name, program_hash) catch return OpenError.CouldNotCreate;
+        return .{ .file = f };
+    }
+}
+
+pub fn close(this: OutputFile, io: std.Io) void {
+    this.file.close(io);
 }
 
 fn computeFileHash(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -46,23 +66,18 @@ fn computeFileHash(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !
     return out;
 }
 
-pub fn close(this: OutputFile, io: std.Io) void {
-    this.file.close(io);
-}
-
-fn validate(file: std.Io.File, io: std.Io, program_hash: [32]u8) !void {
+fn validate(file: std.Io.File, io: std.Io, program_hash: [32]u8) OpenError!void {
     var buf: [4096]u8 = undefined;
     var reader = file.reader(io, &buf);
-    const header = try reader.interface.takeStruct(serialization.Header, .little);
+    const header = serialization.Header.read(&reader.interface) catch return OpenError.NotAPsideFile;
 
-    if (!header.isValid()) return error.NotAPsideFile;
-    if (!std.mem.eql(u8, &program_hash, &header.binary_hash)) return error.HashDontMatch;
+    if (!std.mem.eql(u8, &program_hash, &header.binary_hash)) return OpenError.HashDontMatch;
 }
 
 fn create(
     io: std.Io,
     out_name: []const u8,
-    owner: ?[2]u32,
+    owner: ?UserIds,
     program_path: []const u8,
     vma_name: []const u8,
     program_hash: [32]u8,
@@ -70,38 +85,20 @@ fn create(
     const f = try std.Io.Dir.cwd().createFile(io, out_name, .{});
     errdefer f.close(io);
 
-    if (owner) |o| try f.setOwner(io, o[0], o[1]);
+    if (owner) |o| try f.setOwner(io, o.uid, o.gid);
 
     var buf: [4096]u8 = undefined;
     var writer = f.writer(io, &buf);
     const w = &writer.interface;
 
-    try w.writeAll(std.mem.asBytes(&serialization.Header.init(program_hash)));
-    try writeFrame(w, .binary_path, program_path);
-    try writeVmaFrame(w, 0, vma_name);
+    const header: serialization.Header = .init(program_hash);
+    const binary_path: payload.Frame = .{ .tag = .binary_path, .body = program_path };
+    const vma: payload.Vma = .{ .id = 0, .name = vma_name }; // TODO: id should not be always 0.
+
+    try header.write(w);
+    try binary_path.write(w);
+    try vma.write(w);
     try writer.flush();
 
     return f;
-}
-
-fn writeFrame(w: *std.Io.Writer, tag: serialization.Tag, payload: []const u8) !void {
-    const header: serialization.FrameHeader = .{ .tag = tag, .length = @intCast(payload.len) };
-    try w.writeAll(std.mem.asBytes(&header));
-    try w.writeAll(payload);
-    try writePad(w, payload.len);
-}
-
-fn writeVmaFrame(w: *std.Io.Writer, vma_id: u32, name: []const u8) !void {
-    const vma_frame: serialization.VmaFrame = .{ .vma_id = vma_id };
-    const length = @sizeOf(serialization.VmaFrame) + name.len;
-    const header: serialization.FrameHeader = .{ .tag = .vma, .length = @intCast(length) };
-    try w.writeAll(std.mem.asBytes(&header));
-    try w.writeAll(std.mem.asBytes(&vma_frame));
-    try w.writeAll(name);
-    try writePad(w, length);
-}
-
-fn writePad(w: *std.Io.Writer, length: usize) !void {
-    const pad = serialization.pad8(length) - length;
-    if (pad != 0) try w.splatByteAll(0, pad);
 }
