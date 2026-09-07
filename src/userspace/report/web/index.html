@@ -224,7 +224,7 @@ html, body {
 }
 .section-item.active .name { color: var(--accent); }
 
-.section-item .stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); }
+.section-item .stats { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); align-items: center; }
 .section-item .stats .pill {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -266,8 +266,59 @@ html, body {
     text-overflow: ellipsis;
 }
 #section-title.placeholder { color: var(--text-dim); font-weight: 300; font-size: 13px; }
-#section-summary { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
-#section-summary b { color: var(--text-mid); font-weight: 400; }
+#section-summary {
+    font-size: 11px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+#section-summary .pill {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 1px 6px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -1px 1px rgba(0,0,0,.35);
+}
+
+#unit-picker {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex-shrink: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -1px 1px rgba(0,0,0,.35);
+}
+#unit-picker .unit-lbl {
+    font-size: 9px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 0 5px 0 4px;
+}
+#unit-picker button {
+    font-family: inherit;
+    font-size: 10px;
+    color: var(--text-dim);
+    background: transparent;
+    border: 0;
+    border-radius: 2px;
+    padding: 2px 7px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color .12s, background .12s, transform .12s var(--ease-bounce);
+}
+#unit-picker button:hover { color: var(--text); background: var(--bg3-glass); }
+#unit-picker button:active { transform: scale(.94); }
+#unit-picker button.active {
+    color: var(--bg);
+    background: var(--accent);
+    font-weight: 600;
+}
 
 #empty-state {
     flex: 1;
@@ -293,10 +344,10 @@ html, body {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 12px 20px 24px;
+    padding: 10px 20px 24px;
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 2px;
     min-height: 0;
 }
 #charts-scroll::-webkit-scrollbar { width: 6px; }
@@ -304,106 +355,112 @@ html, body {
 #charts-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
 .ip-card {
-    --rx: 0deg;
-    --ry: 0deg;
-    --sc: 1;
+    background: color-mix(in srgb, var(--bg2) 55%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+    border-radius: 7px;
+    opacity: 0;
+    position: relative;
+    transform: translateY(4px);
+    animation: cardIn 0.2s ease forwards;
+    flex-shrink: 0;
+    transition: background .12s, border-color .12s, margin .25s var(--ease-bounce);
+}
+@keyframes cardIn { to { opacity: 1; transform: none; } }
+.ip-card:not(.expanded) { margin: 2px 0; }
+.ip-card:hover {
+    background: color-mix(in srgb, var(--vc-fg, var(--text-mid)) 8%, var(--bg2));
+    border-color: color-mix(in srgb, var(--vc-fg, var(--border2)) 35%, var(--border));
+}
+.ip-card.expanded {
     background: var(--bg2-glass);
     backdrop-filter: blur(14px) saturate(160%);
     -webkit-backdrop-filter: blur(14px) saturate(160%);
     border: 1px solid var(--border);
-    border-radius: 5px;
-    overflow: hidden;
-    opacity: 0;
-    position: relative;
-    transform: translateY(6px) perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--sc));
-    transform-style: preserve-3d;
-    animation: cardIn 0.2s ease forwards;
-    flex-shrink: 0;
-    transition: border-color 0.15s, box-shadow 0.2s;
+    border-radius: 7px;
+    margin: 8px 0;
+    box-shadow: 0 16px 34px -20px rgba(0,0,0,.75);
 }
-.ip-card.tilt-settle { transition: border-color 0.15s, box-shadow 0.2s, transform 0.4s var(--ease-bounce); }
-.ip-card:hover { border-color: var(--border2); box-shadow: 0 20px 40px -18px rgba(0, 0, 0, 0.6); }
-@keyframes cardIn { to { opacity:1; transform: perspective(2200px) rotateX(var(--rx)) rotateY(var(--ry)) scale(var(--sc)); } }
-
-.ip-card::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: radial-gradient(circle at var(--mx, 50%) var(--my, 50%), rgba(255,255,255,.08), transparent 60%);
-    opacity: 0;
-    transition: opacity .25s;
-    pointer-events: none;
-    z-index: 2;
-}
-.ip-card:hover::after { opacity: 1; }
-.ip-card.expanded::after { display: none; }
 
 .ip-card-header {
-    padding: 9px 14px;
-    display: flex;
+    padding: 6px 10px 6px 9px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 200px 84px 12px;
     align-items: center;
-    gap: 12px;
+    gap: 16px;
     cursor: pointer;
     user-select: none;
-    transition: background 0.12s;
 }
-.ip-card-header:hover { background: var(--bg3-glass); }
-.ip-card-header:active { transform: scale(0.997); }
 .ip-card.expanded .ip-card-header {
     border-bottom: 1px solid var(--border);
     background: var(--bg3-glass);
+    padding: 9px 12px;
 }
 
-.loc-ip {
-    color: var(--text);
+.row-loc {
+    min-width: 0;
     font-size: 12px;
-    font-weight: 500;
-    letter-spacing: .04em;
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-}
-.loc-dot {
-    flex-shrink: 0;
-    width: 9px; height: 9px;
-    border-radius: 2px;
-    margin-right: 8px;
-    box-shadow: 0 0 7px -1px currentColor;
-}
-.loc-txt {
-    min-width: 0;
+    color: var(--text-mid);
+    letter-spacing: .02em;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    transition: color .12s;
+}
+.ip-card:hover .row-loc, .ip-card.expanded .row-loc { color: var(--text); }
+
+.row-band { position: relative; height: 14px; }
+.row-band i { position: absolute; display: block; }
+.rb-track { left: 0; right: 0; top: 6px; height: 2px; border-radius: 1px; background: var(--border); }
+.rb-fill { top: 5px; height: 4px; border-radius: 2px; opacity: .45; transition: opacity .15s; }
+.rb-zero { top: 1px; height: 12px; border-left: 1px dashed color-mix(in srgb, var(--text-dim) 55%, transparent); }
+.rb-mid { top: 1px; height: 12px; width: 2px; border-radius: 1px; transform: translateX(-1px); }
+.row-band.over::after {
+    content: '›';
+    position: absolute; right: -8px; top: -2px;
+    font-size: 11px; color: var(--text-dim);
+}
+.ip-card:hover .rb-fill { opacity: .8; }
+
+.row-num {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: .01em;
+    text-align: right;
     white-space: nowrap;
+    color: var(--vc-fg, var(--text-dim));
+    font-variant-numeric: tabular-nums;
 }
-
-.ip-pills { display: flex; gap: 8px; font-size: 10px; color: var(--text-dim); flex-shrink: 0; }
-.ip-pills .pill {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 2px;
-    padding: 0 5px;
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), inset 0 -1px 1px rgba(0,0,0,.35);
+.chart-counts .stat[data-note]::after {
+    content: attr(data-note);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    width: 268px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    color: var(--text-mid);
+    font-style: normal;
+    font-size: 10.5px;
+    line-height: 1.5;
+    text-align: left;
+    white-space: normal;
+    box-shadow: 0 12px 26px -10px rgba(0,0,0,0.85);
+    opacity: 0;
+    transform: translate(-50%, -3px);
+    pointer-events: none;
+    transition: opacity 0.14s, transform 0.14s;
+    z-index: 20;
 }
-.ip-pills .pill.warn { border-color: var(--warn); color: var(--warn); }
-.ip-pills .pill.win {
-    border-color: var(--accent);
-    color: var(--accent);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 8px -2px var(--accent);
-    animation: winGlow 2.6s ease-in-out infinite;
+.chart-counts .stat[data-note]::after {
+    top: auto;
+    bottom: calc(100% + 7px);
+    left: 0;
+    width: 270px;
+    transform: translate(0, 3px);
 }
-@keyframes winGlow {
-    50% { box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 12px 0 var(--accent); }
-}
-
-.ip-card.clear-win {
-    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-    box-shadow: 0 0 0 1px var(--accent), 0 0 16px -6px var(--accent);
-}
-.ip-card.clear-win .loc-dot { box-shadow: 0 0 7px -1px currentColor, 0 0 10px -2px var(--accent); }
-.ip-card.clear-win:hover { box-shadow: 0 0 0 1px var(--accent), 0 20px 40px -18px rgba(0, 0, 0, 0.6), 0 0 22px -5px var(--accent); }
+.chart-counts .stat[data-note]:hover::after { opacity: 1; transform: translate(0, 0); }
 
 .ip-expand-icon {
     font-size: 10px;
@@ -463,6 +520,7 @@ html, body {
 .chart-tip .tip-val { font-weight: 600; font-size: 13px; letter-spacing: .02em; }
 .chart-tip .tip-spd { color: var(--text-mid); }
 .chart-tip .tip-ci  { color: var(--text-dim); }
+.chart-tip .tip-n   { color: var(--text-dim); font-size: 10px; }
 
 .chart-legend {
     display: flex;
@@ -482,6 +540,32 @@ html, body {
     white-space: nowrap;
 }
 .chart-legend-item svg { flex-shrink: 0; display: block; }
+
+.chart-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px 28px;
+    padding: 7px 8px 3px;
+}
+.chart-counts .stat { position: relative; display: flex; flex-direction: column; gap: 1px; }
+.chart-counts .stat .k {
+    font-size: 8.5px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.chart-counts .stat .v {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-mid);
+    line-height: 1.35;
+    white-space: nowrap;
+}
+.chart-counts .stat .v u { text-decoration: none; font-weight: 400; font-size: 10px; color: var(--text-dim); }
+.chart-counts .stat[data-note] { cursor: help; }
+.chart-counts .stat.thin .v { color: #f07a8c; }
+.chart-counts .stat.thin .k { color: color-mix(in srgb, #f07a8c 55%, var(--text-dim)); }
 
 .spinner {
     width: 22px; height: 22px;
@@ -512,16 +596,16 @@ html, body {
     .section-item, .ip-card { opacity: 1; transform: none; }
     .ip-card::after { display: none !important; }
     .ip-chart-body-inner { transform: none !important; }
+    .tier-group-body, .tier-group-body-inner, .tg-icon { transition: none !important; }
+    #section-summary .pill.tier { transition: none !important; }
     .u-cursor-pt { animation: none !important; }
-    .ip-pills .pill.win { animation: none !important; }
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
     #topbar, #sidebar, #main, .ip-card { background: var(--bg2); }
     .section-item:hover, .section-item.active,
     .ip-card-header:hover, .ip-card.expanded .ip-card-header { background: var(--bg3); }
-}
-	</style>
+}</style>
     </head>
     <body>
 	<div id="bg-grid"></div>
@@ -531,8 +615,8 @@ html, body {
 		<div class="logo">p<span>side</span><span class="cursor">_</span></div>
 		<div class="sep"></div>
 		<div id="top-meta">
-		    <span><b id="meta-sections">—</b> <span id="meta-sections-l">sections</span></span>
-		    <span><b id="meta-graphs">—</b> <span id="meta-graphs-l">graphs</span></span>
+		    <span><b id="meta-sections">--</b> <span id="meta-sections-l">sections</span></span>
+		    <span><b id="meta-graphs">--</b> <span id="meta-graphs-l">graphs</span></span>
 		</div>
 		<div class="status"><div class="dot"></div>local</div>
 	    </header>
@@ -549,6 +633,7 @@ html, body {
 		<div id="section-header">
 		    <div id="section-title" class="placeholder">select a section</div>
 		    <div id="section-summary"></div>
+		    <div id="unit-picker"></div>
 		</div>
 
 		<div id="empty-state">
@@ -675,8 +760,105 @@ html, body {
 		}
 	    }
 
-	    const AUTO_EXPAND_COUNT = 3;
-	    const CLEAR_WIN_IMPACT = 10;
+	    function seriesStats(s) {
+		const n = s.points.length;
+		let lo = 0, mid = 0, hi = 0;
+		for (const p of s.points) { lo += p.ci_low; mid += p.median; hi += p.ci_high; }
+		return { base: s.points[0].median, lo: lo / n, mid: mid / n, hi: hi / n };
+	    }
+
+	    let sectionBaseline = 0;
+
+	    function medianOf(values) {
+		const a = [...values].sort((x, y) => x - y);
+		const m = a.length >> 1;
+		return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+	    }
+
+	    const UNITS = [
+		{ id: 'ns', label: 'ns', mult: 1e-3 },
+		{ id: 'us', label: '\u00b5s', mult: 1 },
+		{ id: 'ms', label: 'ms', mult: 1e3 },
+		{ id: 's',  label: 's',  mult: 1e6 },
+	    ];
+	    let unitChoice = 'auto';
+	    let unit = UNITS[1];
+
+	    function pickUnit(reference) {
+		if (unitChoice !== 'auto') return UNITS.find(u => u.id === unitChoice) || UNITS[1];
+		const a = Math.abs(reference);
+		if (!(a > 0)) return UNITS[1];
+		let best = UNITS[1], score = Infinity;
+		for (const u of UNITS) {
+		    const s = Math.abs(Math.log10(a * u.mult) - 1.5);
+		    if (s < score) { score = s; best = u; }
+		}
+		return best;
+	    }
+
+	    function fmtTp(v) {
+		const s = v * unit.mult, a = Math.abs(s);
+		if (a === 0) return '0';
+		if (a < 1e-3 || a >= 1e6) return s.toExponential(2);
+		return String(Number(s.toPrecision(3)));
+	    }
+
+	    function fmtTpDelta(v) {
+		return (v >= 0 ? '+' : '\u2212') + fmtTp(Math.abs(v));
+	    }
+
+	    function fmtAxis(v, span) {
+		const s = v * unit.mult, sp = Math.abs(span * unit.mult), a = Math.abs(s);
+		if (a === 0) return '0';
+		if (a < 1e-3 || a >= 1e6) return s.toExponential(2);
+		const dec = Math.max(0, Math.min(9, Math.ceil(-Math.log10(sp || a)) + 1));
+		return s.toFixed(dec);
+	    }
+
+	    function axisLabel() {
+		return 'throughput (points/' + unit.label + ')';
+	    }
+
+	    function renderUnitPicker() {
+		const host = document.getElementById('unit-picker');
+		if (!host) return;
+		const auto = unitChoice === 'auto' ? ` (${unit.label})` : '';
+		host.innerHTML = `<span class="unit-lbl">per</span>` +
+		    `<button data-unit="auto" class="${unitChoice === 'auto' ? 'active' : ''}">auto${auto}</button>` +
+		    UNITS.map(u => `<button data-unit="${u.id}" class="${unitChoice === u.id ? 'active' : ''}">${u.label}</button>`).join('');
+		host.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
+		    spawnSparks(e.clientX, e.clientY, 'var(--accent)', 4);
+		    setUnit(b.dataset.unit);
+		}));
+	    }
+
+	    function setUnit(choice) {
+		unitChoice = choice;
+		unit = pickUnit(sectionBaseline);
+		renderUnitPicker();
+		if (!allSeries.length) return;
+		renderSummary(allSeries);
+		cardState.forEach((state, card) => {
+		    const num = card.querySelector('.row-num');
+		    if (num) num.textContent = fmtTp(state.series._st.lo);
+		    const counts = card.querySelector('.chart-counts');
+		    if (counts) counts.replaceWith(buildCounts(state.series));
+		    if (state.plot) {
+			state.plot.axes[1].label = axisLabel();
+			state.plot.redraw(false, true);
+		    }
+		});
+	    }
+
+	    function plotRange(points) {
+		const base = points[0].median;
+		let d = 0;
+		for (const p of points)
+		    d = Math.max(d, Math.abs(p.ci_high - base), Math.abs(base - p.ci_low), Math.abs(p.median - base));
+		if (!(d > 0)) d = Math.abs(base) * 0.1 || 1;
+		const half = Math.max(d * 1.12, Math.abs(base));
+		return [base - half, base + half];
+	    }
 
 	    function renderSection(data) {
 		const scroll = document.getElementById('charts-scroll');
@@ -684,29 +866,45 @@ html, body {
 		cardState.forEach(s => s.plot?.destroy());
 		cardState.clear();
 
-		allSeries = data.filter(s => s.points.length > 0);
-
-		const displays = shortenLocations(allSeries.map(s => s.location));
-		allSeries.forEach((s, i) => { s._display = displays[i]; });
-
-		const summary = document.getElementById('section-summary');
-		summary.innerHTML = `<b>0</b> location${allSeries.length !== 1 ? 's' : ''}`;
-		countUp(summary.querySelector('b'), allSeries.length);
+		allSeries = (data || []).filter(s => s.points && s.points.length > 0);
+		allSeries.forEach(s => { s._st = seriesStats(s); });
+		allSeries.sort((a, b) => b._st.lo - a._st.lo);
+		sectionBaseline = allSeries.length ? medianOf(allSeries.map(s => s._st.base)) : 0;
+		unit = pickUnit(sectionBaseline);
+		renderUnitPicker();
 
 		if (allSeries.length === 0) {
+		    document.getElementById('section-summary').innerHTML = '';
 		    showEmpty('no locations');
 		    return;
 		}
 
+		const displays = shortenLocations(allSeries.map(s => s.location));
+		allSeries.forEach((s, i) => { s._display = displays[i]; s._idx = i; });
+
+		renderSummary(allSeries);
+
 		document.getElementById('empty-state').classList.add('hidden');
 		scroll.style.display = 'flex';
 
-		allSeries.forEach((series, i) => {
-		    const color = PALETTE[i % PALETTE.length];
-		    const card = buildCard(series, color, i);
-		    scroll.appendChild(card);
-		    if (i < AUTO_EXPAND_COUNT) expandCard(card);
-		});
+		const scale = groupScale(allSeries);
+		const frag = document.createDocumentFragment();
+		allSeries.forEach((s, i) => frag.appendChild(buildCard(s, PALETTE[i % PALETTE.length], i, scale)));
+		scroll.appendChild(frag);
+	    }
+
+	    function renderSummary(list) {
+		const summary = document.getElementById('section-summary');
+		const best = list[0]._st;
+
+		summary.innerHTML =
+		    `<span class="pill"><b>${list.length}</b> line${list.length !== 1 ? 's' : ''}</span>` +
+		    `<span class="pill" title="${esc('baseline of the unmodified program, pooled across this section')}">` +
+		    `baseline <b>${fmtTp(sectionBaseline)}</b></span>` +
+		    `<span class="pill" title="${esc('floor of the best-ranked line')}">best <b>${fmtTp(best.lo)}</b></span>`;
+
+		const lead = summary.querySelector('.pill b');
+		if (lead) countUp(lead, list.length);
 	    }
 
 	    function shortenLocations(locs) {
@@ -725,29 +923,23 @@ html, body {
 		return locs.map(l => l.startsWith(common) ? l.slice(common.length) : l);
 	    }
 
-	    const MAX_TILT = 4;
-
-	    function resetTilt(card) {
-		card.classList.add('tilt-settle');
-		card.style.setProperty('--rx', '0deg');
-		card.style.setProperty('--ry', '0deg');
-		card.style.setProperty('--sc', '1');
-		setTimeout(() => card.classList.remove('tilt-settle'), 400);
-	    }
-
 	    function expandCard(card) {
 		if (card.classList.contains('expanded')) return;
 		card.classList.add('expanded');
-		resetTilt(card);
 
 		const state = cardState.get(card);
 		const chartEl = card.querySelector('.ip-chart');
 		const chartBodyInner = card.querySelector('.ip-chart-body-inner');
 
 		if (!state.plot) state.plot = buildPlot(chartEl, state.series, state.color);
-		requestAnimationFrame(() => {
+		const size = () => {
 		    const w = chartBodyInner.clientWidth - 16;
-		    if (w > 0) state.plot.setSize({ width: w, height: chartHeight(w) });
+		    if (w <= 0) return false;
+		    state.plot.setSize({ width: w, height: chartHeight(w) });
+		    return true;
+		};
+		requestAnimationFrame(() => {
+		    if (!size()) requestAnimationFrame(size);
 		    state.plot._animateIn();
 		});
 	    }
@@ -756,53 +948,80 @@ html, body {
 		card.classList.remove('expanded');
 	    }
 
-	    function buildLocationEl(loc, color) {
-		const el = document.createElement('span');
-		el.className = 'loc-ip';
-		el.innerHTML = `<span class="loc-dot" style="background:${color};color:${color}"></span><span class="loc-txt">${esc(loc)}</span>`;
+	    function groupScale(members) {
+		if (!members.length) return null;
+		const los = members.map(m => m._st.lo).sort((a, b) => a - b);
+		const his = members.map(m => m._st.hi).sort((a, b) => a - b);
+		const q = (arr, p) => arr[Math.max(0, Math.min(arr.length - 1, Math.round((arr.length - 1) * p)))];
+		const d0 = Math.min(sectionBaseline, q(los, 0.05));
+		const d1 = Math.max(q(his, 0.95), sectionBaseline);
+		const pad = (d1 - d0) * 0.05 || Math.abs(d1) * 0.05 || 1;
+		return { d0: d0 - pad, d1: d1 + pad };
+	    }
+
+	    function buildRowBand(st, scale, col) {
+		if (!scale) return `<span class="row-band"></span>`;
+		const X = v => Math.max(0, Math.min(100, (v - scale.d0) / (scale.d1 - scale.d0) * 100));
+		const xLo = X(st.lo), xHi = X(st.hi), xMid = X(st.mid), x0 = X(sectionBaseline);
+		return `<span class="row-band${st.hi > scale.d1 ? ' over' : ''}">` +
+		    `<i class="rb-track"></i>` +
+		    `<i class="rb-fill" style="left:${xLo.toFixed(2)}%;width:${Math.max(1.2, xHi - xLo).toFixed(2)}%;background:${col}"></i>` +
+		    `<i class="rb-zero" style="left:${x0.toFixed(2)}%"></i>` +
+		    `<i class="rb-mid" style="left:${xMid.toFixed(2)}%;background:${col};box-shadow:0 0 6px -1px ${col}"></i>` +
+		    `</span>`;
+	    }
+
+	    const FLOOR_NOTE =
+		'pside re-computes each level from a random redraw of that level\'s own samples, ' +
+		'a thousand times over, and keeps the middle 95%. This number averages the LOW end ' +
+		'of that range across the whole ladder, in recorded throughput units, so it is the ' +
+		'outcome your samples actually support rather than the one they hint at. It is never ' +
+		'divided by a baseline: the ranking is absolute, so a line that speeds up a lot but ' +
+		'carries little throughput stays where it belongs. Two limits: samples from the same ' +
+		'run move together and pside can no longer tell them apart, so the range is a floor ' +
+		'on the true width; and a bias that hit every measurement equally is invisible to it.';
+
+	    function buildCounts(series) {
+		const el = document.createElement('div');
+		el.className = 'chart-counts';
+
+		const st = series._st;
+		const pts = series.points;
+		let peak = 0;
+		for (let i = 1; i < pts.length; i++) if (pts[i].median > pts[peak].median) peak = i;
+		const flat = pts.filter(p => p.ci_low === p.ci_high).length;
+
+		const stat = (k, v, cls = '', note = '') =>
+		    `<div class="stat ${cls}"${note ? ` data-note="${esc(note)}"` : ''}>` +
+		    `<span class="k">${k}</span><span class="v">${v}</span></div>`;
+
+		el.innerHTML =
+		    stat('baseline', fmtTp(st.base)) +
+		    stat('peak', `${fmtTp(pts[peak].median)} <u>@ ${peak * 5}% speedup</u>`) +
+		    stat('avg floor', `${fmtTp(st.lo)} <u>${fmtTpDelta(st.lo - st.base)}</u>`, '', FLOOR_NOTE) +
+		    stat('avg median', `${fmtTp(st.mid)} <u>${fmtTpDelta(st.mid - st.base)}</u>`) +
+		    (flat ? stat('flat levels', `${flat} <u>of ${pts.length}</u>`, 'thin',
+				 'These levels produced identical resamples, so their interval collapsed to a point. Usually one sample, or many identical ones. Record more runs.') : '');
+
 		return el;
 	    }
 
-	    function buildCard(series, color, idx) {
-		const singletons = series.points.filter(p => p.singleton).length;
-		const clearWin = series.impact >= CLEAR_WIN_IMPACT;
+	    function buildCard(series, color, idx, scale) {
+		const st = series._st;
 
 		const card = document.createElement('div');
-		card.className = 'ip-card' + (clearWin ? ' clear-win' : '');
-		card.style.animationDelay = Math.min(idx * 30, 300) + 'ms';
-
-		if (!reducedMotion) {
-		    card.addEventListener('mousemove', (e) => {
-			if (card.classList.contains('expanded')) return;
-			const rect = card.getBoundingClientRect();
-			const px = (e.clientX - rect.left) / rect.width;
-			const py = (e.clientY - rect.top) / rect.height;
-			card.style.setProperty('--ry', ((px - 0.5) * MAX_TILT * 2).toFixed(2) + 'deg');
-			card.style.setProperty('--rx', ((0.5 - py) * MAX_TILT * 2).toFixed(2) + 'deg');
-			card.style.setProperty('--sc', '0.985');
-			card.style.setProperty('--mx', (px * 100).toFixed(1) + '%');
-			card.style.setProperty('--my', (py * 100).toFixed(1) + '%');
-		    });
-		    card.addEventListener('mouseleave', () => resetTilt(card));
-		}
+		card.className = 'ip-card';
+		card.style.setProperty('--vc-fg', color);
+		card.style.animationDelay = Math.min(idx * 12, 240) + 'ms';
 
 		const header = document.createElement('div');
 		header.className = 'ip-card-header';
 		header.title = series.location;
-
-		header.appendChild(buildLocationEl(series._display || series.location, color));
-
-		const pills = document.createElement('div');
-		pills.className = 'ip-pills';
-		pills.innerHTML =
-		    (clearWin ? `<span class="pill win" title="impact ${series.impact.toFixed(1)} ≥ ${CLEAR_WIN_IMPACT} — worth optimizing">★ clear win</span>` : '') +
-		    (singletons ? `<span class="pill warn">⚠ ${singletons} singleton${singletons > 1 ? 's' : ''}</span>` : '');
-		header.appendChild(pills);
-
-		const expandIcon = document.createElement('span');
-		expandIcon.className = 'ip-expand-icon';
-		expandIcon.textContent = '▶';
-		header.appendChild(expandIcon);
+		header.innerHTML =
+		    `<span class="row-loc">${esc(series._display || series.location)}</span>` +
+		    buildRowBand(st, scale, color) +
+		    `<span class="row-num">${fmtTp(st.lo)}</span>` +
+		    `<span class="ip-expand-icon">▶</span>`;
 
 		const chartBody = document.createElement('div');
 		chartBody.className = 'ip-chart-body';
@@ -814,17 +1033,22 @@ html, body {
 		legend.innerHTML =
 		    `<span class="chart-legend-item">` +
 		    `<svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${color}" stroke-width="2"/></svg>` +
-		    `75th percentile</span>` +
+		    `median throughput <span style="color:var(--text-mid);margin-left:2px">(raw, as recorded)</span></span>` +
 		    `<span class="chart-legend-item">` +
 		    `<svg width="20" height="10"><rect x="0" y="1" width="20" height="8" rx="1" fill="${color}" fill-opacity="0.22"/><line x1="0" y1="1" x2="20" y2="1" stroke="${color}" stroke-opacity="0.55" stroke-width="1" stroke-dasharray="3,3"/><line x1="0" y1="9" x2="20" y2="9" stroke="${color}" stroke-opacity="0.55" stroke-width="1" stroke-dasharray="3,3"/></svg>` +
 		    `95% confidence interval</span>` +
 		    `<span class="chart-legend-item">` +
+		    `<svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="rgba(124,135,152,0.85)" stroke-width="1" stroke-dasharray="1,3"/></svg>` +
+		    `baseline <span style="color:var(--text-mid);margin-left:2px">(unmodified program, centred by construction)</span></span>` +
+		    `<span class="chart-legend-item">` +
 		    `<svg width="12" height="12"><polygon points="6,1 11,11 1,11" fill="${color}" fill-opacity="0.9"/></svg>` +
-		    `singleton <span style="color:var(--text-mid);margin-left:2px">(single datapoint — low confidence)</span></span>`;
+		    `flat level <span style="color:var(--text-mid);margin-left:2px">(interval collapsed to a point)</span></span>`;
+
 		const chartEl = document.createElement('div');
 		chartEl.className = 'ip-chart';
 		chartBodyInner.appendChild(chartEl);
 		chartBodyInner.appendChild(legend);
+		chartBodyInner.appendChild(buildCounts(series));
 		chartBody.appendChild(chartBodyInner);
 
 		card.appendChild(header);
@@ -842,24 +1066,25 @@ html, body {
 	    }
 
 	    function buildPlot(chartEl, series, color) {
-		const present = series.points.map((p, i) => ({ ...p, x: i })).filter(p => p.present);
-		const xVals   = present.map(p => p.x);
-		const percents = present.map(p => p.percent);
-		const ciLow   = present.map(p => p.ci_low);
-		const ciHigh  = present.map(p => p.ci_high);
+		const pts     = series.points;
+		const xVals   = pts.map((_, i) => i);
+		const medians = pts.map(p => p.median);
+		const ciLow   = pts.map(p => p.ci_low);
+		const ciHigh  = pts.map(p => p.ci_high);
+		const base    = pts[0].median;
+
+		const [yMin, yMax] = plotRange(pts);
+		const span = yMax - yMin;
 
 		const rv = parseInt(color.slice(1,3),16);
 		const gv = parseInt(color.slice(3,5),16);
 		const bv = parseInt(color.slice(5,7),16);
 
 		let animT = reducedMotion ? 1 : 0;
-		const grow = arr => arr.map(v => 100 + (v - 100) * animT);
+		const grow = arr => arr.map(v => base + (v - base) * animT);
 
 		const tip = document.createElement('div');
 		tip.className = 'chart-tip';
-
-		const allY = percents.concat(ciHigh);
-		const yMax = Math.max((allY.length ? Math.max(...allY) : 0) + 10, 200);
 
 		const opts = {
 		    width:  800,
@@ -872,7 +1097,7 @@ html, body {
 		    },
 		    scales: {
 			x: { time: false },
-			y: { range: () => [0, yMax] },
+			y: { range: () => [yMin, yMax] },
 		    },
 		    series: [
 			{},
@@ -883,32 +1108,16 @@ html, body {
 		    hooks: {
 			init: [u => { u.over.appendChild(tip); }],
 			drawClear: [u => {
-			    const { ctx, bbox: { left, top, width, height } } = u;
-			    const y100 = u.valToPos(100, 'y', true);
-
-			    const gradUp = ctx.createLinearGradient(0, y100, 0, top);
-			    gradUp.addColorStop(0,    'rgba(40, 190, 125, 0)');
-			    gradUp.addColorStop(0.5,  'rgba(40, 190, 125, 0.05)');
-			    gradUp.addColorStop(0.8,  'rgba(40, 190, 125, 0.12)');
-			    gradUp.addColorStop(1,    'rgba(40, 190, 125, 0.24)');
-			    ctx.fillStyle = gradUp;
-			    ctx.fillRect(left, top, width, y100 - top);
-
-			    const gradDown = ctx.createLinearGradient(0, y100, 0, top + height);
-			    gradDown.addColorStop(0,    'rgba(232, 84, 84, 0)');
-			    gradDown.addColorStop(0.5,  'rgba(232, 84, 84, 0.06)');
-			    gradDown.addColorStop(0.8,  'rgba(232, 84, 84, 0.15)');
-			    gradDown.addColorStop(1,    'rgba(232, 84, 84, 0.28)');
-			    ctx.fillStyle = gradDown;
-			    ctx.fillRect(left, y100, width, (top + height) - y100);
+			    const { ctx, bbox: { left, top, width } } = u;
+			    const yBase = u.valToPos(base, 'y', true);
 
 			    ctx.save();
-			    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-			    ctx.lineWidth = 1.5;
-			    ctx.setLineDash([6, 4]);
+			    ctx.strokeStyle = 'rgba(124,135,152,0.85)';
+			    ctx.lineWidth = 1;
+			    ctx.setLineDash([1, 3]);
 			    ctx.beginPath();
-			    ctx.moveTo(left, y100);
-			    ctx.lineTo(left + width, y100);
+			    ctx.moveTo(left, yBase);
+			    ctx.lineTo(left + width, yBase);
 			    ctx.stroke();
 			    ctx.setLineDash([]);
 			    ctx.restore();
@@ -932,19 +1141,19 @@ html, body {
 			    ctx.strokeStyle = `rgba(${rv},${gv},${bv},0.50)`;
 			    ctx.lineWidth = 1;
 			    ctx.setLineDash([3,4]);
-			    [hiPts, loPts].forEach(pts => {
+			    [hiPts, loPts].forEach(pts2 => {
 				ctx.beginPath();
-				ctx.moveTo(pts[0].x, pts[0].y);
-				drawSpline(ctx, pts, false);
+				ctx.moveTo(pts2[0].x, pts2[0].y);
+				drawSpline(ctx, pts2, false);
 				ctx.stroke();
 			    });
 			    ctx.setLineDash([]);
 
 			    ctx.fillStyle = `rgba(${rv},${gv},${bv},0.9)`;
-			    series.points.forEach((p, i) => {
-				if (!p.singleton) return;
+			    pts.forEach((p, i) => {
+				if (p.ci_low !== p.ci_high) return;
 				const x = u.valToPos(i,'x',true);
-				const y = u.valToPos(100 + (p.percent - 100) * animT, 'y',true);
+				const y = u.valToPos(base + (p.median - base) * animT, 'y',true);
 				ctx.beginPath();
 				ctx.moveTo(x, y-7); ctx.lineTo(x-5, y+4); ctx.lineTo(x+5, y+4);
 				ctx.closePath(); ctx.fill();
@@ -955,10 +1164,12 @@ html, body {
 			setCursor: [u => {
 			    const idx = u.cursor.idx;
 			    if (idx == null) { tip.style.opacity = '0'; return; }
+			    const flat = ciLow[idx] === ciHigh[idx];
 			    tip.innerHTML =
-				`<span class="tip-val" style="color:${color}">${percents[idx].toFixed(1)}%</span>` +
-				`<span class="tip-ci">${ciLow[idx].toFixed(0)}–${ciHigh[idx].toFixed(0)}</span>` +
-				`<span class="tip-spd">@${xVals[idx] * 5}%</span>`;
+				`<span class="tip-val" style="color:${color}">${fmtTp(medians[idx])}</span>` +
+				`<span class="tip-spd">${idx === 0 ? 'baseline' : fmtTpDelta(medians[idx] - base)}</span>` +
+				(flat ? '' : `<span class="tip-ci">${fmtTp(ciLow[idx])}–${fmtTp(ciHigh[idx])}</span>`) +
+				`<span class="tip-n">@${idx * 5}%</span>`;
 			    tip.style.left = u.valToPos(xVals[idx], 'x') + 'px';
 			    tip.style.top  = u.valToPos(ciHigh[idx], 'y') + 'px';
 			    tip.style.opacity = '1';
@@ -969,9 +1180,9 @@ html, body {
 			    font: '11px monospace', stroke: '#9aa6b6',
 			    grid: { stroke: '#2a3040', width: 1 },
 			    ticks: { stroke: '#252a33', width: 1 },
-			    label: 'speedup %',
+			    label: 'virtual speedup %',
 			    labelFont: '10px monospace',
-			    splits: (u, ax, scMin, scMax) => {
+			    splits: () => {
 				const major = [];
 				for (let i = 0; i <= 20; i += 2) major.push(i);
 				return major;
@@ -981,32 +1192,24 @@ html, body {
 			{
 			    font: '11px monospace', stroke: '#9aa6b6',
 			    grid: { stroke: '#2a3040', width: 1 }, ticks: { stroke: '#252a33', width: 1 },
-			    label: 'throughput %', labelFont: '10px monospace',
-			    splits: (u, ax, scMin, scMax) => {
-				const raw = Math.max(scMax, 1) / 5;
-				const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-				const norm = raw / mag;
-				const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
-				const ticks = [];
-				for (let v = 0; v <= scMax + 0.001; v += step) ticks.push(v);
-				return ticks;
-			    },
-			    values: (u, splits) => splits.map(v => v == null ? '' : v.toFixed(0) + '%'),
+			    label: axisLabel(), labelFont: '10px monospace',
+			    size: 68,
+			    values: (u, splits) => splits.map(v => v == null ? '' : fmtAxis(v, span)),
 			},
 		    ],
 		};
 
-		const u = new uPlot(opts, [xVals, grow(percents), grow(ciLow), grow(ciHigh)], chartEl);
+		const u = new uPlot(opts, [xVals, grow(medians), grow(ciLow), grow(ciHigh)], chartEl);
 
 		u._animateIn = () => {
-		    if (reducedMotion) { animT = 1; u.setData([xVals, percents, ciLow, ciHigh]); return; }
+		    if (reducedMotion) { animT = 1; u.setData([xVals, medians, ciLow, ciHigh]); return; }
 		    animT = 0;
-		    u.setData([xVals, grow(percents), grow(ciLow), grow(ciHigh)]);
+		    u.setData([xVals, grow(medians), grow(ciLow), grow(ciHigh)]);
 		    const dur = 480, start = performance.now();
 		    const tick = now => {
 			const p = Math.min(1, (now - start) / dur);
 			animT = 1 - Math.pow(1 - p, 3);
-			u.setData([xVals, grow(percents), grow(ciLow), grow(ciHigh)]);
+			u.setData([xVals, grow(medians), grow(ciLow), grow(ciHigh)]);
 			if (p < 1) requestAnimationFrame(tick);
 		    };
 		    requestAnimationFrame(tick);
