@@ -72,6 +72,12 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
     this.connections.cancel(io);
 }
 
+pub fn stop(this: *Server, io: Io) void {
+    if (this.should_shut_down.swap(true, .monotonic)) return;
+    var stream = this.server.socket.address.connect(io, .{ .mode = .stream }) catch @panic("Server shutdown failed");
+    stream.close(io);
+}
+
 fn handleConnection(this: *Server, allocator: std.mem.Allocator, io: Io, stream_in: net.Stream) void {
     var stream = stream_in;
     defer stream.close(io);
@@ -104,12 +110,6 @@ fn handleConnection(this: *Server, allocator: std.mem.Allocator, io: Io, stream_
         };
         this.handleRequest(allocator, io, &request) catch |err| std.log.err("handleRequest: {s}", .{@errorName(err)});
     }
-}
-
-pub fn stop(this: *Server, io: Io) void {
-    if (this.should_shut_down.swap(true, .monotonic)) return;
-    var stream = this.server.socket.address.connect(io, .{ .mode = .stream }) catch @panic("Server shutdown failed");
-    stream.close(io);
 }
 
 fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *http.Server.Request) !void {

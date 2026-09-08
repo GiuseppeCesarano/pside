@@ -20,7 +20,7 @@ time_keeper: TimeKeeper,
 delay_pool: DelayPool,
 vma_ranges: VmaRanges,
 vma_base: std.atomic.Value(usize),
-an_error_has_occurred: std.atomic.Value(bool),
+has_errored: std.atomic.Value(bool),
 
 // Current experiment state, armed/disarmed by begin/endExperiment.
 target_ip: std.atomic.Value(usize),
@@ -34,7 +34,7 @@ pub fn init() !ExperimentRunner {
         .delay_pool = .empty,
         .vma_ranges = .empty,
         .vma_base = .init(0),
-        .an_error_has_occurred = .init(false),
+        .has_errored = .init(false),
         .target_ip = .init(0),
         .delay_per_tick = .init(0),
     };
@@ -142,8 +142,8 @@ pub fn capturedRelativeIp(this: *ExperimentRunner) ?usize {
     return target - this.vma_base.load(.monotonic);
 }
 
-pub fn anErrorHasOccurred(this: *ExperimentRunner) bool {
-    return this.an_error_has_occurred.load(.monotonic);
+pub fn hasErrored(this: *ExperimentRunner) bool {
+    return this.has_errored.load(.monotonic);
 }
 
 pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
@@ -151,8 +151,8 @@ pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
     // .signal is currently making it hang
 
     // The map walk and per-thread delay application must not be preempted,
-    // since we hold the gate closed, if a tracepoint callabck gets scheduled
-    // will try an increment and spinwait untill we don't open the gate, but
+    // since we hold the gate closed, if a tracepoint callback gets scheduled
+    // will try an increment and spinwait until we don't open the gate, but
     // if we get preempted and every core starts spinwaiting we will never get
     // the cpu and open the gate resulting in a deadlock
     kernel.preempt.disable();
@@ -208,7 +208,7 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) vo
 
     child.incrementReferences();
     const delays = delays: {
-        //TODO: hoister the sweep and retry there instead of the deeper level
+        //TODO: hoist the sweep and retry there instead of the deeper level
         kernel.preempt.disable();
         defer kernel.preempt.enable();
 
@@ -246,5 +246,5 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
 fn abort(this: *ExperimentRunner, s: []const u8) void {
     @branchHint(.cold);
     std.log.err("{s}", .{s});
-    this.an_error_has_occurred.store(true, .monotonic);
+    this.has_errored.store(true, .monotonic);
 }

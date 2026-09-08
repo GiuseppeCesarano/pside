@@ -60,7 +60,7 @@ pub fn profilePid(
 fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *Engine = @ptrCast(@alignCast(ctx));
 
-    while (!kernel.Thread.shouldStop() and !this.runner.anErrorHasOccurred()) {
+    while (!kernel.Thread.shouldStop() and !this.runner.hasErrored()) {
         const experiment = this.planner.nextExperiment(ExperimentRunner.sampler_frequency);
         this.runner.beginExperiment(experiment.delay_per_tick);
 
@@ -68,7 +68,7 @@ fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
         const enough_progress = this.runExperimentWindow(experiment.duration, base.progress);
 
         const relative_ip = this.runner.capturedRelativeIp();
-        const should_stop = kernel.Thread.shouldStop() or this.runner.anErrorHasOccurred();
+        const should_stop = kernel.Thread.shouldStop() or this.runner.hasErrored();
 
         if (enough_progress and !should_stop and relative_ip != null) {
             this.runner.delayEveryoneLagging();

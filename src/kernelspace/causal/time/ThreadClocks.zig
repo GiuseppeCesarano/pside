@@ -101,12 +101,12 @@ fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
     // bit 0 is reserved for the collision flag; callers must pass it clear.
     assert(!key.hasCollided());
     assert(@popCount(len) == 1);
-    const bitmask = len - 1;
+    const index_mask = len - 1;
     const max_retries = @max(16, len / 32);
 
     var i: usize = 0;
     while (i < max_retries) : (i += 1) {
-        const index = (hash + i) & bitmask;
+        const index = (hash + i) & index_mask;
         const current_key = this.pairs[index].key.load(.monotonic);
 
         // Double insertion of the same key would mean broken logic
@@ -150,12 +150,12 @@ fn getSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) ?*Pair {
     const len = this.pairs.len;
 
     assert(@popCount(len) == 1);
-    const bitmask = len - 1;
+    const index_mask = len - 1;
 
     var i: usize = 0;
     var current_key: Key = .empty_collided;
     return slot: while (current_key.hasCollided() and i < len) : (i += 1) {
-        const index = (hash + i) & bitmask;
+        const index = (hash + i) & index_mask;
         current_key = this.pairs[index].key.load(.acquire);
         if (current_key.isEql(key)) break :slot &this.pairs[index];
     } else null;
@@ -336,7 +336,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     this.pairs = new_pairs;
     this.bitmask = new_bitmask;
 
-    const bitmask = new_len - 1;
+    const index_mask = new_len - 1;
     for (old_pairs) |pair| {
         const key = pair.key.load(.unordered).withoutCollisionBit();
         if (key.isEql(.empty)) continue;
@@ -345,7 +345,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
         const hash = key.hash();
 
         for (0..new_len) |i| {
-            const index = (hash + i) & bitmask;
+            const index = (hash + i) & index_mask;
 
             if (new_pairs[index].key.load(.unordered).isEql(.empty)) {
                 new_pairs[index] = .{ .key = .init(key), .value = .init(value) };

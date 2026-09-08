@@ -229,6 +229,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "concurrent_pool", .path = "src/kernelspace/concurrent/Pool.zig", .sanitize_thread = true },
         .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
         .{ .name = "causal_virtual_time_keeper", .path = "src/kernelspace/causal/time/VirtualTimeKeeper.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
+        .{ .name = "kernelspace_soft_float", .path = "src/kernelspace/soft_float.zig" },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
     };

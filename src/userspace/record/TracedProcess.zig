@@ -67,7 +67,7 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     try ptrace.poke(.text, child_pid, elf_entrypoint, arch_specific.interrupt);
 
     try ptrace.cont(child_pid);
-    try ptrace.waitTrapUntillIpReaches(child_pid, elf_entrypoint);
+    try ptrace.waitTrapUntilIpReaches(child_pid, elf_entrypoint);
 
     return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
 }
@@ -298,7 +298,7 @@ pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) !usize
     try ptrace.setRegs(this.pid, tmp_regs);
 
     try ptrace.singleStep(this.pid);
-    try ptrace.waitTrapUntillIpReaches(this.pid, ip + 1);
+    try ptrace.waitTrapUntilIpReaches(this.pid, ip + 1);
 
     const final_regs = try ptrace.getRegs(this.pid);
     const ret = final_regs.ret();
@@ -379,7 +379,7 @@ const ptrace = struct {
         }
     }
 
-    fn waitTrapUntillIpReaches(pid: linux.pid_t, addr: usize) !void {
+    fn waitTrapUntilIpReaches(pid: linux.pid_t, addr: usize) !void {
         try waitFor(pid, .trap);
         while ((try getRegs(pid)).ip() < addr) {
             try waitFor(pid, .trap);
