@@ -63,7 +63,7 @@ pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (Key) bool, releaseKey: fn (Key
             const scoped = struct {
                 pub fn advance(master: Ticks, key: Key, value: *Value, batch: anytype) void {
                     batch.push(.{ .key = key, .lag = master - value.ticks });
-                    value.* = .{ .ticks = master, .master_at_sleep = master };
+                    value.* = .atValue(master);
                 }
             };
 

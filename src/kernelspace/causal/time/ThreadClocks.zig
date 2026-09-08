@@ -12,50 +12,45 @@ pub const Ticks = u32;
 pub const Key = packed struct(usize) {
     data: usize,
 
-    const bit_size = @bitSizeOf(Key);
-    const Unsigned = @Int(.unsigned, bit_size);
     // Task pointers are always aligned so the first bit will always be 0
     // and we can use that as collide flag
-    const collided_bit: Unsigned = 1;
+    const collided_bit: usize = 1;
 
     pub const empty: Key = .{ .data = 0 };
-    pub const empty_collided: Key = @bitCast(collided_bit);
+    pub const empty_collided: Key = .{ .data = collided_bit };
 
-    pub const reserved: Key = @bitCast(std.math.maxInt(Unsigned) & ~collided_bit);
+    pub const reserved: Key = .{ .data = std.math.maxInt(usize) & ~collided_bit };
 
     pub fn isEql(this: Key, other: Key) bool {
-        const this_bits: Unsigned = @bitCast(this);
-        const other_bits: Unsigned = @bitCast(other);
-
-        return (this_bits | collided_bit) == (other_bits | collided_bit);
+        return (this.data | collided_bit) == (other.data | collided_bit);
     }
 
     pub fn hasCollided(this: Key) bool {
-        const this_bits: Unsigned = @bitCast(this);
-        return (this_bits & collided_bit) != 0;
+        return (this.data & collided_bit) != 0;
     }
 
     pub fn hash(this: Key) usize {
-        const unsigned: Unsigned = @bitCast(this.data);
-        return std.hash.int(unsigned);
+        return std.hash.int(this.data);
     }
 
     pub fn withCollisionBit(this: Key) Key {
-        const bits: Unsigned = @bitCast(this);
-        return @bitCast(bits | collided_bit);
+        return .{ .data = this.data | collided_bit };
     }
 
     pub fn withoutCollisionBit(this: Key) Key {
-        const bits: Unsigned = @bitCast(this);
-        return @bitCast(bits & ~collided_bit);
+        return .{ .data = this.data & ~collided_bit };
     }
 };
 
 pub const Value = packed struct(u64) {
-    const ticks_lsb: u64 = @bitCast(Value{ .ticks = 1, .master_at_sleep = 0 });
-
     ticks: Ticks,
     master_at_sleep: Ticks,
+
+    const ticks_lsb: u64 = @bitCast(Value{ .ticks = 1, .master_at_sleep = 0 });
+
+    pub fn atValue(ticks: Ticks) Value {
+        return .{ .ticks = ticks, .master_at_sleep = ticks };
+    }
 };
 
 const Pair = struct {
@@ -65,6 +60,9 @@ const Pair = struct {
     const empty: Pair = .{ .key = .init(.empty), .value = undefined };
 };
 
+const bits_per_word = @bitSizeOf(usize);
+const min_cap = bits_per_word;
+
 master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
@@ -72,13 +70,13 @@ bitmask: []std.atomic.Value(usize),
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
     assert(@popCount(reserve) == 1);
-    assert(reserve >= @bitSizeOf(usize));
+    assert(reserve >= min_cap);
 
     const pairs = try allocator.alloc(Pair, reserve);
     errdefer allocator.free(pairs);
     @memset(pairs, Pair.empty);
 
-    const bitmask_len = @divExact(reserve, @bitSizeOf(usize));
+    const bitmask_len = @divExact(reserve, bits_per_word);
     const used_bitmask = try allocator.alloc(std.atomic.Value(usize), bitmask_len);
     @memset(used_bitmask, .init(0));
 
@@ -114,10 +112,11 @@ fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
         // Double insertion of the same key would mean broken logic
         assert(!current_key.isEql(key));
 
-        const reserved = Key{ .data = Key.reserved.data | current_key.data };
+        // or will preserve the collided bit.
+        const reservation: Key = .{ .data = Key.reserved.data | current_key.data };
 
         if (current_key.isEql(.empty) and
-            this.pairs[index].key.cmpxchgStrong(current_key, reserved, .acquire, .monotonic) == null) // or will preserve the collided bit.
+            this.pairs[index].key.cmpxchgStrong(current_key, reservation, .acquire, .monotonic) == null)
             return &this.pairs[index];
 
         if (!current_key.hasCollided())
@@ -130,11 +129,7 @@ fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
 fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
     assert(ptr.key.load(.unordered).isEql(.reserved));
 
-    const index = this.getIndexUnsafe(ptr);
-
-    const bit_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
-    const operand = @as(usize, 1) << @intCast(index % @bitSizeOf(usize));
-    _ = bit_bucket.fetchOr(operand, .monotonic);
+    this.markUsed(this.getIndexUnsafe(ptr));
 
     _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
 }
@@ -172,45 +167,65 @@ fn getIndexUnsafe(this: *ThreadClocks, elm: *Pair) usize {
     return @divExact(elm_addr - starting_addr, @sizeOf(Pair));
 }
 
-pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
-    const hash = key.hash();
+fn wordOf(index: usize) usize {
+    return index / bits_per_word;
+}
 
+fn bitOf(index: usize) usize {
+    return @as(usize, 1) << @intCast(index % bits_per_word);
+}
+
+/// Pops the lowest live slot out of one bitmask word, as an index into `pairs`.
+fn nextLiveIndex(bucket: *usize, word: usize) ?usize {
+    if (bucket.* == 0) return null;
+
+    const bit_pos = @ctz(bucket.*);
+    bucket.* &= bucket.* - 1;
+
+    return word * bits_per_word + bit_pos;
+}
+
+fn markUsed(this: *ThreadClocks, index: usize) void {
+    _ = this.bitmask[wordOf(index)].fetchOr(bitOf(index), .monotonic);
+}
+
+fn markFree(this: *ThreadClocks, index: usize) void {
+    _ = this.bitmask[wordOf(index)].fetchAnd(~bitOf(index), .monotonic);
+}
+
+pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = try this.reserveSlotUnsafe(key, hash);
+    const slot = try this.reserveSlotUnsafe(key, key.hash());
 
-    slot.value.store(.{ .ticks = ticks, .master_at_sleep = ticks }, .monotonic);
+    slot.value.store(.atValue(ticks), .monotonic);
 
     this.publishReservedUnsafe(key, slot);
 }
 
-pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
+fn valueOf(this: *ThreadClocks, key: Key) Value {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()).?;
+    return this.getSlotUnsafe(key, key.hash()).?.value.load(.monotonic);
+}
 
-    return slot.value.load(.monotonic).ticks;
+pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
+    return this.valueOf(key).ticks;
 }
 
 pub fn lagOf(this: *ThreadClocks, key: Key) Ticks {
-    this.ref.increment();
-    defer this.ref.decrement();
-
-    const slot = this.getSlotUnsafe(key, key.hash()).?;
-    const value = slot.value.load(.monotonic);
+    const value = this.valueOf(key);
 
     return value.master_at_sleep - value.ticks;
 }
 
 pub fn tick(this: *ThreadClocks, key: Key) !void {
-    const hash = key.hash();
-
     try this.ref.tryIncrement();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, hash).?;
+    const slot = this.getSlotUnsafe(key, key.hash()).?;
     const value_as_ticks: *std.atomic.Value(u64) = @ptrCast(&slot.value);
 
     const ticks: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticks_lsb, .monotonic));
@@ -232,25 +247,22 @@ pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
 /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
 /// Returns the delay amounts those threads should sleep
 pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
-    const waker_hash = waker.hash();
-    const wakee_hash = wakee.hash();
-
     this.ref.increment();
     defer this.ref.decrement();
 
-    const wakee_slot = this.getSlotUnsafe(wakee, wakee_hash).?;
+    const wakee_slot = this.getSlotUnsafe(wakee, wakee.hash()).?;
     const wakee_value = wakee_slot.value.load(.monotonic);
 
     const master = this.master.load(.acquire);
 
-    const waker_slot = this.getSlotUnsafe(waker, waker_hash);
+    const waker_slot = this.getSlotUnsafe(waker, waker.hash());
     const waker_ticks = if (waker_slot) |slot| slot.value.load(.monotonic).ticks else master;
 
     const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
     const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
-    wakee_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
-    if (waker_slot) |slot| slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
+    wakee_slot.value.store(.atValue(master), .monotonic);
+    if (waker_slot) |slot| slot.value.store(.atValue(master), .monotonic);
 
     const waker_lag = master - waker_ticks;
     return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
@@ -258,32 +270,25 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
 
 /// Returns the full lag a thread woken by an external event must repay itself.
 pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
-    const hash = key.hash();
-
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, hash).?;
+    const slot = this.getSlotUnsafe(key, key.hash()).?;
 
     const master = this.master.load(.acquire);
-    const old = slot.value.swap(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
+    const old = slot.value.swap(.atValue(master), .monotonic);
 
     return master - old.ticks;
 }
 
 /// Removes a tracked task
 pub fn remove(this: *ThreadClocks, task: Key) void {
-    const task_hash = task.hash();
-
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(task, task_hash) orelse return;
-    const index = this.getIndexUnsafe(slot);
+    const slot = this.getSlotUnsafe(task, task.hash()) orelse return;
 
-    const bitmask_bucket = &this.bitmask[@divFloor(index, @bitSizeOf(usize))];
-    const operand = ~(@as(usize, 1) << @intCast(index % @bitSizeOf(usize)));
-    _ = bitmask_bucket.fetchAnd(operand, .monotonic);
+    this.markFree(this.getIndexUnsafe(slot));
 
     _ = slot.key.fetchAnd(Key.empty_collided, .monotonic);
 }
@@ -291,20 +296,17 @@ pub fn remove(this: *ThreadClocks, task: Key) void {
 /// Tracks a thread forking.
 /// Returns the delay amount those threads should sleep
 pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
-    const parent_hash = parent.hash();
-    const child_hash = child.hash();
-
     this.ref.increment();
     defer this.ref.decrement();
 
-    const parent_slot = this.getSlotUnsafe(parent, parent_hash).?;
-    const child_slot = try this.reserveSlotUnsafe(child, child_hash);
+    const parent_slot = this.getSlotUnsafe(parent, parent.hash()).?;
+    const child_slot = try this.reserveSlotUnsafe(child, child.hash());
 
     const master = this.master.load(.acquire);
     const parent_ticks = parent_slot.value.load(.monotonic).ticks;
 
-    parent_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
-    child_slot.value.store(.{ .ticks = master, .master_at_sleep = master }, .monotonic);
+    parent_slot.value.store(.atValue(master), .monotonic);
+    child_slot.value.store(.atValue(master), .monotonic);
 
     this.publishReservedUnsafe(child, child_slot);
 
@@ -320,7 +322,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     const new_pairs = try allocator.alloc(Pair, new_len);
     @memset(new_pairs, Pair.empty);
 
-    const new_bitmask_len = @divExact(new_len, @bitSizeOf(usize));
+    const new_bitmask_len = @divExact(new_len, bits_per_word);
     const new_bitmask = try allocator.alloc(std.atomic.Value(usize), new_bitmask_len);
     @memset(new_bitmask, .init(0));
 
@@ -337,23 +339,22 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
     const bitmask = new_len - 1;
     for (old_pairs) |pair| {
         const key = pair.key.load(.unordered).withoutCollisionBit();
-        if (!key.isEql(.empty)) {
-            const value = pair.value.load(.unordered);
-            const hash = key.hash();
+        if (key.isEql(.empty)) continue;
 
-            var i: usize = 0;
-            while (i < new_len) : (i += 1) {
-                const index = (hash + i) & bitmask;
+        const value = pair.value.load(.unordered);
+        const hash = key.hash();
 
-                if (new_pairs[index].key.load(.unordered).isEql(.empty)) {
-                    new_pairs[index] = .{ .key = .init(key), .value = .init(value) };
-                    new_bitmask[@divFloor(index, @bitSizeOf(usize))].raw |= @as(usize, 1) << @intCast(index % @bitSizeOf(usize));
-                    break;
-                }
+        for (0..new_len) |i| {
+            const index = (hash + i) & bitmask;
 
-                new_pairs[index].key.raw.data |= @bitCast(Key.empty_collided);
-            } else unreachable;
-        }
+            if (new_pairs[index].key.load(.unordered).isEql(.empty)) {
+                new_pairs[index] = .{ .key = .init(key), .value = .init(value) };
+                new_bitmask[wordOf(index)].raw |= bitOf(index);
+                break;
+            }
+
+            new_pairs[index].key.raw.data |= Key.collided_bit;
+        } else unreachable;
     }
 
     return .{ old_pairs, old_bitmask };
@@ -366,19 +367,17 @@ pub fn removeIf(this: *ThreadClocks, pred: fn (Key) bool) void {
 
     this.ref.drain();
 
-    for (this.bitmask, 0..) |*bit_bucket, i| {
+    for (this.bitmask, 0..) |*bit_bucket, word| {
         var bucket = bit_bucket.raw;
-        while (bucket != 0) : (bucket &= bucket - 1) {
-            const bit_pos = @ctz(bucket);
-            const index = i * @bitSizeOf(usize) + bit_pos;
-
+        while (nextLiveIndex(&bucket, word)) |index| {
             const pair = &this.pairs[index];
+            const key = pair.key.raw;
 
-            assert(!pair.key.raw.isEql(.empty) and !pair.key.raw.isEql(.reserved));
+            assert(!key.isEql(.empty) and !key.isEql(.reserved));
 
-            if (@call(.always_inline, pred, .{pair.key.raw})) {
-                bit_bucket.raw &= ~(@as(usize, 1) << @intCast(bit_pos));
-                pair.key.raw = if (pair.key.raw.hasCollided()) .empty_collided else .empty;
+            if (@call(.always_inline, pred, .{key})) {
+                bit_bucket.raw &= ~bitOf(index);
+                pair.key.raw = if (key.hasCollided()) .empty_collided else .empty;
             }
         }
     }
@@ -392,25 +391,18 @@ pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
 
     const master = this.master.load(.unordered);
 
-    for (this.bitmask, 0..) |*bit_bucket, i| {
-        var bucket = bit_bucket.load(.unordered);
-        while (bucket != 0) : (bucket &= bucket - 1) {
-            const bit_pos = @ctz(bucket);
-            const index = i * @bitSizeOf(usize) + bit_pos;
-
+    for (this.bitmask, 0..) |*bit_bucket, word| {
+        var bucket = bit_bucket.raw;
+        while (nextLiveIndex(&bucket, word)) |index| {
             const pair = &this.pairs[index];
-
             const key = pair.key.raw;
-            const value = &pair.value.raw;
 
             assert(!key.isEql(.empty) and !key.isEql(.reserved));
 
-            @call(.always_inline, cb, .{ master, key, value } ++ args);
+            @call(.always_inline, cb, .{ master, key, &pair.value.raw } ++ args);
         }
     }
 }
-
-const min_cap = @bitSizeOf(usize);
 
 /// Count the total number of set bits across all bitmask words.
 fn countLiveBits(this: *ThreadClocks) usize {
@@ -420,21 +412,11 @@ fn countLiveBits(this: *ThreadClocks) usize {
 }
 
 /// Return true if the bit for the slot occupied by `key` is set.
-fn bitIsSet(this: *ThreadClocks, key: ThreadClocks.Key) bool {
-    const hash = key.hash();
-    const len = this.pairs.len;
-    const mask = len - 1;
-    const max_retries = @max(16, len / 32);
+fn bitIsSet(this: *ThreadClocks, key: Key) bool {
+    const slot = this.getSlotUnsafe(key, key.hash()) orelse return false;
+    const index = this.getIndexUnsafe(slot);
 
-    return for (0..max_retries) |i| {
-        const index = (hash + i) & mask;
-        const current_key = this.pairs[index].key.load(.acquire);
-        if (current_key.isEql(key)) {
-            const bucket = index / @bitSizeOf(usize);
-            const bit = @as(usize, 1) << @truncate(index % @bitSizeOf(usize));
-            break this.bitmask[bucket].load(.monotonic) & bit != 0;
-        }
-    } else false;
+    return this.bitmask[wordOf(index)].load(.monotonic) & bitOf(index) != 0;
 }
 
 test "ThreadClocks: basic lifecycle" {
