@@ -4,7 +4,7 @@ const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 
-const generic = @import("Pool.zig");
+const GenericPool = @import("Pool.zig").GenericPool;
 const DelayPool = @This();
 
 const DelayWork = struct {
@@ -13,7 +13,9 @@ const DelayWork = struct {
     pool: *DelayPool,
 };
 
-const Pool = generic.Pool(DelayWork);
+const Pool = GenericPool(DelayWork);
+
+const uninitialized = std.math.maxInt(u32);
 
 pools: *Pool,
 users_count: std.atomic.Value(u32),
@@ -21,27 +23,23 @@ completion: kernel.Completion,
 
 pub const empty: DelayPool = .{
     .pools = undefined,
-    .users_count = .init(std.math.maxInt(u32)),
+    .users_count = .init(uninitialized),
     .completion = undefined,
 };
 
-pub fn init(this: *@This()) !void {
-    if (this.users_count.load(.monotonic) != std.math.maxInt(u32)) return;
+pub fn init(this: *DelayPool) !void {
+    if (this.users_count.load(.monotonic) != uninitialized) return;
 
     this.users_count = .init(0);
 
     this.pools = try allocator.create(Pool);
-    for (&this.pools.entries) |*e| e.* = .{
-        .work = .{ .func = executeDelay, .next = undefined },
-        .pool = this,
-        .time = undefined,
-    };
+    this.initPool(this.pools);
 
     this.completion.init();
 }
 
-pub fn deinit(this: *@This()) void {
-    if (this.users_count.load(.monotonic) == std.math.maxInt(u32)) return;
+pub fn deinit(this: *DelayPool) void {
+    if (this.users_count.load(.monotonic) == uninitialized) return;
 
     this.waitAllDelays();
 
@@ -68,15 +66,20 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize, mode: kern
     try task.addWork(&slot.work, mode);
 }
 
-fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {
-    const new_pool = try atomic_allocator.create(Pool);
-    errdefer atomic_allocator.destroy(new_pool);
-    new_pool.* = .empty;
-    for (&new_pool.entries) |*e| e.* = .{
+fn initPool(this: *DelayPool, pool: *Pool) void {
+    pool.* = .empty;
+    for (&pool.entries) |*entry| entry.* = .{
         .work = .{ .func = executeDelay, .next = undefined },
         .pool = this,
         .time = undefined,
     };
+}
+
+fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {
+    const new_pool = try atomic_allocator.create(Pool);
+    errdefer atomic_allocator.destroy(new_pool);
+
+    this.initPool(new_pool);
 
     const entry = new_pool.getEntry().?;
     this.pools.appendPool(new_pool);
