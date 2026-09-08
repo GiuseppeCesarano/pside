@@ -25,7 +25,7 @@ export fn init_module() linksection(".init.text") c_int {
     kernel.tracepoint.init();
 
     ctl.create(name, ioctlHandler) catch return 1;
-    std.log.debug("chardev created at: /dev/" ++ name, .{});
+    std.log.debug("chardev created at: " ++ communications.control_device_path, .{});
 
     return 0;
 }

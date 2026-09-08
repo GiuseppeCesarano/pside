@@ -5,7 +5,6 @@ const communications = @import("communications");
 const UserIds = @import("UserIds");
 
 const name = communications.name;
-const chardev_ctl_path: [:0]const u8 = "/dev/" ++ name;
 
 pub const LoadError = FInitModuleError || error{
     ModuleFileUnreadable,
@@ -26,7 +25,7 @@ pub fn load(owner: UserIds, allocator: std.mem.Allocator, io: std.Io) LoadError!
     try fInitModule(module.handle);
     errdefer deleteModule() catch |err| std.log.warn("Could not unload kernel module: {s}", .{@errorName(err)});
 
-    handDeviceToOwner(chardev_ctl_path, owner, io) catch return LoadError.CouldNotHandOverDevice;
+    handDeviceToOwner(communications.control_device_path, owner, io) catch return LoadError.CouldNotHandOverDevice;
 }
 
 fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {

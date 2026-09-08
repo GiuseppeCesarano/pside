@@ -3,8 +3,6 @@ const linux = std.os.linux;
 
 const communications = @import("communications");
 
-pub const path: [:0]const u8 = "/dev/" ++ communications.name;
-
 ctl: std.Io.File,
 
 pub const ControlError = error{
@@ -35,7 +33,7 @@ pub const OpenControlError = error{
 };
 
 pub fn open(io: std.Io) OpenControlError!@This() {
-    const ctl = std.Io.Dir.openFileAbsolute(io, path, .{ .mode = .read_write }) catch |err| return switch (err) {
+    const ctl = std.Io.Dir.openFileAbsolute(io, communications.control_device_path, .{ .mode = .read_write }) catch |err| return switch (err) {
         error.FileNotFound => OpenControlError.ModuleNotLoaded,
         error.AccessDenied => OpenControlError.AccessDenied,
         else => OpenControlError.Unexpected,

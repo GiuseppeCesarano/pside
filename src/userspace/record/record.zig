@@ -116,8 +116,8 @@ fn openControlDevice(io: std.Io) OpenedControlDevice {
 
         switch (err) {
             KernelControlDevice.OpenControlError.ModuleNotLoaded => std.process.fatal("The pside module is not loaded\n\trun: sudo pside driver load", .{}),
-            KernelControlDevice.OpenControlError.AccessDenied => std.process.fatal("Cannot open {s}: load the module as the same user with `sudo pside driver load`", .{KernelControlDevice.path}),
-            else => std.process.fatal("Could not open {s} ({s})", .{ KernelControlDevice.path, @errorName(err) }),
+            KernelControlDevice.OpenControlError.AccessDenied => std.process.fatal("Cannot open {s}: load the module as the same user with `sudo pside driver load`", .{communications.control_device_path}),
+            else => std.process.fatal("Could not open {s} ({s})", .{ communications.control_device_path, @errorName(err) }),
         }
     };
 
@@ -129,7 +129,7 @@ fn loadDriverAndOpen(io: std.Io) OpenedControlDevice {
 
     const device = KernelControlDevice.open(io) catch |err| {
         driverCommand(io, "unload") catch {};
-        std.process.fatal("Could not open {s} after loading the module ({s})", .{ KernelControlDevice.path, @errorName(err) });
+        std.process.fatal("Could not open {s} after loading the module ({s})", .{ communications.control_device_path, @errorName(err) });
     };
 
     return .{ device, true };
@@ -256,7 +256,7 @@ fn executeRun(
     global_traced_pid.store(profiled_process.pid, .release);
 
     profiler.start(profiled_process.pid) catch |err| switch (err) {
-        KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{KernelControlDevice.path}),
+        KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{communications.control_device_path}),
         KernelControlDevice.ControlError.CouldNotAttachToProcess => std.process.fatal("The kernel could not attach to process {d}; check that perf events are available.", .{profiled_process.pid}),
         else => std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)}),
     };
