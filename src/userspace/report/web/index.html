@@ -433,9 +433,9 @@ html, body {
 .chart-counts .stat[data-note]::after {
     content: attr(data-note);
     position: absolute;
-    top: calc(100% + 8px);
-    left: 50%;
-    width: 268px;
+    bottom: calc(100% + 7px);
+    left: 0;
+    width: 270px;
     padding: 8px 10px;
     border-radius: 5px;
     background: var(--bg3);
@@ -448,17 +448,10 @@ html, body {
     white-space: normal;
     box-shadow: 0 12px 26px -10px rgba(0,0,0,0.85);
     opacity: 0;
-    transform: translate(-50%, -3px);
+    transform: translate(0, 3px);
     pointer-events: none;
     transition: opacity 0.14s, transform 0.14s;
     z-index: 20;
-}
-.chart-counts .stat[data-note]::after {
-    top: auto;
-    bottom: calc(100% + 7px);
-    left: 0;
-    width: 270px;
-    transform: translate(0, 3px);
 }
 .chart-counts .stat[data-note]:hover::after { opacity: 1; transform: translate(0, 0); }
 
@@ -596,8 +589,6 @@ html, body {
     .section-item, .ip-card { opacity: 1; transform: none; }
     .ip-card::after { display: none !important; }
     .ip-chart-body-inner { transform: none !important; }
-    .tier-group-body, .tier-group-body-inner, .tg-icon { transition: none !important; }
-    #section-summary .pill.tier { transition: none !important; }
     .u-cursor-pt { animation: none !important; }
 }
 
@@ -746,8 +737,7 @@ html, body {
 		titleEl.classList.remove('placeholder');
 		document.getElementById('section-summary').innerHTML = '';
 
-		cardState.forEach(s => s.plot?.destroy());
-		cardState.clear();
+		resetCards();
 		allSeries = [];
 
 		showEmpty(null, true);
@@ -758,6 +748,11 @@ html, body {
 		} catch {
 		    showEmpty('failed to load section data');
 		}
+	    }
+
+	    function resetCards() {
+		cardState.forEach(s => s.plot?.destroy());
+		cardState.clear();
 	    }
 
 	    function seriesStats(s) {
@@ -863,8 +858,7 @@ html, body {
 	    function renderSection(data) {
 		const scroll = document.getElementById('charts-scroll');
 		scroll.innerHTML = '';
-		cardState.forEach(s => s.plot?.destroy());
-		cardState.clear();
+		resetCards();
 
 		allSeries = (data || []).filter(s => s.points && s.points.length > 0);
 		allSeries.forEach(s => { s._st = seriesStats(s); });
@@ -972,14 +966,15 @@ html, body {
 	    }
 
 	    const FLOOR_NOTE =
-		'pside re-computes each level from a random redraw of that level\'s own samples, ' +
-		'a thousand times over, and keeps the middle 95%. This number averages the LOW end ' +
-		'of that range across the whole ladder, in recorded throughput units, so it is the ' +
-		'outcome your samples actually support rather than the one they hint at. It is never ' +
-		'divided by a baseline: the ranking is absolute, so a line that speeds up a lot but ' +
-		'carries little throughput stays where it belongs. Two limits: samples from the same ' +
-		'run move together and pside can no longer tell them apart, so the range is a floor ' +
-		'on the true width; and a bias that hit every measurement equally is invisible to it.';
+		'pside solves each level\'s median distribution in closed form over that level\'s own ' +
+		'order statistics and keeps the middle 95%. Nothing is simulated, so the bounds are ' +
+		'exact and identical on every run. This number averages the LOW end of that range ' +
+		'across the whole ladder, in recorded throughput units, so it is the outcome your ' +
+		'samples actually support rather than the one they hint at. It is never divided by a ' +
+		'baseline: the ranking is absolute, so a line that speeds up a lot but carries little ' +
+		'throughput stays where it belongs. Two limits: samples from the same run move ' +
+		'together and pside can no longer tell them apart, so the range is a floor on the ' +
+		'true width; and a bias that hit every measurement equally is invisible to it.';
 
 	    function buildCounts(series) {
 		const el = document.createElement('div');
@@ -1001,7 +996,7 @@ html, body {
 		    stat('avg floor', `${fmtTp(st.lo)} <u>${fmtTpDelta(st.lo - st.base)}</u>`, '', FLOOR_NOTE) +
 		    stat('avg median', `${fmtTp(st.mid)} <u>${fmtTpDelta(st.mid - st.base)}</u>`) +
 		    (flat ? stat('flat levels', `${flat} <u>of ${pts.length}</u>`, 'thin',
-				 'These levels produced identical resamples, so their interval collapsed to a point. Usually one sample, or many identical ones. Record more runs.') : '');
+				 'Every order statistic the 95% window spans holds the same value here, so the interval has no width. With few samples that window covers the whole level, so this usually means too few of them, or many identical ones. Record more runs.') : '');
 
 		return el;
 	    }
