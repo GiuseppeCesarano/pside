@@ -12,29 +12,44 @@ pub const KeyAndLag = struct {
     lag: Ticks,
 };
 
-pub fn init(allocator: Allocator, canBeRemoved: fn (*Key) bool, releaseKey: fn (*Key) void) !GenericVirtualTimeKeeper(canBeRemoved, releaseKey) {
-    return GenericVirtualTimeKeeper(canBeRemoved, releaseKey).init(allocator);
+const batch_size = 64;
+
+fn DelayBatch(applyDelay: anytype, Args: type) type {
+    return struct {
+        args: Args,
+        entries: [batch_size]KeyAndLag = undefined,
+        used: usize = 0,
+
+        pub fn push(this: *@This(), entry: KeyAndLag) void {
+            this.entries[this.used] = entry;
+            this.used += 1;
+
+            if (this.used == batch_size) this.flush();
+        }
+
+        pub fn flush(this: *@This()) void {
+            @call(.auto, applyDelay, this.args ++ .{this.entries[0..this.used]});
+            this.used = 0;
+        }
+    };
 }
 
-pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (*Key) bool, releaseKey: fn (*Key) void) type {
+fn everyKey(_: Key) bool {
+    return true;
+}
+
+pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (Key) bool, releaseKey: fn (Key) void) type {
     return struct {
         const VirtualTimeKeeper = @This();
 
         clocks: ThreadClocks,
 
-        fn init(allocator: Allocator) !VirtualTimeKeeper {
+        pub fn init(allocator: Allocator) !VirtualTimeKeeper {
             return .{ .clocks = try .init(allocator, 1024) };
         }
 
         pub fn deinit(this: *VirtualTimeKeeper, allocator: Allocator) void {
-            const scoped = struct {
-                pub fn release(key: *Key) bool {
-                    releaseKey(key);
-                    return true;
-                }
-            };
-
-            this.clocks.removeIf(scoped.release, .{});
+            this.releaseWhere(everyKey);
             this.clocks.deinit(allocator);
         }
 
@@ -45,30 +60,17 @@ pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (*Key) bool, releaseKey: fn (*K
         }
 
         pub fn delayEveryoneLagging(this: *VirtualTimeKeeper, applyDelay: anytype, args: anytype) void {
-            const KeysAndLags = struct {
-                data: [64]KeyAndLag = undefined,
-                used: usize = 0,
-            };
             const scoped = struct {
-                pub fn delay(master: Ticks, key: *Key, value: *Value, keys_and_lags: *KeysAndLags, apply: anytype, inner: anytype) void {
-                    assert(keys_and_lags.used < 64);
-
-                    const lag = master - value.ticks;
+                pub fn advance(master: Ticks, key: Key, value: *Value, batch: anytype) void {
+                    batch.push(.{ .key = key, .lag = master - value.ticks });
                     value.* = .{ .ticks = master, .master_at_sleep = master };
-
-                    keys_and_lags.data[keys_and_lags.used] = .{ .key = key.*, .lag = lag };
-                    keys_and_lags.used += 1;
-
-                    if (keys_and_lags.used == 64) {
-                        keys_and_lags.used = 0;
-                        @call(.auto, apply, inner ++ .{keys_and_lags.data[0..]});
-                    }
                 }
             };
-            var keys_and_lags: KeysAndLags = .{};
 
-            this.clocks.forEach(scoped.delay, .{ &keys_and_lags, applyDelay, args });
-            @call(.auto, applyDelay, args ++ .{keys_and_lags.data[0..keys_and_lags.used]});
+            var batch: DelayBatch(applyDelay, @TypeOf(args)) = .{ .args = args };
+
+            this.clocks.forEach(scoped.advance, .{&batch});
+            batch.flush();
         }
 
         pub fn getMasterClock(this: *VirtualTimeKeeper) Ticks {
@@ -118,15 +120,20 @@ pub fn GenericVirtualTimeKeeper(canBeRemoved: fn (*Key) bool, releaseKey: fn (*K
         }
 
         fn sweep(this: *VirtualTimeKeeper) void {
+            this.releaseWhere(canBeRemoved);
+        }
+
+        fn releaseWhere(this: *VirtualTimeKeeper, shouldRelease: fn (Key) bool) void {
             const scoped = struct {
-                pub fn remove(key: *Key) bool {
-                    const can_be_removed = canBeRemoved(key);
-                    if (can_be_removed) releaseKey(key);
-                    return can_be_removed;
+                pub fn release(key: Key) bool {
+                    if (!shouldRelease(key)) return false;
+
+                    releaseKey(key);
+                    return true;
                 }
             };
 
-            this.clocks.removeIf(scoped.remove, .{});
+            this.clocks.removeIf(scoped.release);
         }
     };
 }
@@ -136,20 +143,21 @@ const testing = std.testing;
 var test_reap_threshold: usize = std.math.maxInt(usize);
 var test_released_count: usize = 0;
 
-fn testCanBeRemoved(key: *Key) bool {
+fn testCanBeRemoved(key: Key) bool {
     return key.withoutCollisionBit().data >= test_reap_threshold;
 }
 
-fn testReleaseKey(key: *Key) void {
-    _ = key;
+fn testReleaseKey(_: Key) void {
     test_released_count += 1;
 }
+
+const TestKeeper = GenericVirtualTimeKeeper(testCanBeRemoved, testReleaseKey);
 
 test "VirtualTimeKeeper: deinit releases every tracked key" {
     test_reap_threshold = std.math.maxInt(usize);
     test_released_count = 0;
 
-    var keeper = try init(testing.allocator, testCanBeRemoved, testReleaseKey);
+    var keeper = try TestKeeper.init(testing.allocator);
 
     keeper.addFirst(.{ .data = 2 });
     _ = try keeper.onFork(testing.allocator, .{ .data = 2 }, .{ .data = 4 });
@@ -163,7 +171,7 @@ test "VirtualTimeKeeper: fork and wake lag accounting" {
     test_reap_threshold = std.math.maxInt(usize);
     test_released_count = 0;
 
-    var keeper = try init(testing.allocator, testCanBeRemoved, testReleaseKey);
+    var keeper = try TestKeeper.init(testing.allocator);
     defer keeper.deinit(testing.allocator);
 
     const root: Key = .{ .data = 2 };
@@ -191,7 +199,7 @@ test "VirtualTimeKeeper: fork pressure grows the map without losing entries" {
     test_reap_threshold = std.math.maxInt(usize);
     test_released_count = 0;
 
-    var keeper = try init(testing.allocator, testCanBeRemoved, testReleaseKey);
+    var keeper = try TestKeeper.init(testing.allocator);
     defer keeper.deinit(testing.allocator);
 
     const root: Key = .{ .data = 2 };
@@ -206,7 +214,7 @@ test "VirtualTimeKeeper: fork pressure grows the map without losing entries" {
     try testing.expect(keeper.clocks.pairs.len >= 4096);
     for (0..fork_count) |i| {
         const child: Key = .{ .data = (i + 2) * 2 };
-        try testing.expectEqual(0, keeper.clocks.get(child, .ticks));
+        try testing.expectEqual(0, keeper.clocks.ticksOf(child));
     }
 }
 
@@ -214,7 +222,7 @@ test "VirtualTimeKeeper: fork pressure sweeps reaped tasks instead of growing" {
     test_reap_threshold = 100;
     test_released_count = 0;
 
-    var keeper = try init(testing.allocator, testCanBeRemoved, testReleaseKey);
+    var keeper = try TestKeeper.init(testing.allocator);
     defer keeper.deinit(testing.allocator);
 
     const root: Key = .{ .data = 2 };
@@ -233,7 +241,7 @@ test "VirtualTimeKeeper: delayEveryoneLagging visits everyone across batches" {
     test_reap_threshold = std.math.maxInt(usize);
     test_released_count = 0;
 
-    var keeper = try init(testing.allocator, testCanBeRemoved, testReleaseKey);
+    var keeper = try TestKeeper.init(testing.allocator);
     defer keeper.deinit(testing.allocator);
 
     const root: Key = .{ .data = 2 };
@@ -259,7 +267,7 @@ test "VirtualTimeKeeper: delayEveryoneLagging visits everyone across batches" {
 
     try testing.expectEqual(100, visited);
     try testing.expectEqual(77 * 100, lag_sum);
-    try testing.expectEqual(0, keeper.clocks.get(root, .lag));
+    try testing.expectEqual(0, keeper.clocks.lagOf(root));
 
     visited = 0;
     lag_sum = 0;

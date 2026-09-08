@@ -185,16 +185,23 @@ pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
     this.publishReservedUnsafe(key, slot);
 }
 
-pub fn get(this: *ThreadClocks, key: Key, field: enum { ticks, lag }) Ticks {
-    const hash = key.hash();
-
+pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, hash).?;
+    const slot = this.getSlotUnsafe(key, key.hash()).?;
+
+    return slot.value.load(.monotonic).ticks;
+}
+
+pub fn lagOf(this: *ThreadClocks, key: Key) Ticks {
+    this.ref.increment();
+    defer this.ref.decrement();
+
+    const slot = this.getSlotUnsafe(key, key.hash()).?;
     const value = slot.value.load(.monotonic);
 
-    return if (field == .ticks) value.ticks else value.master_at_sleep - value.ticks;
+    return value.master_at_sleep - value.ticks;
 }
 
 pub fn tick(this: *ThreadClocks, key: Key) !void {
@@ -353,7 +360,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !struct { []Pair,
 }
 
 /// Removes every entry the predicate marks, with exclusive map access.
-pub fn removeIf(this: *ThreadClocks, comptime pred: anytype, args: anytype) void {
+pub fn removeIf(this: *ThreadClocks, pred: fn (Key) bool) void {
     this.ref.close();
     defer this.ref.open();
 
@@ -369,7 +376,7 @@ pub fn removeIf(this: *ThreadClocks, comptime pred: anytype, args: anytype) void
 
             assert(!pair.key.raw.isEql(.empty) and !pair.key.raw.isEql(.reserved));
 
-            if (@call(.always_inline, pred, .{&pair.key.raw} ++ args)) {
+            if (@call(.always_inline, pred, .{pair.key.raw})) {
                 bit_bucket.raw &= ~(@as(usize, 1) << @intCast(bit_pos));
                 pair.key.raw = if (pair.key.raw.hasCollided()) .empty_collided else .empty;
             }
@@ -393,7 +400,7 @@ pub fn forEach(this: *ThreadClocks, comptime cb: anytype, args: anytype) void {
 
             const pair = &this.pairs[index];
 
-            const key = &pair.key.raw;
+            const key = pair.key.raw;
             const value = &pair.value.raw;
 
             assert(!key.isEql(.empty) and !key.isEql(.reserved));
@@ -441,8 +448,8 @@ test "ThreadClocks: basic lifecycle" {
     try clocks.put(key1, 10);
     try clocks.put(key2, 20);
 
-    try testing.expectEqual(10, clocks.get(key1, .ticks));
-    try testing.expectEqual(20, clocks.get(key2, .ticks));
+    try testing.expectEqual(10, clocks.ticksOf(key1));
+    try testing.expectEqual(20, clocks.ticksOf(key2));
 }
 
 test "ThreadClocks: tick and master propagation" {
@@ -454,11 +461,11 @@ test "ThreadClocks: tick and master propagation" {
     try clocks.put(key, 5);
 
     try clocks.tick(key);
-    try testing.expectEqual(6, clocks.get(key, .ticks));
+    try testing.expectEqual(6, clocks.ticksOf(key));
     try testing.expectEqual(6, clocks.master.load(.monotonic));
 
     try clocks.tick(key);
-    try testing.expectEqual(7, clocks.get(key, .ticks));
+    try testing.expectEqual(7, clocks.ticksOf(key));
     try testing.expectEqual(7, clocks.master.load(.monotonic));
 }
 
@@ -477,7 +484,7 @@ test "ThreadClocks: sleep and wake logic" {
 
     clocks.prepareForSleep(wakee);
     // lag = master (20) - ticks (5) = 15
-    try testing.expectEqual(15, clocks.get(wakee, .lag));
+    try testing.expectEqual(15, clocks.lagOf(wakee));
 
     const delays = clocks.wake(waker, wakee);
 
@@ -486,8 +493,8 @@ test "ThreadClocks: sleep and wake logic" {
     try testing.expectEqual(10, delays[0]);
     try testing.expectEqual(25, delays[1]);
 
-    try testing.expectEqual(20, clocks.get(waker, .ticks));
-    try testing.expectEqual(20, clocks.get(wakee, .ticks));
+    try testing.expectEqual(20, clocks.ticksOf(waker));
+    try testing.expectEqual(20, clocks.ticksOf(wakee));
 }
 
 test "ThreadClocks: wake without prepareForSleep yields zero wakee lag" {
@@ -527,8 +534,8 @@ test "ThreadClocks: fork" {
     const delay = try clocks.fork(parent, child);
 
     try testing.expectEqual(50, delay);
-    try testing.expectEqual(100, clocks.get(parent, .ticks));
-    try testing.expectEqual(100, clocks.get(child, .ticks));
+    try testing.expectEqual(100, clocks.ticksOf(parent));
+    try testing.expectEqual(100, clocks.ticksOf(child));
 }
 
 test "ThreadClocks: collision path" {
@@ -546,7 +553,7 @@ test "ThreadClocks: collision path" {
     }
 
     for (keys, expected) |key, ticks| try clocks.put(key, ticks);
-    for (keys, expected) |key, ticks| try testing.expectEqual(ticks, clocks.get(key, .ticks));
+    for (keys, expected) |key, ticks| try testing.expectEqual(ticks, clocks.ticksOf(key));
 }
 
 test "ThreadClocks: Causal Mechanics" {
@@ -629,7 +636,7 @@ test "ThreadClocks: concurrent stress" {
 
     for (0..thread_count) |i| {
         const key: ThreadClocks.Key = .{ .data = @intCast((i + 1) * 2) };
-        try testing.expect(master >= clocks.get(key, .ticks));
+        try testing.expect(master >= clocks.ticksOf(key));
     }
 
     for (clocks.pairs) |pair| {
@@ -693,7 +700,7 @@ test "ThreadClocks: concurrent grow" {
     const master = clocks.master.load(.acquire);
     for (0..thread_count) |i| {
         const key: ThreadClocks.Key = .{ .data = @intCast((i + 2) * 2) };
-        try testing.expect(master >= clocks.get(key, .ticks));
+        try testing.expect(master >= clocks.ticksOf(key));
     }
 }
 
@@ -709,12 +716,12 @@ test "ThreadClocks: removeIf removes only matching entries" {
     }
 
     const scoped = struct {
-        fn isOddData(key: *ThreadClocks.Key) bool {
+        fn isOddData(key: ThreadClocks.Key) bool {
             return (key.withoutCollisionBit().data / 2) % 2 == 1;
         }
     };
 
-    clocks.removeIf(scoped.isOddData, .{});
+    clocks.removeIf(scoped.isOddData);
 
     try testing.expectEqual(keys.len / 2, clocks.countLiveBits());
     for (keys, 0..) |key, i| {
@@ -738,7 +745,7 @@ test "ThreadClocks: externalWake charges full lag including sleep ticks" {
 
     // pre-sleep debt (10 - 5) + sleep-time ticks (30 - 10)
     try testing.expectEqual(25, clocks.externalWake(sleeper));
-    try testing.expectEqual(30, clocks.get(sleeper, .ticks));
+    try testing.expectEqual(30, clocks.ticksOf(sleeper));
     try testing.expectEqual(0, clocks.externalWake(sleeper));
 }
 
@@ -888,8 +895,8 @@ test "ThreadClocks: grow preserves ticks and pending lag" {
 
     for (keys, 0..) |key, i| {
         const expected_lag: ThreadClocks.Ticks = if (i % 2 == 0) @intCast(100 - i * 10) else 0;
-        try testing.expectEqual(i * 10, clocks.get(key, .ticks));
-        try testing.expectEqual(expected_lag, clocks.get(key, .lag));
+        try testing.expectEqual(i * 10, clocks.ticksOf(key));
+        try testing.expectEqual(expected_lag, clocks.lagOf(key));
     }
 }
 
@@ -912,7 +919,7 @@ test "ThreadClocks: repeated grow keeps every entry reachable" {
 
     try testing.expectEqual(min_cap * 4, clocks.pairs.len);
     try testing.expectEqual(keys.len, clocks.countLiveBits());
-    for (keys, 0..) |key, i| try testing.expectEqual(i, clocks.get(key, .ticks));
+    for (keys, 0..) |key, i| try testing.expectEqual(i, clocks.ticksOf(key));
 }
 
 test "ThreadClocks: slot reuse after remove" {
@@ -926,7 +933,7 @@ test "ThreadClocks: slot reuse after remove" {
     clocks.remove(key);
     try clocks.put(key, 9);
 
-    try testing.expectEqual(9, clocks.get(key, .ticks));
+    try testing.expectEqual(9, clocks.ticksOf(key));
     try testing.expectEqual(1, clocks.countLiveBits());
 }
 
@@ -948,7 +955,7 @@ test "ThreadClocks: forEach visits all live entries exactly once" {
     var ticks_sum: u32 = 0;
 
     const scoped = struct {
-        fn accumulate(_: ThreadClocks.Ticks, _: *ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
+        fn accumulate(_: ThreadClocks.Ticks, _: ThreadClocks.Key, value: *ThreadClocks.Value, c: *usize, sum: *u32) void {
             c.* += 1;
             sum.* += value.ticks;
         }

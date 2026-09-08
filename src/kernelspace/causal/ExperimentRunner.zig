@@ -30,7 +30,7 @@ pub fn init() !ExperimentRunner {
     return .{
         .profiled_pid = .init(0),
         .sampler = null,
-        .time_keeper = try VirtualTimeKeeper.init(atomic_allocator, isReaped, releaseKey),
+        .time_keeper = try TimeKeeper.init(atomic_allocator),
         .delay_pool = .empty,
         .vma_ranges = .empty,
         .vma_base = .init(0),
@@ -50,8 +50,12 @@ fn taskFromKey(key: VirtualTimeKeeper.Key) *kernel.Task {
     return @ptrFromInt(key.withoutCollisionBit().data);
 }
 
-fn isReaped(key: *VirtualTimeKeeper.Key) bool {
-    return taskFromKey(key.*).isReaped();
+fn isReaped(key: VirtualTimeKeeper.Key) bool {
+    return taskFromKey(key).isReaped();
+}
+
+fn releaseKey(key: VirtualTimeKeeper.Key) void {
+    taskFromKey(key).decrementReferences();
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
@@ -65,10 +69,6 @@ pub fn deinit(this: *ExperimentRunner) void {
     this.delay_pool.deinit();
     this.vma_ranges.deinit();
     this.time_keeper.deinit(atomic_allocator);
-}
-
-fn releaseKey(key: *VirtualTimeKeeper.Key) void {
-    taskFromKey(key.*).decrementReferences();
 }
 
 pub fn profilePid(
@@ -232,11 +232,15 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
 
     if (wakee.pid() != profiled_pid or wakee.isRunning() or wakee.isDead()) return;
 
-    const waker = kernel.Task.current();
-    if (kernel.execution.inTask() and waker.pid() == profiled_pid)
-        this.applyDelays(&this.time_keeper.onWake(keyFromTask(waker), keyFromTask(wakee)))
-    else
-        this.applyDelays(&this.time_keeper.onExternalWake(keyFromTask(wakee)));
+    const wakee_key = keyFromTask(wakee);
+
+    if (kernel.execution.inTask()) {
+        const waker = kernel.Task.current();
+        if (waker.pid() == profiled_pid)
+            return this.applyDelays(&this.time_keeper.onWake(keyFromTask(waker), wakee_key));
+    }
+
+    this.applyDelays(&this.time_keeper.onExternalWake(wakee_key));
 }
 
 fn abort(this: *ExperimentRunner, s: []const u8) void {
