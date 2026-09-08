@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 
-const ThreadClocks = @import("thread_safe/ThreadClocks.zig");
+const ThreadClocks = @import("ThreadClocks.zig");
 pub const Key = ThreadClocks.Key;
 pub const Value = ThreadClocks.Value;
 pub const Ticks = ThreadClocks.Ticks;

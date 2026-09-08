@@ -2,7 +2,7 @@ const std = @import("std");
 
 const payload = @import("serialization").payload;
 
-const DiskWriter = @import("DiskWriter.zig");
+const DiskWriter = @import("../io/DiskWriter.zig");
 
 const ExperimentRecorder = @This();
 

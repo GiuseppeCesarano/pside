@@ -33,6 +33,10 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    const ref_gate_mod = b.addModule("RefGate", .{
+        .root_source_file = b.path("src/kernelspace/concurrent/RefGate.zig"),
+    });
+
     const bindings_mod = b.addModule("kernel_bindings", .{
         .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
@@ -63,6 +67,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{
                 .{ .name = "communications", .module = communications_mod },
                 .{ .name = "kernel", .module = bindings_mod },
+                .{ .name = "RefGate", .module = ref_gate_mod },
                 .{ .name = "serialization", .module = serialization_mod },
             },
         }),
@@ -218,11 +223,12 @@ pub fn build(b: *std.Build) !void {
         path: []const u8,
         sanitize_thread: bool = false,
         use_llvm: ?bool = null,
+        imports: []const std.Build.Module.Import = &.{},
     }{
-        .{ .name = "thread_safe_refgate", .path = "src/kernelspace/causal/Engine/thread_safe/RefGate.zig", .sanitize_thread = true },
-        .{ .name = "thread_safe_threadclocks", .path = "src/kernelspace/causal/Engine/thread_safe/ThreadClocks.zig", .sanitize_thread = true },
-        .{ .name = "thread_safe_pool", .path = "src/kernelspace/causal/Engine/thread_safe/Pool.zig", .sanitize_thread = true },
-        .{ .name = "virtual_time_keeper", .path = "src/kernelspace/causal/Engine/VirtualTimeKeeper.zig", .sanitize_thread = true },
+        .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
+        .{ .name = "concurrent_pool", .path = "src/kernelspace/concurrent/Pool.zig", .sanitize_thread = true },
+        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
+        .{ .name = "causal_virtual_time_keeper", .path = "src/kernelspace/causal/time/VirtualTimeKeeper.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
     };
@@ -233,6 +239,7 @@ pub fn build(b: *std.Build) !void {
                 .target = target,
                 .optimize = optimize,
                 .sanitize_thread = spec.sanitize_thread,
+                .imports = spec.imports,
             }),
             .use_llvm = spec.use_llvm,
         });

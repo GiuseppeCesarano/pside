@@ -4,10 +4,10 @@ const assert = std.debug.assert;
 const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 
-const DelayPool = @import("thread_safe/DelayPool.zig");
-const VirtualTimeKeeper = @import("VirtualTimeKeeper.zig");
+const DelayPool = @import("../concurrent/DelayPool.zig");
+const VirtualTimeKeeper = @import("time/VirtualTimeKeeper.zig");
 const KeyAndLag = VirtualTimeKeeper.KeyAndLag;
-const VmaRanges = @import("VmaRanges.zig");
+const VmaRanges = @import("../process/VmaRanges.zig");
 
 const ExperimentRunner = @This();
 const TimeKeeper = VirtualTimeKeeper.GenericVirtualTimeKeeper(isReaped, releaseKey);

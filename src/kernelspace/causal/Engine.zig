@@ -5,9 +5,9 @@ const Pid = std.os.linux.pid_t;
 
 const kernel = @import("kernel");
 
-const ExperimentPlanner = @import("Engine/ExperimentPlanner.zig");
-const ExperimentRecorder = @import("Engine/ExperimentRecorder.zig");
-const ExperimentRunner = @import("Engine/ExperimentRunner.zig");
+const ExperimentPlanner = @import("ExperimentPlanner.zig");
+const ExperimentRecorder = @import("ExperimentRecorder.zig");
+const ExperimentRunner = @import("ExperimentRunner.zig");
 
 const Engine = @This();
 

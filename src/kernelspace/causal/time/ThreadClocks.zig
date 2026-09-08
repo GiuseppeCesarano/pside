@@ -2,7 +2,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
-const RefGate = @import("RefGate.zig");
+const RefGate = @import("RefGate");
 
 /// Concurrent map optimized for thread-local clock propagation.
 const ThreadClocks = @This();
