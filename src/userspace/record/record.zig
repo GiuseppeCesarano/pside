@@ -11,31 +11,29 @@ const OutputFile = @import("OutputFile.zig");
 const Program = @import("Program.zig");
 const TracedProcess = @import("TracedProcess.zig");
 
+const Flags = struct {
+    c: []const u8 = "",
+    p: []const u8 = "",
+    l: []const u8 = "",
+    prepare: []const u8 = "",
+    n: u32 = 1,
+    k: bool = false,
+};
+
 var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
-var stopped: std.atomic.Value(bool) = .init(false);
+var interrupted: std.atomic.Value(bool) = .init(false);
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
-    const parsed_options = options.parse(struct {
-        c: []const u8 = "",
-        p: []const u8 = "",
-        l: []const u8 = "",
-        prepare: []const u8 = "",
-        n: u32 = 1,
-        k: bool = false,
-    });
-
-    setIntHandler();
-
-    const io = init.io;
     const allocator = init.gpa;
+    const io = init.io;
 
+    const parsed_options = options.parse(Flags);
     cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ") catch std.process.exit(1);
     cli.validateOptions(parsed_options.parse_errors, "Could not parse: ") catch std.process.exit(1);
 
     const progress_point_name = parsed_options.flags.p;
-    const prepare_command = parsed_options.flags.prepare;
-    const runs_count = parsed_options.flags.n;
-    const attribute_kernel_samples = parsed_options.flags.k;
+
+    setSigintHandler();
 
     const profiled_program = Program.initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io) catch |err|
         switch (err) {
@@ -48,11 +46,10 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const user_ids = UserIds.sudoCallerFromEnviron(init.minimal.environ) catch |err|
         std.process.fatal("Could not read the invoking user ({s})", .{@errorName(err)});
 
-    const control_device, const we_loaded_driver = openControlDevice(io);
+    const control_device, const module_ownership = openControlDevice(io);
     defer {
         control_device.close(io);
-        if (we_loaded_driver) driverCommand(io, "unload") catch |err|
-            std.log.warn("Could not remove the kernel module ({s}); remove it manually with `sudo pside driver unload`.", .{@errorName(err)});
+        if (module_ownership == .ours) unloadModule(io);
     }
 
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ profiled_program, progress_point_name, allocator, io });
@@ -76,23 +73,23 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         control_device,
         output_file.file.handle,
         vma_name,
-        attribute_kernel_samples,
+        parsed_options.flags.k,
     ) catch |err| std.process.fatal("Could not use VMA name '{s}' ({s})", .{ vma_name, @errorName(err) });
 
-    const prepare: ?PrepareCommand = if (prepare_command.len != 0)
-        .{ .command = prepare_command, .user_ids = user_ids }
+    const prepare: ?PrepareCommand = if (parsed_options.flags.prepare.len != 0)
+        .{ .command = parsed_options.flags.prepare, .user_ids = user_ids }
     else
         null;
 
-    executeRuns(io, runs_count, prepare, profiled_program, patch_addresses, profiler);
+    executeRuns(io, parsed_options.flags.n, prepare, profiled_program, patch_addresses, profiler);
 
     std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(std.mem.span(profiled_program.path))});
 }
 
-fn setIntHandler() void {
+fn setSigintHandler() void {
     const sa = linux.Sigaction{
         .flags = 0,
-        .handler = .{ .handler = handleInterrupt },
+        .handler = .{ .handler = handleSigint },
         .mask = linux.sigemptyset(),
     };
 
@@ -100,19 +97,19 @@ fn setIntHandler() void {
         std.log.warn("Could not set SIGINT handler; Ctrl-C may leave the traced process running.", .{});
 }
 
-fn handleInterrupt(sig: linux.SIG) callconv(.c) void {
+fn handleSigint(sig: linux.SIG) callconv(.c) void {
     if (sig == .INT) {
         const pid = global_traced_pid.swap(0, .acq_rel);
         if (pid != 0) _ = linux.kill(pid, .KILL);
-        stopped.store(true, .monotonic);
+        interrupted.store(true, .monotonic);
     }
 }
 
-const OpenedControlDevice = struct { KernelControlDevice, bool };
+const ModuleOwnership = enum { ours, preexisting };
 
-fn openControlDevice(io: std.Io) OpenedControlDevice {
+fn openControlDevice(io: std.Io) struct { KernelControlDevice, ModuleOwnership } {
     const device = KernelControlDevice.open(io) catch |err| {
-        if (err == KernelControlDevice.OpenControlError.ModuleNotLoaded and linux.geteuid() == 0) return loadDriverAndOpen(io);
+        if (err == KernelControlDevice.OpenControlError.ModuleNotLoaded and linux.geteuid() == 0) return loadModuleAndOpen(io);
 
         switch (err) {
             KernelControlDevice.OpenControlError.ModuleNotLoaded => std.process.fatal("The pside module is not loaded\n\trun: sudo pside driver load", .{}),
@@ -121,25 +118,30 @@ fn openControlDevice(io: std.Io) OpenedControlDevice {
         }
     };
 
-    return .{ device, false };
+    return .{ device, .preexisting };
 }
 
-fn loadDriverAndOpen(io: std.Io) OpenedControlDevice {
-    driverCommand(io, "load") catch std.process.fatal("Could not load the kernel module", .{});
+fn loadModuleAndOpen(io: std.Io) struct { KernelControlDevice, ModuleOwnership } {
+    driverCommand(io, .load) catch std.process.fatal("Could not load the kernel module", .{});
 
     const device = KernelControlDevice.open(io) catch |err| {
-        driverCommand(io, "unload") catch {};
+        driverCommand(io, .unload) catch {};
         std.process.fatal("Could not open {s} after loading the module ({s})", .{ communications.control_device_path, @errorName(err) });
     };
 
-    return .{ device, true };
+    return .{ device, .ours };
+}
+
+fn unloadModule(io: std.Io) void {
+    driverCommand(io, .unload) catch |err|
+        std.log.warn("Could not remove the kernel module ({s}); remove it manually with `sudo pside driver unload`.", .{@errorName(err)});
 }
 
 const DriverError = error{ CouldNotSpawn, CouldNotWait, DriverCommandFailed };
 
-fn driverCommand(io: std.Io, verb: []const u8) DriverError!void {
+fn driverCommand(io: std.Io, verb: enum { load, unload }) DriverError!void {
     var child = std.process.spawn(io, .{
-        .argv = &.{ "/proc/self/exe", "driver", verb, "--silent" },
+        .argv = &.{ "/proc/self/exe", "driver", @tagName(verb), "--silent" },
     }) catch return DriverError.CouldNotSpawn;
 
     const term = child.wait(io) catch return DriverError.CouldNotWait;
@@ -150,44 +152,12 @@ fn driverCommand(io: std.Io, verb: []const u8) DriverError!void {
 fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
     if (flag.len != 0) return flag;
 
-    const path = std.mem.span(program_path);
-    const base = std.fs.path.basename(path);
-
-    return if (std.mem.lastIndexOfScalar(u8, base, '.')) |dot|
-        base[0..dot]
-    else
-        base;
+    return std.fs.path.basename(std.mem.span(program_path));
 }
-
-const PrepareCommand = struct {
-    command: []const u8,
-    user_ids: ?UserIds,
-
-    pub const Error = error{ CouldNotSpawn, CouldNotWait, PrepareCommandFailed };
-
-    fn run(prepare: PrepareCommand, io: std.Io) Error!void {
-        const uid, const gid = if (prepare.user_ids) |ids| .{ ids.uid, ids.gid } else .{ null, null };
-
-        var child = std.process.spawn(io, .{
-            .argv = &.{ "/bin/sh", "-c", prepare.command },
-            .uid = uid,
-            .gid = gid,
-        }) catch return Error.CouldNotSpawn;
-
-        const term = child.wait(io) catch return Error.CouldNotWait;
-
-        if (!term.success()) {
-            std.log.err("Prepare command '{s}' {f}", .{ prepare.command, term });
-            return Error.PrepareCommandFailed;
-        }
-    }
-};
 
 const Profiler = struct {
     device: KernelControlDevice,
-    output_fd: linux.fd_t,
-    vma_name: []const u8,
-    attribute_kernel_samples: bool,
+    start_options: communications.StartOptions,
 
     pub const InitError = communications.StartOptions.InitError;
 
@@ -197,29 +167,49 @@ const Profiler = struct {
         vma_name: []const u8,
         attribute_kernel_samples: bool,
     ) InitError!Profiler {
-        if (!communications.StartOptions.vmaNameFits(vma_name)) return InitError.VmaNameTooLong;
-
         return .{
             .device = device,
-            .output_fd = output_fd,
-            .vma_name = vma_name,
-            .attribute_kernel_samples = attribute_kernel_samples,
+            .start_options = try .init(undefined, output_fd, vma_name, attribute_kernel_samples),
         };
     }
 
-    fn start(profiler: Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
-        const start_options = communications.StartOptions.init(
-            pid,
-            profiler.output_fd,
-            profiler.vma_name,
-            profiler.attribute_kernel_samples,
-        ) catch unreachable;
-
-        return profiler.device.startProfilerOnPid(start_options);
+    fn controlFd(this: Profiler) linux.fd_t {
+        return this.device.ctl.handle;
     }
 
-    fn stop(profiler: Profiler) KernelControlDevice.ControlError!void {
-        return profiler.device.stop();
+    fn start(this: Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
+        var start_options = this.start_options;
+        start_options.pid = pid;
+
+        return this.device.startProfilerOnPid(start_options);
+    }
+
+    fn stop(this: Profiler) KernelControlDevice.ControlError!void {
+        return this.device.stop();
+    }
+};
+
+const PrepareCommand = struct {
+    command: []const u8,
+    user_ids: ?UserIds,
+
+    pub const RunError = error{ CouldNotSpawn, CouldNotWait, PrepareCommandFailed };
+
+    fn run(this: PrepareCommand, io: std.Io) RunError!void {
+        const uid, const gid = if (this.user_ids) |ids| .{ ids.uid, ids.gid } else .{ null, null };
+
+        var child = std.process.spawn(io, .{
+            .argv = &.{ "/bin/sh", "-c", this.command },
+            .uid = uid,
+            .gid = gid,
+        }) catch return RunError.CouldNotSpawn;
+
+        const term = child.wait(io) catch return RunError.CouldNotWait;
+
+        if (!term.success()) {
+            std.log.err("Prepare command '{s}' {f}", .{ this.command, term });
+            return RunError.PrepareCommandFailed;
+        }
     }
 };
 
@@ -232,7 +222,7 @@ fn executeRuns(
     profiler: Profiler,
 ) void {
     var run: u32 = 0;
-    while (run < runs_count and !stopped.load(.monotonic)) : (run += 1) {
+    while (run < runs_count and !interrupted.load(.monotonic)) : (run += 1) {
         std.log.info("Run {}/{}", .{ run + 1, runs_count });
         executeRun(io, prepare, profiled_program, patch_addresses, profiler);
     }
@@ -261,7 +251,7 @@ fn executeRun(
         else => std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)}),
     };
 
-    for (patch_addresses) |address| profiled_process.patchProgressPoint(address, profiler.device.ctl.handle) catch |err|
+    for (patch_addresses) |address| profiled_process.patchProgressPoint(address, profiler.controlFd()) catch |err|
         std.process.fatal("Could not patch the program's progress points ({s})", .{@errorName(err)});
 
     profiled_process.start() catch |err|

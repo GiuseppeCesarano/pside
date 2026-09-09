@@ -3,6 +3,8 @@ const linux = std.os.linux;
 
 const communications = @import("communications");
 
+const KernelControlDevice = @This();
+
 ctl: std.Io.File,
 
 pub const ControlError = error{
@@ -32,7 +34,7 @@ pub const OpenControlError = error{
     Unexpected,
 };
 
-pub fn open(io: std.Io) OpenControlError!@This() {
+pub fn open(io: std.Io) OpenControlError!KernelControlDevice {
     const ctl = std.Io.Dir.openFileAbsolute(io, communications.control_device_path, .{ .mode = .read_write }) catch |err| return switch (err) {
         error.FileNotFound => OpenControlError.ModuleNotLoaded,
         error.AccessDenied => OpenControlError.AccessDenied,
@@ -49,11 +51,11 @@ pub fn open(io: std.Io) OpenControlError!@This() {
     return .{ .ctl = ctl };
 }
 
-pub fn close(this: @This(), io: std.Io) void {
+pub fn close(this: KernelControlDevice, io: std.Io) void {
     this.ctl.close(io);
 }
 
-pub fn startProfilerOnPid(this: @This(), start: communications.StartOptions) ControlError!void {
+pub fn startProfilerOnPid(this: KernelControlDevice, start: communications.StartOptions) ControlError!void {
     const data: communications.Data = .{ .start = start };
     const rc = linux.ioctl(
         this.ctl.handle,
@@ -67,7 +69,7 @@ pub fn startProfilerOnPid(this: @This(), start: communications.StartOptions) Con
     };
 }
 
-pub fn stop(this: @This()) ControlError!void {
+pub fn stop(this: KernelControlDevice) ControlError!void {
     const data: communications.Data = .{ .empty = {} };
 
     const rc = linux.ioctl(

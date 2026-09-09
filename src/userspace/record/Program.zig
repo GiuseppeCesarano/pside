@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const Program = @This();
 
 path: [*:0]const u8,

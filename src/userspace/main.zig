@@ -56,8 +56,9 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\  -p <name>          Progress point to maximise, as passed to
         \\                     PSIDE_THROUGHPUT_POINT() in the source. Defaults
         \\                     to whichever progress point is found first.
-        \\  -l <name>          VMA / section name to restrict profiling to.
-        \\                     Defaults to the program name without its extension.
+        \\  -l <name>          VMA name to restrict profiling to: the mapped
+        \\                     file's name, matched exactly. Defaults to the
+        \\                     program's file name.
         \\  -prepare <cmd>     Command run through `sh -c` before every run, e.g.
         \\                     -prepare "make clean". Recording aborts if it fails.
         \\  -n <count>         Number of runs to execute (default: 1). More runs
