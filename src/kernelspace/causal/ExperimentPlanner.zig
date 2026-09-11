@@ -1,11 +1,5 @@
 const std = @import("std");
 
-pub const Experiment = struct {
-    speedup_percent: u16,
-    delay_per_tick: u16,
-    duration: usize,
-};
-
 const ExperimentPlanner = @This();
 
 const initial_experiment_duration = 50 * std.time.us_per_ms;
@@ -19,6 +13,12 @@ pub fn init(seed: u64) ExperimentPlanner {
         .experiment_duration = initial_experiment_duration,
     };
 }
+
+pub const Experiment = struct {
+    speedup_percent: u16,
+    delay_per_tick: u16,
+    duration: usize,
+};
 
 pub fn nextExperiment(this: *ExperimentPlanner, sampler_frequency: u32) Experiment {
     const random = this.prng.random();

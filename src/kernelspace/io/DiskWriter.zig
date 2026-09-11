@@ -71,7 +71,7 @@ pub fn push(this: *DiskWriter, record: anytype) !void {
 
     const len = this.buffer.len;
     const end = this.buffer_end.load(.monotonic);
-    const begin = this.buffer_begin.load(.monotonic);
+    const begin = this.buffer_begin.load(.acquire);
 
     const free = if (end >= begin)
         len - (end - begin) - 1
@@ -135,7 +135,7 @@ pub fn flush(this: *DiskWriter) void {
         return;
     };
 
-    this.buffer_begin.store(end, .monotonic);
+    this.buffer_begin.store(end, .release);
 }
 
 fn writeRecordsFrame(this: *DiskWriter, payload_header: payload.Header, begin: usize, end: usize, len: usize) !void {
