@@ -228,9 +228,11 @@ pub fn tick(this: *ThreadClocks, key: Key) !void {
     const slot = this.getSlotUnsafe(key, key.hash()).?;
     const value_as_ticks: *std.atomic.Value(u64) = @ptrCast(&slot.value);
 
-    const ticks: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticks_lsb, .monotonic));
+    const value: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticks_lsb, .monotonic));
+    const ticks = value.ticks + 1; // Account for the just done + 1
 
-    _ = this.master.fetchMax(ticks.ticks + 1, .release);
+    if (this.master.load(.monotonic) < ticks)
+        _ = this.master.fetchMax(ticks, .monotonic);
 }
 
 pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
@@ -238,7 +240,7 @@ pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
     defer this.ref.decrement();
 
     const slot = this.getSlotUnsafe(key, key.hash()).?;
-    const master = this.master.load(.acquire);
+    const master = this.master.load(.monotonic);
     const ticks = slot.value.load(.monotonic).ticks;
 
     slot.value.store(.{ .ticks = ticks, .master_at_sleep = master }, .monotonic);
@@ -253,7 +255,7 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
     const wakee_slot = this.getSlotUnsafe(wakee, wakee.hash()).?;
     const wakee_value = wakee_slot.value.load(.monotonic);
 
-    const master = this.master.load(.acquire);
+    const master = this.master.load(.monotonic);
 
     const waker_slot = this.getSlotUnsafe(waker, waker.hash());
     const waker_ticks = if (waker_slot) |slot| slot.value.load(.monotonic).ticks else master;
@@ -275,7 +277,7 @@ pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
 
     const slot = this.getSlotUnsafe(key, key.hash()).?;
 
-    const master = this.master.load(.acquire);
+    const master = this.master.load(.monotonic);
     const old = slot.value.swap(.atValue(master), .monotonic);
 
     return master - old.ticks;
@@ -302,7 +304,7 @@ pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
     const parent_slot = this.getSlotUnsafe(parent, parent.hash()).?;
     const child_slot = try this.reserveSlotUnsafe(child, child.hash());
 
-    const master = this.master.load(.acquire);
+    const master = this.master.load(.monotonic);
     const parent_ticks = parent_slot.value.load(.monotonic).ticks;
 
     parent_slot.value.store(.atValue(master), .monotonic);

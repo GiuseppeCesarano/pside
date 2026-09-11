@@ -22,7 +22,8 @@ pub inline fn increment(this: *RefGate) void {
 
         _ = this.references.fetchSub(1, .monotonic);
 
-        while (this.references.load(.monotonic) & lock_bit != 0) std.atomic.spinLoopHint();
+        while (this.references.load(.monotonic) & lock_bit != 0)
+            std.atomic.spinLoopHint();
 
         ref = this.references.fetchAdd(1, .acquire);
         assert((ref & references_mask) != references_mask);
@@ -30,6 +31,9 @@ pub inline fn increment(this: *RefGate) void {
 }
 
 pub inline fn tryIncrement(this: *RefGate) !void {
+    if (this.references.load(.monotonic) & lock_bit != 0)
+        return error.WouldBlock;
+
     const ref = this.references.fetchAdd(1, .acquire);
     assert((ref & references_mask) != references_mask);
     if (ref & lock_bit != 0) {
@@ -43,9 +47,11 @@ pub inline fn decrement(this: *RefGate) void {
 }
 
 pub inline fn close(this: *RefGate) void {
-    while (this.references.fetchOr(lock_bit, .acquire) & lock_bit != 0) {
+    while (this.references.load(.monotonic) & lock_bit != 0 or
+        this.references.fetchOr(lock_bit, .acquire) & lock_bit != 0)
+    {
         @branchHint(.cold);
-        while (this.references.load(.monotonic) & lock_bit != 0) std.atomic.spinLoopHint();
+        std.atomic.spinLoopHint();
     }
 }
 
