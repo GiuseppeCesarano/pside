@@ -144,7 +144,7 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     defer auxv.close(io);
     var reader = auxv.reader(io, &buff);
 
-    while (try reader.interface.takeInt(usize, .native) != std.elf.AT_ENTRY) {
+    while (try reader.interface.takeInt(usize, .native) != std.elf.AT.ENTRY) {
         if (try reader.interface.discardShort(@sizeOf(usize)) < @sizeOf(usize)) return std.Io.Reader.Error.EndOfStream;
     }
 

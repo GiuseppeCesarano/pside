@@ -97,8 +97,7 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
             c.pending.release(index);
 
             slot.task.addWork(&slot.work, .signal) catch |err| {
-                c.free.release(index);
-                this.releaseUser();
+                this.cancel(slot);
 
                 if (err != error.TooLateShuttingDown) failure = err;
             };
@@ -121,6 +120,7 @@ fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Er
 
     const slot = this.getEntry() orelse try this.reserveInNewAllocation();
 
+    task.incrementReferences();
     slot.task = task;
     slot.time.store(delay_time, .release);
 
@@ -189,6 +189,7 @@ fn freeEntry(this: *DelayPool, slot: *DelayWork) void {
 }
 
 fn cancel(this: *DelayPool, slot: *DelayWork) void {
+    slot.task.decrementReferences();
     this.freeEntry(slot);
     this.releaseUser();
 }
@@ -200,6 +201,7 @@ fn cancelAllPending(this: *DelayPool) void {
         var it = c.pending.iterate();
 
         while (it.next()) |index| {
+            c.entries[index].task.decrementReferences();
             c.pending.release(index);
             c.free.release(index);
             this.releaseUser();
@@ -215,8 +217,10 @@ fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
     const delay_time = slot.time.load(.acquire);
     const this: *DelayPool = slot.pool;
+    const task = slot.task;
 
     this.freeEntry(slot);
+    task.decrementReferences();
 
     kernel.time.sleep.us(delay_time);
 

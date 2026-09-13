@@ -229,12 +229,10 @@ pub const time = struct {
     pub const sleep = struct {
         extern fn c_sleep(usize) void;
         pub inline fn us(usec: usize) void {
-            if (usec == 0) return;
-            if (usec > 5) {
-                c_sleep(usec);
-            } else {
+            if (usec > 5)
+                c_sleep(usec)
+            else
                 delay.us(usec);
-            }
         }
     };
 };
@@ -281,12 +279,6 @@ pub const Task = opaque {
     extern fn c_task_is_dead(*Task) c_int;
     pub fn isDead(this: *Task) bool {
         return c_task_is_dead(this) != 0;
-    }
-
-    extern fn c_task_is_reaped(*Task) c_int;
-    /// True once the task went through release_task, well past its exit wakes.
-    pub fn isReaped(this: *Task) bool {
-        return c_task_is_reaped(this) != 0;
     }
 
     pub const Work = extern struct {
@@ -516,6 +508,20 @@ pub const tracepoint = struct {
                 c_unregister_sched_switch(trace, data);
             }
         };
+
+        pub const process_exit = struct {
+            pub const Callback = *const fn (data: ?*anyopaque, task: *Task, group_dead: bool) callconv(.c) void;
+
+            extern fn c_register_sched_process_exit(probe: Callback, data: ?*anyopaque) c_int;
+            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
+                if (c_register_sched_process_exit(trace, data) != 0) return RegistrationError.Failed;
+            }
+
+            extern fn c_unregister_sched_process_exit(probe: Callback, data: ?*anyopaque) void;
+            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
+                c_unregister_sched_process_exit(trace, data);
+            }
+        };
     };
 
     pub const task = struct {
@@ -541,6 +547,12 @@ pub const execution = struct {
     /// True when running in process context (not hardirq/softirq/NMI).
     pub fn inTask() bool {
         return c_in_task() != 0;
+    }
+
+    extern fn c_can_sleep() c_int;
+
+    pub fn canSleep() bool {
+        return c_can_sleep() != 0;
     }
 
     extern fn c_current_user_ip() usize;

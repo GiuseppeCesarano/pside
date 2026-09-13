@@ -64,6 +64,10 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\  -n <count>         Number of runs to execute (default: 1). More runs
         \\                     give a cleaner, higher-confidence profile; further
         \\                     runs against the same .pside file are aggregated.
+        \\  -k                 Also sample while the profiled thread is in kernel
+        \\                     mode, charging the tick to the userspace call site
+        \\                     that entered the kernel. Off by default, so time
+        \\                     spent in syscalls is attributed to no site.
         \\
         \\REPORT
         \\  <file.pside>       A profile produced by `pside record`.

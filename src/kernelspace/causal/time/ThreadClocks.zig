@@ -188,7 +188,7 @@ pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
 pub fn lagOf(this: *ThreadClocks, key: Key) Ticks {
     const value = this.valueOf(key);
 
-    return value.master_at_sleep - value.ticks;
+    return value.master_at_sleep -| value.ticks;
 }
 
 pub fn tick(this: *ThreadClocks, key: Key) !void {
@@ -217,9 +217,10 @@ pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
 }
 
 /// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
-/// Returns the delay amounts those threads should sleep
-pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
-    this.ref.increment();
+/// Returns the delay amounts those threads should sleep, null when the map is gated:
+/// callers run in irq context and cannot spin on a gate this cpu may itself hold.
+pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) ?[2]Ticks {
+    this.ref.tryIncrement() catch return null;
     defer this.ref.decrement();
 
     const wakee_slot = this.getSlotUnsafe(wakee, wakee.hash()).?;
@@ -236,21 +237,22 @@ pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) [2]Ticks {
     wakee_slot.value.store(.atValue(master), .monotonic);
     if (waker_slot) |slot| slot.value.store(.atValue(master), .monotonic);
 
-    const waker_lag = master - waker_ticks;
+    const waker_lag = master -| waker_ticks;
     return .{ waker_lag, waker_lag + wakee_lag -| wakee_credit };
 }
 
-/// Returns the full lag a thread woken by an external event must repay itself.
-pub fn externalWake(this: *ThreadClocks, key: Key) Ticks {
-    this.ref.increment();
+/// Settles a thread's clock against the master and returns the lag it must
+/// repay itself. Null when the thread is not tracked or the map is gated.
+pub fn catchUp(this: *ThreadClocks, key: Key) ?Ticks {
+    this.ref.tryIncrement() catch return null;
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()).?;
+    const slot = this.getSlotUnsafe(key, key.hash()) orelse return null;
 
     const master = this.master.load(.monotonic);
     const old = slot.value.swap(.atValue(master), .monotonic);
 
-    return master - old.ticks;
+    return master -| old.ticks;
 }
 
 pub fn removePairUnsafe(this: *ThreadClocks, slot: *Pair) void {
@@ -258,12 +260,14 @@ pub fn removePairUnsafe(this: *ThreadClocks, slot: *Pair) void {
     _ = slot.key.fetchAnd(Key.empty_collided, .release);
 }
 
-pub fn remove(this: *ThreadClocks, key: Key) void {
+pub fn remove(this: *ThreadClocks, key: Key) bool {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()) orelse return;
+    const slot = this.getSlotUnsafe(key, key.hash()) orelse return false;
     this.removePairUnsafe(slot);
+
+    return true;
 }
 
 /// Tracks a thread forking.
@@ -283,7 +287,7 @@ pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
 
     this.publishReservedUnsafe(child, child_slot);
 
-    return master - parent_ticks;
+    return master -| parent_ticks;
 }
 
 pub const Iterator = struct {
@@ -429,7 +433,7 @@ test "ThreadClocks: sleep and wake logic" {
     // lag = master (20) - ticks (5) = 15
     try testing.expectEqual(15, clocks.lagOf(wakee));
 
-    const delays = clocks.wake(waker, wakee);
+    const delays = clocks.wake(waker, wakee).?;
 
     // waker_lag = master(20) - waker_ticks(10) = 10
     // wakee_lag = waker_lag(10) + wakee_lag(15) = 25
@@ -452,15 +456,15 @@ test "ThreadClocks: wake without prepareForSleep yields zero wakee lag" {
     try clocks.put(wakee, 5);
     clocks.master.store(20, .release);
 
-    const first = clocks.wake(waker, wakee);
+    const first = clocks.wake(waker, wakee).?;
     try testing.expectEqual(10, first[0]);
     try testing.expectEqual(10, first[1]);
 
-    const second = clocks.wake(waker, wakee);
+    const second = clocks.wake(waker, wakee).?;
     try testing.expectEqual(0, second[0]);
     try testing.expectEqual(0, second[1]);
 
-    try testing.expectEqual(0, clocks.externalWake(wakee));
+    try testing.expectEqual(0, clocks.catchUp(wakee));
 }
 
 test "ThreadClocks: fork" {
@@ -516,7 +520,7 @@ test "ThreadClocks: Causal Mechanics" {
     clocks.master.store(100, .release);
     clocks.prepareForSleep(child);
 
-    const d = clocks.wake(parent, child);
+    const d = clocks.wake(parent, child).?;
     try testing.expectEqual(50, d[0]);
     try testing.expectEqual(100, d[1]);
 }
@@ -645,7 +649,7 @@ test "ThreadClocks: concurrent grow" {
     }
 }
 
-test "ThreadClocks: externalWake charges full lag including sleep ticks" {
+test "ThreadClocks: catchUp charges full lag including sleep ticks" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
     defer clocks.deinit(allocator);
@@ -659,9 +663,32 @@ test "ThreadClocks: externalWake charges full lag including sleep ticks" {
     clocks.master.store(30, .release);
 
     // pre-sleep debt (10 - 5) + sleep-time ticks (30 - 10)
-    try testing.expectEqual(25, clocks.externalWake(sleeper));
+    try testing.expectEqual(25, clocks.catchUp(sleeper));
     try testing.expectEqual(30, clocks.ticksOf(sleeper));
-    try testing.expectEqual(0, clocks.externalWake(sleeper));
+    try testing.expectEqual(0, clocks.catchUp(sleeper));
+}
+
+test "ThreadClocks: a closed gate yields nothing owed instead of blocking" {
+    const allocator = testing.allocator;
+    var clocks = try ThreadClocks.init(allocator, min_cap);
+    defer clocks.deinit(allocator);
+
+    const waker: ThreadClocks.Key = .{ .data = 2 };
+    const wakee: ThreadClocks.Key = .{ .data = 4 };
+
+    try clocks.put(waker, 10);
+    try clocks.put(wakee, 5);
+    clocks.master.store(20, .release);
+
+    clocks.ref.close();
+    clocks.ref.drain();
+
+    try testing.expectEqual(null, clocks.wake(waker, wakee));
+    try testing.expectEqual(null, clocks.catchUp(wakee));
+
+    clocks.ref.open();
+
+    try testing.expectEqual(10, clocks.catchUp(waker));
 }
 
 test "ThreadClocks: remove tolerates untracked keys" {
@@ -674,10 +701,10 @@ test "ThreadClocks: remove tolerates untracked keys" {
 
     try clocks.put(tracked, 10);
 
-    clocks.remove(untracked);
+    try testing.expectEqual(false, clocks.remove(untracked));
     try testing.expectEqual(1, clocks.used.countTaken());
 
-    clocks.remove(tracked);
+    try testing.expectEqual(true, clocks.remove(tracked));
     try testing.expectEqual(0, clocks.used.countTaken());
 }
 
@@ -837,7 +864,7 @@ test "ThreadClocks: slot reuse after remove" {
     const key: ThreadClocks.Key = .{ .data = 42 };
 
     try clocks.put(key, 7);
-    clocks.remove(key);
+    _ = clocks.remove(key);
     try clocks.put(key, 9);
 
     try testing.expectEqual(9, clocks.ticksOf(key));
@@ -896,7 +923,7 @@ test "ThreadClocks: the taken bits of a grown map point at live entries" {
         try clocks.put(key.*, 0);
     }
 
-    for (&keys, 0..) |key, i| if (i % 2 == 0) clocks.remove(key);
+    for (&keys, 0..) |key, i| _ = if (i % 2 == 0) clocks.remove(key);
 
     try clocks.grow(allocator);
 

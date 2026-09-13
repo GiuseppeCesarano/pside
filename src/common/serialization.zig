@@ -150,6 +150,7 @@ pub const payload = struct {
     };
 
     pub const VmaId = u32;
+    pub const default_vma_id: VmaId = 0;
 
     pub const Frame = struct {
         pub const Iterator = struct {
@@ -217,7 +218,7 @@ pub const payload = struct {
 
             kind: Kind,
             record_size: u16,
-            vma_id: u32,
+            vma_id: VmaId,
         };
 
         pub const Throughput = extern struct {

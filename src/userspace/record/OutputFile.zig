@@ -93,7 +93,7 @@ fn create(
 
     const header: serialization.Header = .init(program_hash);
     const binary_path: payload.Frame = .{ .tag = .binary_path, .body = program_path };
-    const vma: payload.Vma = .{ .id = 0, .name = vma_name }; // TODO: id should not be always 0.
+    const vma: payload.Vma = .{ .id = payload.default_vma_id, .name = vma_name };
 
     try header.write(w);
     try binary_path.write(w);

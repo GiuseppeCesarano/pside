@@ -6,6 +6,8 @@ const DiskWriter = @import("../io/DiskWriter.zig");
 
 const ExperimentRecorder = @This();
 
+pub const Error = error{ Full, DelayExceedsWindow };
+
 pub const Reading = struct {
     progress: usize,
     vclock: u64,
@@ -21,7 +23,7 @@ pub fn deinit(this: *ExperimentRecorder) void {
 }
 
 pub fn start(this: *ExperimentRecorder, fd: std.os.linux.fd_t) !void {
-    try this.disk_writer.start(fd, .throughput, @sizeOf(payload.records.Throughput), 0);
+    try this.disk_writer.start(fd, .throughput, @sizeOf(payload.records.Throughput), payload.default_vma_id);
 }
 
 pub fn recordThroughput(
@@ -31,9 +33,10 @@ pub fn recordThroughput(
     delay_per_tick: u16,
     relative_ip: usize,
     speedup_percent: u16,
-) !void {
+) Error!void {
     const wall = end.time_us - base.time_us;
     const injected_delay = (end.vclock - base.vclock) * delay_per_tick;
+    if (injected_delay >= wall) return Error.DelayExceedsWindow;
 
     const progress_delta: f32 = @floatFromInt(end.progress -% base.progress);
     const virtual_time: f32 = @floatFromInt(wall - injected_delay);

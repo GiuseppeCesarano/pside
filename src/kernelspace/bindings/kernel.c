@@ -84,7 +84,6 @@ pid_t c_pid(struct task_struct *);
 int c_task_thread_count(struct task_struct *);
 int c_task_is_running(struct task_struct *);
 int c_task_is_dead(struct task_struct *);
-int c_task_is_reaped(struct task_struct *);
 int c_task_work_resolve(void);
 int c_task_work_add(struct task_struct *, struct callback_head *, int);
 struct task_struct *c_get_task_from_tid(pid_t);
@@ -140,6 +139,8 @@ int c_register_sched_waking(void *, void *);
 void c_unregister_sched_waking(void *, void *);
 int c_register_task_newtask(void *, void *);
 void c_unregister_task_newtask(void *, void *);
+int c_register_sched_process_exit(void *, void *);
+void c_unregister_sched_process_exit(void *, void *);
 void c_tracepoint_sync(void);
 
 /* Preemption */
@@ -148,6 +149,7 @@ void c_preempt_enable(void);
 
 /* Execution context */
 int c_in_task(void);
+int c_can_sleep(void);
 
 /* Completion */
 void c_init_completion(struct completion *);
@@ -203,9 +205,6 @@ int c_task_is_running(struct task_struct *task) {
 }
 int c_task_is_dead(struct task_struct *task) {
   return (task->flags & PF_EXITING) || (task->exit_state != 0);
-}
-int c_task_is_reaped(struct task_struct *task) {
-  return task->exit_state == EXIT_DEAD;
 }
 
 unsigned long c_current_user_ip(void) {
@@ -480,6 +479,7 @@ static struct tracepoint_provider {
   struct tracepoint *sched_waking;
   struct tracepoint *sched_switch;
   struct tracepoint *task_newtask;
+  struct tracepoint *sched_process_exit;
 } __attribute__((aligned(32))) tp_prov = {0};
 
 static void lookup_all_tps(struct tracepoint *tp, void *priv) {
@@ -489,6 +489,8 @@ static void lookup_all_tps(struct tracepoint *tp, void *priv) {
     tp_prov.sched_switch = tp;
   } else if (strcmp(tp->name, "task_newtask") == 0) {
     tp_prov.task_newtask = tp;
+  } else if (strcmp(tp->name, "sched_process_exit") == 0) {
+    tp_prov.sched_process_exit = tp;
   }
 }
 
@@ -530,6 +532,18 @@ void c_unregister_task_newtask(void *callback, void *data) {
     tracepoint_probe_unregister(tp_prov.task_newtask, callback, data);
   }
 }
+int c_register_sched_process_exit(void *callback, void *data) {
+  if (!tp_prov.sched_process_exit)
+    return -ENOENT;
+  return tracepoint_probe_register(tp_prov.sched_process_exit, callback, data);
+}
+
+void c_unregister_sched_process_exit(void *callback, void *data) {
+  if (tp_prov.sched_process_exit) {
+    tracepoint_probe_unregister(tp_prov.sched_process_exit, callback, data);
+  }
+}
+
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
 
 /* Preemption */
@@ -538,6 +552,7 @@ void c_preempt_enable(void) { preempt_enable(); }
 
 /* Execution context */
 int c_in_task(void) { return in_task(); }
+int c_can_sleep(void) { return preemptible(); }
 
 /* Completion */
 void c_init_completion(struct completion *c) { init_completion(c); }

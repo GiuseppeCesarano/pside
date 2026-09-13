@@ -16,6 +16,8 @@ pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics wit
 
 const clocks_reserve = 1024;
 
+const max_exit_payment_us = 50 * std.time.us_per_ms;
+
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
 clocks: ThreadClocks,
@@ -55,6 +57,7 @@ fn taskFromKey(key: Key) *kernel.Task {
 pub fn deinit(this: *ExperimentRunner) void {
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
     kernel.tracepoint.task.newtask.unregister(onNewTask, this);
     kernel.tracepoint.sync();
 
@@ -103,6 +106,9 @@ pub fn profilePid(
     try kernel.tracepoint.task.newtask.register(onNewTask, this);
     errdefer kernel.tracepoint.task.newtask.unregister(onNewTask, this);
 
+    try kernel.tracepoint.sched.process_exit.register(onSchedProcessExit, this);
+    errdefer kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
+
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
         .config = @backingInt(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
@@ -111,6 +117,7 @@ pub fn profilePid(
             .freq = true,
             .disabled = true,
             .inherit = true,
+            .inherit_thread = true,
             .exclude_guest = true,
             .exclude_hv = true,
             .exclude_idle = true,
@@ -181,7 +188,7 @@ fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     const task = taskFromKey(key);
     if (task.isDead()) return;
 
-    this.delay_pool.delay(task, lag * delay_per_tick) catch |err| switch (err) {
+    this.delay_pool.delay(task, @as(usize, lag) * delay_per_tick) catch |err| switch (err) {
         // Past exit_task_work the work can never run; the task is off any critical path.
         error.TooLateShuttingDown => {},
         else => this.abort("Could not apply delay"),
@@ -195,7 +202,7 @@ fn settleDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     if (delay_per_tick == 0 or lag == 0 or task.isDead()) return;
 
-    this.delay_pool.pendDelay(task, lag * delay_per_tick) catch this.abort("Could not pend delay");
+    this.delay_pool.pendDelay(task, @as(usize, lag) * delay_per_tick) catch this.abort("Could not pend delay");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -224,11 +231,15 @@ fn captureProfilingTarget(this: *ExperimentRunner, ip: usize) bool {
     return we_claimed_first;
 }
 
-fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) void {
+fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callconv(.c) void {
     const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
     const parent = kernel.Task.current();
 
-    if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
+    const profiled_pid = this.profiled_pid.load(.monotonic);
+    if (parent.pid() != profiled_pid) return;
+    if (clone_flags & std.os.linux.CLONE.THREAD == 0) return;
+
+    assert(child.pid() == profiled_pid);
 
     const parent_key = keyFromTask(parent);
     const child_key = keyFromTask(child);
@@ -268,14 +279,41 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
         const waker = kernel.Task.current();
         if (waker.pid() == profiled_pid) {
             const waker_key = keyFromTask(waker);
-            const waker_lag, const wakee_lag = this.clocks.wake(waker_key, wakee_key);
+            const waker_lag, const wakee_lag = this.clocks.wake(waker_key, wakee_key) orelse return;
 
             this.applyDelay(waker_key, waker_lag);
             return this.applyDelay(wakee_key, wakee_lag);
         }
     }
 
-    this.applyDelay(wakee_key, this.clocks.externalWake(wakee_key));
+    this.applyDelay(wakee_key, this.clocks.catchUp(wakee_key) orelse return);
+}
+
+fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.c) void {
+    const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
+
+    if (task.pid() != this.profiled_pid.load(.monotonic)) return;
+
+    assert(task.isDead());
+
+    const key = keyFromTask(task);
+    const payment = this.exitPayment(key);
+
+    const removed = this.clocks.remove(key);
+    assert(removed);
+
+    task.decrementReferences();
+
+    if (payment != 0) kernel.time.sleep.us(payment);
+}
+
+fn exitPayment(this: *ExperimentRunner, key: Key) usize {
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+    if (delay_per_tick == 0 or !kernel.execution.canSleep()) return 0;
+
+    const lag = this.clocks.catchUp(key) orelse return 0;
+
+    return @min(@as(usize, lag) * delay_per_tick, max_exit_payment_us);
 }
 
 fn abort(this: *ExperimentRunner, s: []const u8) void {

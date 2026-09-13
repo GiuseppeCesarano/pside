@@ -108,8 +108,10 @@ fn record(this: *Engine, base: ExperimentRecorder.Reading, relative_ip: usize, e
         experiment.delay_per_tick,
         relative_ip,
         experiment.speedup_percent,
-    ) catch
-        std.log.warn("Writer buffer full, dropping sample", .{});
+    ) catch |err| switch (err) {
+        ExperimentRecorder.Error.Full => std.log.warn("Writer buffer full, dropping sample", .{}),
+        ExperimentRecorder.Error.DelayExceedsWindow => std.log.warn("Injected delay outran the window, dropping experiment", .{}),
+    };
 }
 
 fn takeReading(this: *const Engine) ExperimentRecorder.Reading {
