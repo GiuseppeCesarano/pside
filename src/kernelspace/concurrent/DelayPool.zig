@@ -1,28 +1,44 @@
 const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 
+const BitSearch = @import("BitSearch");
+const chunk_len = BitSearch.bits_per_word;
 const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 
-const GenericPool = @import("Pool.zig").GenericPool;
 const DelayPool = @This();
+
+pub const Error = Allocator.Error || kernel.Task.WorkAddError;
+
+const chunk_words = @divExact(chunk_len, BitSearch.bits_per_word);
+const entries_span = chunk_len * @sizeOf(DelayWork);
 
 const DelayWork = struct {
     work: kernel.Task.Work,
+    task: *kernel.Task,
     time: std.atomic.Value(usize),
     pool: *DelayPool,
 };
 
-const Pool = GenericPool(DelayWork);
+const Chunk = struct {
+    entries: [chunk_len]DelayWork,
+    free: BitSearch,
+    pending: BitSearch,
+    free_words: [chunk_words]std.atomic.Value(usize) align(std.atomic.cache_line),
+    pending_words: [chunk_words]std.atomic.Value(usize) align(std.atomic.cache_line),
+    next: std.atomic.Value(?*Chunk),
+};
 
 const uninitialized = std.math.maxInt(u32);
 
-pools: *Pool,
+chunks: *Chunk,
 users_count: std.atomic.Value(u32),
 completion: kernel.Completion,
 
 pub const empty: DelayPool = .{
-    .pools = undefined,
+    .chunks = undefined,
     .users_count = .init(uninitialized),
     .completion = undefined,
 };
@@ -32,8 +48,8 @@ pub fn init(this: *DelayPool) !void {
 
     this.users_count = .init(0);
 
-    this.pools = try allocator.create(Pool);
-    this.initPool(this.pools);
+    this.chunks = try allocator.create(Chunk);
+    this.initChunk(this.chunks);
 
     this.completion.init();
 }
@@ -41,50 +57,55 @@ pub fn init(this: *DelayPool) !void {
 pub fn deinit(this: *DelayPool) void {
     if (this.users_count.load(.monotonic) == uninitialized) return;
 
+    // A pending delay still counts as a user and nothing is left to flush it
+    this.cancelAllPending();
     this.waitAllDelays();
 
-    var pool: ?*Pool = this.pools.next.load(.monotonic);
+    var chunk: ?*Chunk = this.chunks.next.load(.monotonic);
 
-    while (pool) |p| {
-        pool = p.next.load(.monotonic);
-        atomic_allocator.destroy(p);
+    while (chunk) |c| {
+        chunk = c.next.load(.monotonic);
+        atomic_allocator.destroy(c);
     }
 
-    allocator.destroy(this.pools);
+    allocator.destroy(this.chunks);
 }
 
-pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize, mode: kernel.Task.NotifyMode) !void {
-    std.debug.assert(delay_time != 0);
+pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Error!void {
+    const slot = try this.reserve(task, delay_time);
+    errdefer this.cancel(slot);
 
-    _ = this.users_count.fetchAdd(1, .monotonic);
-    errdefer _ = this.users_count.fetchSub(1, .monotonic);
-
-    const slot = this.pools.getEntry() orelse try this.reserveInNewAllocation();
-    errdefer this.pools.freeEntry(slot);
-
-    slot.time.store(delay_time, .release);
-    try task.addWork(&slot.work, mode);
+    try task.addWork(&slot.work, .@"resume");
 }
 
-fn initPool(this: *DelayPool, pool: *Pool) void {
-    pool.* = .empty;
-    for (&pool.entries) |*entry| entry.* = .{
-        .work = .{ .func = executeDelay, .next = undefined },
-        .pool = this,
-        .time = undefined,
-    };
+pub fn pendDelay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!void {
+    const slot = try this.reserve(task, delay_time);
+    const chunk = this.chunkOf(slot);
+
+    chunk.pending.take(indexOf(chunk, slot));
 }
 
-fn reserveInNewAllocation(this: *DelayPool) !*DelayWork {
-    const new_pool = try atomic_allocator.create(Pool);
-    errdefer atomic_allocator.destroy(new_pool);
+pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
+    var failure: ?kernel.Task.WorkAddError = null;
+    var chunk: ?*Chunk = this.chunks;
 
-    this.initPool(new_pool);
+    while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+        var it = c.pending.iterate();
 
-    const entry = new_pool.getEntry().?;
-    this.pools.appendPool(new_pool);
+        while (it.next()) |index| {
+            const slot = &c.entries[index];
+            c.pending.release(index);
 
-    return entry;
+            slot.task.addWork(&slot.work, .signal) catch |err| {
+                c.free.release(index);
+                this.releaseUser();
+
+                if (err != error.TooLateShuttingDown) failure = err;
+            };
+        }
+    }
+
+    if (failure) |err| return err;
 }
 
 pub fn waitAllDelays(this: *DelayPool) void {
@@ -92,15 +113,112 @@ pub fn waitAllDelays(this: *DelayPool) void {
     if (this.users_count.load(.monotonic) != 0) this.completion.wait();
 }
 
+fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!*DelayWork {
+    assert(delay_time != 0);
+
+    _ = this.users_count.fetchAdd(1, .monotonic);
+    errdefer this.releaseUser();
+
+    const slot = this.getEntry() orelse try this.reserveInNewAllocation();
+
+    slot.task = task;
+    slot.time.store(delay_time, .release);
+
+    return slot;
+}
+
+fn getEntry(this: *DelayPool) ?*DelayWork {
+    var chunk: ?*Chunk = this.chunks;
+
+    return while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+        if (c.free.takeFirstFree()) |index| break &c.entries[index];
+    } else null;
+}
+
+fn initChunk(this: *DelayPool, chunk: *Chunk) void {
+    chunk.free_words = @splat(.init(0));
+    chunk.pending_words = @splat(.init(0));
+    chunk.free = .{ .words = &chunk.free_words };
+    chunk.pending = .{ .words = &chunk.pending_words };
+    chunk.next = .init(null);
+
+    for (&chunk.entries) |*entry| entry.* = .{
+        .work = .{ .func = executeDelay, .next = undefined },
+        .task = undefined,
+        .pool = this,
+        .time = undefined,
+    };
+}
+
+fn reserveInNewAllocation(this: *DelayPool) Allocator.Error!*DelayWork {
+    const new_chunk = try atomic_allocator.create(Chunk);
+    errdefer atomic_allocator.destroy(new_chunk);
+
+    this.initChunk(new_chunk);
+
+    const slot = &new_chunk.entries[new_chunk.free.takeFirstFree().?];
+    this.appendChunk(new_chunk);
+
+    return slot;
+}
+
+fn appendChunk(this: *DelayPool, new_chunk: *Chunk) void {
+    var chunk = this.chunks;
+    while (chunk.next.cmpxchgStrong(null, new_chunk, .monotonic, .monotonic)) |taken| chunk = taken.?;
+}
+
+fn chunkOf(this: *DelayPool, slot: *DelayWork) *Chunk {
+    const slot_address = @intFromPtr(slot);
+
+    var chunk: ?*Chunk = this.chunks;
+    return while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+        const base = @intFromPtr(&c.entries);
+        if (slot_address >= base and slot_address - base < entries_span) break c;
+    } else unreachable;
+}
+
+fn indexOf(chunk: *Chunk, slot: *DelayWork) usize {
+    const slot_address: usize = @intFromPtr(slot);
+    const starting_address: usize = @intFromPtr(&chunk.entries);
+    return @divExact(slot_address - starting_address, @sizeOf(DelayWork));
+}
+
+fn freeEntry(this: *DelayPool, slot: *DelayWork) void {
+    const chunk = this.chunkOf(slot);
+    chunk.free.release(indexOf(chunk, slot));
+}
+
+fn cancel(this: *DelayPool, slot: *DelayWork) void {
+    this.freeEntry(slot);
+    this.releaseUser();
+}
+
+fn cancelAllPending(this: *DelayPool) void {
+    var chunk: ?*Chunk = this.chunks;
+
+    while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+        var it = c.pending.iterate();
+
+        while (it.next()) |index| {
+            c.pending.release(index);
+            c.free.release(index);
+            this.releaseUser();
+        }
+    }
+}
+
+fn releaseUser(this: *DelayPool) void {
+    if (this.users_count.fetchSub(1, .monotonic) == 1) this.completion.signal();
+}
+
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
     const delay_time = slot.time.load(.acquire);
     const this: *DelayPool = slot.pool;
 
-    this.pools.freeEntry(slot);
+    this.freeEntry(slot);
 
     kernel.time.sleep.us(delay_time);
 
-    const prev = this.users_count.fetchSub(1, .monotonic);
-    if (prev == 1) this.completion.signal();
+    this.releaseUser();
 }

@@ -112,7 +112,7 @@ fn record(this: *Engine, base: ExperimentRecorder.Reading, relative_ip: usize, e
         std.log.warn("Writer buffer full, dropping sample", .{});
 }
 
-fn takeReading(this: *Engine) ExperimentRecorder.Reading {
+fn takeReading(this: *const Engine) ExperimentRecorder.Reading {
     return .{
         .progress = this.progress.load(.monotonic),
         .vclock = this.runner.getMasterClock(),

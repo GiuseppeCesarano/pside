@@ -17,7 +17,7 @@ void b() {
 }
 
 int main() {
-  std::printf("Starting — two threads.\n");
+  std::printf("Starting: two threads.\n");
 
   for (int i = 0; i < 100; ++i) {
     std::thread a_thread(a);

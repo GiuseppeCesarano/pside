@@ -5,18 +5,20 @@ const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
 
 const DelayPool = @import("../concurrent/DelayPool.zig");
-const VirtualTimeKeeper = @import("time/VirtualTimeKeeper.zig");
-const KeyAndLag = VirtualTimeKeeper.KeyAndLag;
 const VmaRanges = @import("../process/VmaRanges.zig");
+const ThreadClocks = @import("time/ThreadClocks.zig");
+const Key = ThreadClocks.Key;
+const Ticks = ThreadClocks.Ticks;
 
 const ExperimentRunner = @This();
-const TimeKeeper = VirtualTimeKeeper.GenericVirtualTimeKeeper(isReaped, releaseKey);
 
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
+const clocks_reserve = 1024;
+
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
-time_keeper: TimeKeeper,
+clocks: ThreadClocks,
 delay_pool: DelayPool,
 vma_ranges: VmaRanges,
 vma_base: std.atomic.Value(usize),
@@ -30,7 +32,7 @@ pub fn init() !ExperimentRunner {
     return .{
         .profiled_pid = .init(0),
         .sampler = null,
-        .time_keeper = try TimeKeeper.init(atomic_allocator),
+        .clocks = try .init(atomic_allocator, clocks_reserve),
         .delay_pool = .empty,
         .vma_ranges = .empty,
         .vma_base = .init(0),
@@ -40,22 +42,14 @@ pub fn init() !ExperimentRunner {
     };
 }
 
-fn keyFromTask(task: *kernel.Task) VirtualTimeKeeper.Key {
+fn keyFromTask(task: *const kernel.Task) Key {
     // task pointers are always aligned, so bit 0 is free for the map's collision flag.
     assert(@intFromPtr(task) % 2 == 0);
     return .{ .data = @intFromPtr(task) };
 }
 
-fn taskFromKey(key: VirtualTimeKeeper.Key) *kernel.Task {
+fn taskFromKey(key: Key) *kernel.Task {
     return @ptrFromInt(key.withoutCollisionBit().data);
-}
-
-fn isReaped(key: VirtualTimeKeeper.Key) bool {
-    return taskFromKey(key).isReaped();
-}
-
-fn releaseKey(key: VirtualTimeKeeper.Key) void {
-    taskFromKey(key).decrementReferences();
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
@@ -68,7 +62,12 @@ pub fn deinit(this: *ExperimentRunner) void {
 
     this.delay_pool.deinit();
     this.vma_ranges.deinit();
-    this.time_keeper.deinit(atomic_allocator);
+
+    var it = this.clocks.iterate();
+    while (it.next()) |pair|
+        taskFromKey(pair.key.raw).decrementReferences();
+
+    this.clocks.deinit(atomic_allocator);
 }
 
 pub fn profilePid(
@@ -90,7 +89,8 @@ pub fn profilePid(
         return error.MultiThreadedTarget;
     }
 
-    this.time_keeper.addFirst(keyFromTask(task));
+    // Only the first key, the reserve always has room for it.
+    this.clocks.put(keyFromTask(task), 0) catch unreachable;
 
     this.vma_ranges = try .snapshot(task, vma_name);
 
@@ -132,48 +132,70 @@ pub fn endExperiment(this: *ExperimentRunner) void {
     this.sampler.?.disable();
 }
 
-pub fn getMasterClock(this: *ExperimentRunner) VirtualTimeKeeper.Ticks {
-    return this.time_keeper.getMasterClock();
+pub fn getMasterClock(this: *const ExperimentRunner) Ticks {
+    return this.clocks.master.load(.monotonic);
 }
 
-pub fn capturedRelativeIp(this: *ExperimentRunner) ?usize {
+pub fn capturedRelativeIp(this: *const ExperimentRunner) ?usize {
     const target = this.target_ip.load(.acquire);
     if (target == 0) return null;
     return target - this.vma_base.load(.monotonic);
 }
 
-pub fn hasErrored(this: *ExperimentRunner) bool {
+pub fn hasErrored(this: *const ExperimentRunner) bool {
     return this.has_errored.load(.monotonic);
 }
 
 pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
-    // TODO: we should find a way to force sleeping tasks to run the delay,
-    // .signal is currently making it hang
+    {
+        // The map walk and per-thread delay application must not be preempted,
+        // since we hold the gate closed, if a tracepoint callback gets scheduled
+        // will try an increment and spinwait until we don't open the gate, but
+        // if we get preempted and every core starts spinwaiting we will never get
+        // the cpu and open the gate resulting in a deadlock
+        kernel.preempt.disable();
+        defer kernel.preempt.enable();
 
-    // The map walk and per-thread delay application must not be preempted,
-    // since we hold the gate closed, if a tracepoint callback gets scheduled
-    // will try an increment and spinwait until we don't open the gate, but
-    // if we get preempted and every core starts spinwaiting we will never get
-    // the cpu and open the gate resulting in a deadlock
-    kernel.preempt.disable();
-    defer kernel.preempt.enable();
+        var it = this.clocks.iterate();
 
-    this.time_keeper.delayEveryoneLagging(applyDelays, .{this});
+        // Read after the gate closed, a tick still in flight would push a clock
+        // past it and underflow the lag
+        const master = this.clocks.master.load(.monotonic);
+
+        while (it.next()) |pair| {
+            const lag = master - pair.value.raw.ticks;
+            pair.value.raw = .atValue(master);
+
+            this.settleDelay(pair.key.raw, lag);
+        }
+    }
+
+    // Signalling from inside the gate deadlocks against a spinwaiting tracepoint
+    this.delay_pool.flushPending() catch this.abort("Could not flush delays");
 }
 
-fn applyDelays(this: *ExperimentRunner, keys_and_lags: []const KeyAndLag) void {
+fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    if (delay_per_tick == 0) return;
+    if (delay_per_tick == 0 or lag == 0) return;
 
-    for (keys_and_lags) |kl| {
-        const task = taskFromKey(kl.key);
-        if (kl.lag == 0 or task.isDead()) continue;
-        this.delay_pool.delay(task, kl.lag * delay_per_tick, .@"resume") catch |err| switch (err) {
-            // Past exit_task_work the work can never run; the task is off any critical path.
-            error.TooLateShuttingDown => {},
-            else => this.abort("Could not apply delay"),
-        };
-    }
+    const task = taskFromKey(key);
+    if (task.isDead()) return;
+
+    this.delay_pool.delay(task, lag * delay_per_tick) catch |err| switch (err) {
+        // Past exit_task_work the work can never run; the task is off any critical path.
+        error.TooLateShuttingDown => {},
+        else => this.abort("Could not apply delay"),
+    };
+}
+
+fn settleDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
+    const task = taskFromKey(key);
+    if (task.isRunning()) return this.applyDelay(key, lag);
+
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+    if (delay_per_tick == 0 or lag == 0 or task.isDead()) return;
+
+    this.delay_pool.pendDelay(task, lag * delay_per_tick) catch this.abort("Could not pend delay");
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
@@ -184,7 +206,9 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     const is_target = (ip == target) or (target == 0 and this.captureProfilingTarget(ip));
 
     if (is_target and this.delay_per_tick.load(.monotonic) != 0)
-        this.time_keeper.onTick(keyFromTask(kernel.Task.current()));
+        this.clocks.tick(keyFromTask(kernel.Task.current())) catch {};
+    // .tick() errors on a locked map; we discard the error (and the tick itself)
+    // since the causal attribution algorithm is robust against missed samples.
 }
 
 fn captureProfilingTarget(this: *ExperimentRunner, ip: usize) bool {
@@ -206,16 +230,22 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, _: c_ulong) callconv(.c) vo
 
     if (parent.pid() != this.profiled_pid.load(.monotonic)) return;
 
-    child.incrementReferences();
-    const delays = delays: {
-        //TODO: hoist the sweep and retry there instead of the deeper level
-        kernel.preempt.disable();
-        defer kernel.preempt.enable();
+    const parent_key = keyFromTask(parent);
+    const child_key = keyFromTask(child);
 
-        break :delays this.time_keeper.onFork(atomic_allocator, keyFromTask(parent), keyFromTask(child)) catch
-            return this.abort("Error while forking");
+    child.incrementReferences();
+    const lag = this.fork(parent_key, child_key) catch
+        return this.abort("Error while forking");
+
+    this.applyDelay(parent_key, lag);
+    this.applyDelay(child_key, lag);
+}
+
+fn fork(this: *ExperimentRunner, parent: Key, child: Key) !Ticks {
+    return this.clocks.fork(parent, child) catch blk: {
+        try this.clocks.grow(atomic_allocator);
+        break :blk try this.clocks.fork(parent, child);
     };
-    this.applyDelays(&delays);
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
@@ -223,7 +253,7 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
     if (prev.pid() == profiled_pid and !prev.isRunning() and !prev.isDead())
-        this.time_keeper.onSleep(keyFromTask(prev));
+        this.clocks.prepareForSleep(keyFromTask(prev));
 }
 
 fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
@@ -236,11 +266,16 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
 
     if (kernel.execution.inTask()) {
         const waker = kernel.Task.current();
-        if (waker.pid() == profiled_pid)
-            return this.applyDelays(&this.time_keeper.onWake(keyFromTask(waker), wakee_key));
+        if (waker.pid() == profiled_pid) {
+            const waker_key = keyFromTask(waker);
+            const waker_lag, const wakee_lag = this.clocks.wake(waker_key, wakee_key);
+
+            this.applyDelay(waker_key, waker_lag);
+            return this.applyDelay(wakee_key, wakee_lag);
+        }
     }
 
-    this.applyDelays(&this.time_keeper.onExternalWake(wakee_key));
+    this.applyDelay(wakee_key, this.clocks.externalWake(wakee_key));
 }
 
 fn abort(this: *ExperimentRunner, s: []const u8) void {

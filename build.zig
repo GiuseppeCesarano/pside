@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/kernelspace/concurrent/RefGate.zig"),
     });
 
+    const bit_search_mod = b.addModule("BitSearch", .{
+        .root_source_file = b.path("src/kernelspace/concurrent/BitSearch.zig"),
+    });
+
     const bindings_mod = b.addModule("kernel_bindings", .{
         .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
         .target = target,
@@ -68,6 +72,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "communications", .module = communications_mod },
                 .{ .name = "kernel", .module = bindings_mod },
                 .{ .name = "RefGate", .module = ref_gate_mod },
+                .{ .name = "BitSearch", .module = bit_search_mod },
                 .{ .name = "serialization", .module = serialization_mod },
             },
         }),
@@ -226,9 +231,8 @@ pub fn build(b: *std.Build) !void {
         imports: []const std.Build.Module.Import = &.{},
     }{
         .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
-        .{ .name = "concurrent_pool", .path = "src/kernelspace/concurrent/Pool.zig", .sanitize_thread = true },
-        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
-        .{ .name = "causal_virtual_time_keeper", .path = "src/kernelspace/causal/time/VirtualTimeKeeper.zig", .sanitize_thread = true, .imports = &.{.{ .name = "RefGate", .module = ref_gate_mod }} },
+        .{ .name = "concurrent_bitsearch", .path = "src/kernelspace/concurrent/BitSearch.zig", .sanitize_thread = true },
+        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{ .{ .name = "RefGate", .module = ref_gate_mod }, .{ .name = "BitSearch", .module = bit_search_mod } } },
         .{ .name = "kernelspace_soft_float", .path = "src/kernelspace/soft_float.zig" },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },

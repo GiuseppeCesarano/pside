@@ -3,7 +3,7 @@
 //
 // A .pside file is a fixed Header followed by a flat sequence of self-describing
 // frames, read left-to-right until EOF. Every frame carries its own length, so a
-// parser can skip any frame — or any record kind — it does not understand.
+// parser can skip any frame, or any record kind, it does not understand.
 //
 // All multi-byte integers are little-endian. Time fields are microseconds (us)
 // unless the field name says otherwise. There are no NUL-terminated strings:

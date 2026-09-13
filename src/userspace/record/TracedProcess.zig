@@ -2,6 +2,7 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const UserIds = @import("UserIds");
+
 const Program = @import("Program.zig");
 
 const TracedProcess = @This();
@@ -196,7 +197,7 @@ fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
 
     // The child inherited the ctl fd (the same file description as the parent's
     // session), so mmapping it at offset 0 maps this recording's own per-session
-    // progress page — no need to open /dev/pside_progress by path anymore.
+    // progress page, no need to open /dev/pside_progress by path anymore.
     const chardev_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .READ = true, .WRITE = true }), .{ .TYPE = .SHARED }, ctl_fd, 0);
 
     const trampoline = arch_specific.trampoline.get(@intFromPtr(code_page.ptr));
