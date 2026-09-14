@@ -271,3 +271,199 @@ pub const payload = struct {
         if (pad != 0) try w.splatByteAll(0, pad);
     }
 };
+
+fn writeBatch(w: *std.Io.Writer, header: payload.records.Header, body: []const u8) std.Io.Writer.Error!void {
+    const frame_header: payload.Header = .{
+        .tag = .records,
+        .len = @intCast(@sizeOf(payload.records.Header) + body.len),
+    };
+
+    try frame_header.write(w);
+    try w.writeAll(std.mem.asBytes(&header));
+    try w.writeAll(body);
+    try payload.writePad(w, frame_header.len);
+}
+
+test "pad8 rounds a length up to the next multiple of eight" {
+    const cases = [_]struct { len: usize, padded: usize }{
+        .{ .len = 0, .padded = 0 },
+        .{ .len = 1, .padded = 8 },
+        .{ .len = 7, .padded = 8 },
+        .{ .len = 8, .padded = 8 },
+        .{ .len = 9, .padded = 16 },
+        .{ .len = 16, .padded = 16 },
+    };
+
+    for (cases) |check| try std.testing.expectEqual(check.padded, pad8(check.len));
+}
+
+test "a file header round trips and nothing else is accepted as one" {
+    var buffer: [@sizeOf(Header)]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const hash: Header.Hash = @splat(0xab);
+    const header: Header = .init(hash);
+    try header.write(&writer);
+
+    try std.testing.expectEqual(@as(usize, 48), writer.buffered().len);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    const read = try Header.read(&reader);
+
+    try std.testing.expectEqualSlices(u8, &hash, &read.binary_hash);
+    try std.testing.expectEqual(Header.current_version.major, read.version.major);
+    try std.testing.expectEqual(Header.current_version.minor, read.version.minor);
+
+    var wrong_magic = buffer;
+    wrong_magic[0] = 'P';
+    var magic_reader: std.Io.Reader = .fixed(&wrong_magic);
+    try std.testing.expectError(Header.ReadError.NotAPsideFile, Header.read(&magic_reader));
+
+    var wrong_major = buffer;
+    wrong_major[8] +%= 1;
+    var major_reader: std.Io.Reader = .fixed(&wrong_major);
+    try std.testing.expectError(Header.ReadError.NotAPsideFile, Header.read(&major_reader));
+
+    var truncated: std.Io.Reader = .fixed(buffer[0 .. @sizeOf(Header) - 1]);
+    try std.testing.expectError(Header.ReadError.NotAPsideFile, Header.read(&truncated));
+}
+
+test "binary_path and vma frames round trip through the iterator" {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const binary_path: payload.Frame = .{ .tag = .binary_path, .body = "/usr/bin/toy" };
+    const vma: payload.Vma = .{ .id = 7, .name = "libfoo.so.1" };
+
+    try binary_path.write(&writer);
+    try vma.write(&writer);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var frames: payload.Frame.Iterator = .init(&reader);
+
+    const first = frames.next().?;
+    try std.testing.expectEqual(payload.Header.Tag.binary_path, first.tag);
+    try std.testing.expectEqualStrings("/usr/bin/toy", first.body);
+
+    const second = frames.next().?;
+    try std.testing.expectEqual(payload.Header.Tag.vma, second.tag);
+
+    const decoded = payload.Vma.decode(second.body).?;
+    try std.testing.expectEqual(@as(payload.VmaId, 7), decoded.id);
+    try std.testing.expectEqualStrings("libfoo.so.1", decoded.name);
+
+    try std.testing.expect(frames.next() == null);
+    try std.testing.expect(payload.Vma.decode(second.body[0..3]) == null);
+}
+
+test "an odd length body is padded with zeros and the walk steps over them" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const odd: payload.Frame = .{ .tag = .binary_path, .body = "odd" };
+    const next: payload.Frame = .{ .tag = .binary_path, .body = "after" };
+
+    try odd.write(&writer);
+    try next.write(&writer);
+
+    const written = writer.buffered();
+    const header_len = @sizeOf(payload.Header);
+
+    try std.testing.expectEqual(2 * (header_len + pad8(3)), written.len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0 }, written[header_len + 3 .. header_len + pad8(3)]);
+
+    var reader: std.Io.Reader = .fixed(written);
+    var frames: payload.Frame.Iterator = .init(&reader);
+
+    try std.testing.expectEqualStrings("odd", frames.next().?.body);
+    try std.testing.expectEqualStrings("after", frames.next().?.body);
+    try std.testing.expect(frames.next() == null);
+}
+
+test "a throughput batch round trips with its kind and vma" {
+    const samples = [_]payload.records.Throughput{
+        .{ .relative_ip = 0x6b8, .throughput = 0.5, .speedup_percent = 0 },
+        .{ .relative_ip = 0x6b4, .throughput = 0.25, .speedup_percent = 45 },
+    };
+
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeBatch(&writer, .{ .kind = .throughput, .record_size = @sizeOf(payload.records.Throughput), .vma_id = 3 }, std.mem.sliceAsBytes(samples[0..]));
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var frames: payload.Frame.Iterator = .init(&reader);
+
+    const frame = frames.next().?;
+    try std.testing.expectEqual(payload.Header.Tag.records, frame.tag);
+
+    const batch = payload.records.Batch.decode(frame.body).?;
+    try std.testing.expectEqual(payload.records.Header.Kind.throughput, batch.header.kind);
+    try std.testing.expectEqual(@as(payload.VmaId, 3), batch.header.vma_id);
+
+    var read_samples = batch.iterate(payload.records.Throughput).?;
+    for (samples) |expected| {
+        const actual = read_samples.next().?;
+
+        try std.testing.expectEqual(expected.relative_ip, actual.relative_ip);
+        try std.testing.expectEqual(expected.throughput, actual.throughput);
+        try std.testing.expectEqual(expected.speedup_percent, actual.speedup_percent);
+    }
+
+    try std.testing.expect(read_samples.next() == null);
+    try std.testing.expect(payload.records.Batch.decode(frame.body[0..4]) == null);
+}
+
+test "a record grown by a later writer is still readable, a shrunk one is refused" {
+    const Wide = extern struct {
+        base: payload.records.Throughput,
+        added: u64,
+    };
+
+    const wide = [_]Wide{
+        .{ .base = .{ .relative_ip = 0x10, .throughput = 1.0, .speedup_percent = 5 }, .added = 0xfeed },
+        .{ .base = .{ .relative_ip = 0x20, .throughput = 2.0, .speedup_percent = 10 }, .added = 0xbeef },
+    };
+
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writeBatch(&writer, .{ .kind = .throughput, .record_size = @sizeOf(Wide), .vma_id = 0 }, std.mem.sliceAsBytes(wide[0..]));
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var frames: payload.Frame.Iterator = .init(&reader);
+    const batch = payload.records.Batch.decode(frames.next().?.body).?;
+
+    var read_samples = batch.iterate(payload.records.Throughput).?;
+    for (wide) |expected| {
+        const actual = read_samples.next().?;
+
+        try std.testing.expectEqual(expected.base.relative_ip, actual.relative_ip);
+        try std.testing.expectEqual(expected.base.speedup_percent, actual.speedup_percent);
+    }
+    try std.testing.expect(read_samples.next() == null);
+
+    const shrunk: payload.records.Batch = .{
+        .header = .{ .kind = .throughput, .record_size = @sizeOf(payload.records.Throughput) - 1, .vma_id = 0 },
+        .body = batch.body,
+    };
+    try std.testing.expect(shrunk.iterate(payload.records.Throughput) == null);
+}
+
+test "a frame cut short by EOF ends the walk instead of erroring" {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const whole: payload.Frame = .{ .tag = .binary_path, .body = "/usr/bin/toy" };
+    const cut: payload.Frame = .{ .tag = .vma, .body = "this one never finished" };
+
+    try whole.write(&writer);
+    const whole_len = writer.buffered().len;
+    try cut.write(&writer);
+
+    for ([_]usize{ 0, 1, @sizeOf(payload.Header), @sizeOf(payload.Header) + 4 }) |kept| {
+        var reader: std.Io.Reader = .fixed(writer.buffered()[0 .. whole_len + kept]);
+        var frames: payload.Frame.Iterator = .init(&reader);
+
+        try std.testing.expectEqualStrings("/usr/bin/toy", frames.next().?.body);
+        try std.testing.expect(frames.next() == null);
+    }
+}

@@ -269,3 +269,19 @@ fn executeRun(
 test {
     _ = OutputFile;
 }
+
+test "the default vma name is the basename, extension and all" {
+    const cases = [_]struct { path: [*:0]const u8, expected: []const u8 }{
+        .{ .path = "a.out", .expected = "a.out" },
+        .{ .path = "./a.out", .expected = "a.out" },
+        .{ .path = "/usr/bin/toy", .expected = "toy" },
+        .{ .path = "/usr/lib/libfoo.so.1", .expected = "libfoo.so.1" },
+    };
+
+    for (cases) |check|
+        try std.testing.expectEqualStrings(check.expected, resolveVmaName("", check.path));
+}
+
+test "an explicit -l wins over the program path" {
+    try std.testing.expectEqualStrings("libfoo.so.1", resolveVmaName("libfoo.so.1", "/usr/bin/toy"));
+}

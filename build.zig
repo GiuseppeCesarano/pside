@@ -233,6 +233,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
         .{ .name = "concurrent_bitsearch", .path = "src/kernelspace/concurrent/BitSearch.zig", .sanitize_thread = true },
         .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{ .{ .name = "RefGate", .module = ref_gate_mod }, .{ .name = "BitSearch", .module = bit_search_mod } } },
+        .{ .name = "common_serialization", .path = "src/common/serialization.zig" },
         .{ .name = "kernelspace_soft_float", .path = "src/kernelspace/soft_float.zig" },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
