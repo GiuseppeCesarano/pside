@@ -19,11 +19,14 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
 
     const path = positional.next().?;
 
-    var profile = Profile.fromFilePath(allocator, io, path) catch |err| switch (err) {
-        Profile.Error.DebugInfoUnreadable => std.process.fatal("Could not read debug info for the binary recorded in '{s}'.", .{path}),
-        else => std.process.fatal("Could not read profile '{s}' ({s}).", .{ path, @errorName(err) }),
-    };
+    var profile = Profile.fromFilePath(allocator, io, path) catch |err|
+        std.process.fatal("Could not read profile '{s}' ({s}).", .{ path, @errorName(err) });
     defer profile.deinit(allocator);
+
+    if (profile.symbols_unavailable) |err| std.log.warn(
+        "Debug info for the binary recorded in '{s}' is unreadable ({s}); sites are shown as raw offsets.",
+        .{ path, @errorName(err) },
+    );
 
     if (parsed_options.flags.json) {
         writeJson(allocator, io, path, profile) catch |err|

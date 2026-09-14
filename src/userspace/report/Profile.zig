@@ -18,7 +18,6 @@ pub const Error = error{
     MalformedRecordsFrame,
     UnknownVmaId,
     BadSpeedupPercent,
-    DebugInfoUnreadable,
     OutOfMemory,
 };
 
@@ -35,6 +34,7 @@ pub const Vma = struct {
 };
 
 vmas: []Vma,
+symbols_unavailable: ?Symbolizer.OpenError,
 
 pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Error!Profile {
     var file_map = try mapFile(io, path);
@@ -45,13 +45,15 @@ pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Error!
 
     const binary_path = findBinaryPath(reader) orelse return Error.MissingBinaryPath;
 
-    var parser: Parser = try .init(gpa, io, binary_path);
+    var parser: Parser = .init(gpa, io, binary_path);
     errdefer parser.deinit(io);
 
     var frames: payload.Frame.Iterator = .init(&reader);
     while (frames.next()) |frame| try parser.take(frame);
 
-    return .{ .vmas = try parser.finish(io) };
+    const symbols_unavailable = parser.symbolizer.symbolsUnavailable();
+
+    return .{ .vmas = try parser.finish(io), .symbols_unavailable = symbols_unavailable };
 }
 
 pub fn deinit(this: *Profile, gpa: std.mem.Allocator) void {
@@ -98,11 +100,11 @@ const Parser = struct {
     buckets: std.StringArrayHashMapUnmanaged(Sites) = .empty,
     names: std.AutoHashMapUnmanaged(payload.VmaId, []const u8) = .empty,
 
-    fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) Error!Parser {
+    fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) Parser {
         return .{
             .gpa = gpa,
             .arena = .init(gpa),
-            .symbolizer = Symbolizer.init(gpa, io, binary_path) catch return Error.DebugInfoUnreadable,
+            .symbolizer = .init(gpa, io, binary_path),
         };
     }
 
