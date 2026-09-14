@@ -10,26 +10,38 @@ endian: std.builtin.Endian,
 text_vaddr: u64,
 cache: std.AutoHashMapUnmanaged(u64, []const u8),
 
-pub fn init(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) !Symbolizer {
-    const file = try std.Io.Dir.openFileAbsolute(io, binary_path, .{});
+pub const InitError = error{
+    BinaryUnreadable,
+    BadElf,
+    StringTableNotFound,
+    NoDebugInfo,
+    MalformedDebugInfo,
+    OutOfMemory,
+};
+
+pub fn init(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) InitError!Symbolizer {
+    const file = std.Io.Dir.openFileAbsolute(io, binary_path, .{}) catch return InitError.BinaryUnreadable;
     errdefer file.close(io);
 
-    var mmap = try std.Io.File.MemoryMap.create(io, file, .{
-        .len = try file.length(io),
+    var mmap = std.Io.File.MemoryMap.create(io, file, .{
+        .len = file.length(io) catch return InitError.BinaryUnreadable,
         .protection = .{ .read = true, .write = false },
         .populate = false,
-    });
+    }) catch return InitError.BinaryUnreadable;
     errdefer mmap.destroy(io);
 
     const elf_header = blk: {
         var reader: std.Io.Reader = .fixed(mmap.memory);
-        break :blk try std.elf.Header.read(&reader);
+        break :blk std.elf.Header.read(&reader) catch return InitError.BadElf;
     };
 
     var dwarf = try openDwarf(allocator, elf_header, mmap.memory);
     errdefer dwarf.deinit(allocator);
 
-    try dwarf.populateRanges(allocator, elf_header.endian);
+    dwarf.populateRanges(allocator, elf_header.endian) catch |err| return switch (err) {
+        Dwarf.ScanError.OutOfMemory => InitError.OutOfMemory,
+        else => InitError.MalformedDebugInfo,
+    };
 
     return .{
         .file = file,
@@ -51,8 +63,10 @@ pub fn deinit(this: *Symbolizer, allocator: std.mem.Allocator, io: std.Io) void 
     this.file.close(io);
 }
 
+pub const LocateError = error{OutOfMemory};
+
 /// This struct owns the memory, caller must not free the allocation.
-pub fn locate(this: *Symbolizer, allocator: std.mem.Allocator, relative_ip: u64) ![]const u8 {
+pub fn locate(this: *Symbolizer, allocator: std.mem.Allocator, relative_ip: u64) LocateError![]const u8 {
     const address = relative_ip + this.text_vaddr;
     const pair = try this.cache.getOrPut(allocator, address);
 
@@ -63,17 +77,17 @@ pub fn locate(this: *Symbolizer, allocator: std.mem.Allocator, relative_ip: u64)
     return pair.value_ptr.*;
 }
 
-fn openDwarf(allocator: std.mem.Allocator, elf_header: std.elf.Header, buff: []const u8) !Dwarf {
+fn openDwarf(allocator: std.mem.Allocator, elf_header: std.elf.Header, buff: []const u8) InitError!Dwarf {
     var dwarf: Dwarf = .{ .sections = @splat(null) };
 
     var section_header_iterator = elf_header.iterateSectionHeadersBuffer(buff);
     var i: usize = 0;
-    const section_header_string_table = while (try section_header_iterator.next()) |section| : (i += 1) {
+    const section_header_string_table = while (section_header_iterator.next() catch return InitError.BadElf) |section| : (i += 1) {
         if (elf_header.shstrndx == i) break buff[section.sh_offset .. section.sh_offset + section.sh_size];
-    } else return error.StringTableNotFound;
+    } else return InitError.StringTableNotFound;
 
     section_header_iterator = elf_header.iterateSectionHeadersBuffer(buff);
-    while (try section_header_iterator.next()) |section| {
+    while (section_header_iterator.next() catch return InitError.BadElf) |section| {
         const name = std.mem.sliceTo(section_header_string_table[section.sh_name..], 0);
         const data = buff[section.sh_offset .. section.sh_offset + section.sh_size];
 
@@ -85,30 +99,43 @@ fn openDwarf(allocator: std.mem.Allocator, elf_header: std.elf.Header, buff: []c
         }
     }
 
-    if (dwarf.sections[@backingInt(Dwarf.Section.Id.debug_info)] == null) return error.NoDebugInfo;
-    try dwarf.open(allocator, elf_header.endian);
+    if (dwarf.sections[@backingInt(Dwarf.Section.Id.debug_info)] == null) return InitError.NoDebugInfo;
+    dwarf.open(allocator, elf_header.endian) catch |err| return switch (err) {
+        Dwarf.ScanError.OutOfMemory => InitError.OutOfMemory,
+        else => InitError.MalformedDebugInfo,
+    };
 
     return dwarf;
 }
 
-fn getSrcString(allocator: std.mem.Allocator, dwarf: *Dwarf, endian: std.builtin.Endian, address: u64) ![]const u8 {
-    const compile_unit = findCompileUnitByRange(dwarf, address) orelse return error.AddressNotFound;
-    try dwarf.populateSrcLocCache(allocator, endian, compile_unit);
+const SrcStringError = error{
+    AddressNotFound,
+    InvalidFileIndex,
+    MalformedDebugInfo,
+    OutOfMemory,
+};
+
+fn getSrcString(allocator: std.mem.Allocator, dwarf: *Dwarf, endian: std.builtin.Endian, address: u64) SrcStringError![]const u8 {
+    const compile_unit = findCompileUnitByRange(dwarf, address) orelse return SrcStringError.AddressNotFound;
+    dwarf.populateSrcLocCache(allocator, endian, compile_unit) catch |err| return switch (err) {
+        Dwarf.ScanError.OutOfMemory => SrcStringError.OutOfMemory,
+        else => SrcStringError.MalformedDebugInfo,
+    };
 
     const slc = &compile_unit.src_loc_cache.?;
-    const line_entry = try slc.findSource(address);
-    if (line_entry.isInvalid()) return error.AddressNotFound;
+    const line_entry = slc.findSource(address) catch return SrcStringError.AddressNotFound;
+    if (line_entry.isInvalid()) return SrcStringError.AddressNotFound;
 
     const file_index = line_entry.file - @intFromBool(slc.version < 5);
-    if (file_index >= slc.files.len) return error.InvalidFileIndex;
+    if (file_index >= slc.files.len) return SrcStringError.InvalidFileIndex;
 
     const file_path = slc.files[file_index].path;
     return std.fmt.allocPrint(allocator, "{s}:{}", .{ file_path, line_entry.line });
 }
 
-fn computeTextVaddr(elf_header: std.elf.Header, bytes: []const u8) !u64 {
+fn computeTextVaddr(elf_header: std.elf.Header, bytes: []const u8) InitError!u64 {
     var program_header_iterator = elf_header.iterateProgramHeadersBuffer(bytes);
-    return while (try program_header_iterator.next()) |header| {
+    return while (program_header_iterator.next() catch return InitError.BadElf) |header| {
         if (header.type == .LOAD and header.flags.X) {
             const misalign = if (header.@"align" == 0) 0 else header.offset % header.@"align";
             break header.vaddr - misalign;

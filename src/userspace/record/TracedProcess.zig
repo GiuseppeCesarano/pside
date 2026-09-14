@@ -13,11 +13,29 @@ const arch_specific = switch (@import("builtin").cpu.arch) {
 };
 
 const UserRegs = arch_specific.UserRegs;
+const ForkError = error{ SystemResources, Unexpected };
+const RaiseError = error{Unexpected};
+
 const ChildStartError = error{
-    ChildDead,
+    AccessDenied,
+    FileBusy,
+    FileNotFound,
+    FileSystem,
+    InvalidAddress,
+    InvalidExe,
+    InvalidFileDescriptor,
+    IsDir,
+    NameTooLong,
+    NotDir,
+    OperationUnsupported,
     ParentDead,
-    UnexpectedSignal,
-};
+    PermissionDenied,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    SystemResources,
+    UnsupportedFeature,
+    Unexpected,
+} || UserIds.GetError || UserIds.DropError || ptrace.PtraceError || RaiseError;
 
 pub const SpawnError = error{
     CouldNotFork,
@@ -38,10 +56,10 @@ old_entry_ins: usize,
 
 pub fn spawn(tracee_exe: Program, io: std.Io) SpawnError!TracedProcess {
     return spawnTraced(tracee_exe, io) catch |err| switch (err) {
-        error.SystemResources => SpawnError.CouldNotFork,
-        error.ChildExited, error.ChildKilled => SpawnError.ChildDied,
-        error.ProcessNotFound, error.PermissionDenied, error.DeviceBusy, error.InputOutput => SpawnError.ChildNotTraceable,
-        error.EndOfStream, error.ReadFailed => SpawnError.CouldNotReadEntrypoint,
+        ForkError.SystemResources => SpawnError.CouldNotFork,
+        ptrace.WaitForError.ChildExited, ptrace.WaitForError.ChildKilled => SpawnError.ChildDied,
+        ptrace.PtraceError.ProcessNotFound, ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => SpawnError.ChildNotTraceable,
+        std.Io.Reader.Error.EndOfStream, std.Io.Reader.Error.ReadFailed => SpawnError.CouldNotReadEntrypoint,
         else => SpawnError.Unexpected,
     };
 }
@@ -50,9 +68,9 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     const fork_rc = linux.fork();
     const child_pid: linux.pid_t = switch (linux.errno(fork_rc)) {
         .SUCCESS => @intCast(fork_rc),
-        .AGAIN => return error.SystemResources,
-        .NOMEM => return error.SystemResources,
-        else => return error.Unexpected,
+        .AGAIN => return ForkError.SystemResources,
+        .NOMEM => return ForkError.SystemResources,
+        else => return ForkError.Unexpected,
     };
 
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
@@ -73,21 +91,21 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
 }
 
-fn childStart(tracee_exe: Program) !void {
+fn childStart(tracee_exe: Program) ChildStartError!void {
     switch (linux.errno(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0))) {
         .SUCCESS => {},
-        .ACCES => return error.AccessDenied,
-        .BADF => return error.InvalidFileDescriptor,
-        .FAULT => return error.InvalidAddress,
+        .ACCES => return ChildStartError.AccessDenied,
+        .BADF => return ChildStartError.InvalidFileDescriptor,
+        .FAULT => return ChildStartError.InvalidAddress,
         .INVAL => unreachable,
-        .NODEV, .NXIO => return error.UnsupportedFeature,
-        .OPNOTSUPP => return error.OperationUnsupported,
-        .PERM, .BUSY => return error.PermissionDenied,
+        .NODEV, .NXIO => return ChildStartError.UnsupportedFeature,
+        .OPNOTSUPP => return ChildStartError.OperationUnsupported,
+        .PERM, .BUSY => return ChildStartError.PermissionDenied,
         .RANGE => unreachable,
-        else => return error.Unexpected,
+        else => return ChildStartError.Unexpected,
     }
 
-    if (linux.getppid() == 1) return error.ParentDead;
+    if (linux.getppid() == 1) return ChildStartError.ParentDead;
 
     if (!tracee_exe.is_sudo and linux.geteuid() == 0) {
         if (try UserIds.sudoCallerFromEnviron(tracee_exe.enviroment_map)) |calling_user|
@@ -100,27 +118,27 @@ fn childStart(tracee_exe: Program) !void {
     switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.slice))) {
         .SUCCESS => unreachable,
         .FAULT => unreachable,
-        .@"2BIG" => return error.SystemResources,
-        .MFILE => return error.ProcessFdQuotaExceeded,
-        .NAMETOOLONG => return error.NameTooLong,
-        .NFILE => return error.SystemFdQuotaExceeded,
-        .NOMEM => return error.SystemResources,
-        .ACCES => return error.AccessDenied,
-        .PERM => return error.PermissionDenied,
-        .INVAL => return error.InvalidExe,
-        .NOEXEC => return error.InvalidExe,
-        .IO => return error.FileSystem,
-        .LOOP => return error.FileSystem,
-        .ISDIR => return error.IsDir,
-        .NOENT => return error.FileNotFound,
-        .NOTDIR => return error.NotDir,
-        .TXTBSY => return error.FileBusy,
-        .LIBBAD => return error.InvalidExe,
-        else => return error.Unexpected,
+        .@"2BIG" => return ChildStartError.SystemResources,
+        .MFILE => return ChildStartError.ProcessFdQuotaExceeded,
+        .NAMETOOLONG => return ChildStartError.NameTooLong,
+        .NFILE => return ChildStartError.SystemFdQuotaExceeded,
+        .NOMEM => return ChildStartError.SystemResources,
+        .ACCES => return ChildStartError.AccessDenied,
+        .PERM => return ChildStartError.PermissionDenied,
+        .INVAL => return ChildStartError.InvalidExe,
+        .NOEXEC => return ChildStartError.InvalidExe,
+        .IO => return ChildStartError.FileSystem,
+        .LOOP => return ChildStartError.FileSystem,
+        .ISDIR => return ChildStartError.IsDir,
+        .NOENT => return ChildStartError.FileNotFound,
+        .NOTDIR => return ChildStartError.NotDir,
+        .TXTBSY => return ChildStartError.FileBusy,
+        .LIBBAD => return ChildStartError.InvalidExe,
+        else => return ChildStartError.Unexpected,
     }
 }
 
-fn raise(sig: linux.SIG) !void {
+fn raise(sig: linux.SIG) RaiseError!void {
     const filled = linux.sigfillset();
     var orig: linux.sigset_t = undefined;
     _ = linux.sigprocmask(linux.SIG.BLOCK, &filled, &orig);
@@ -129,7 +147,7 @@ fn raise(sig: linux.SIG) !void {
 
     return switch (linux.errno(rc)) {
         .SUCCESS => {},
-        else => error.Unexpected,
+        else => RaiseError.Unexpected,
     };
 }
 
@@ -153,8 +171,8 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 
 pub fn start(this: TracedProcess) StartError!void {
     return this.startTraced() catch |err| switch (err) {
-        error.ProcessNotFound => StartError.ChildDied,
-        error.PermissionDenied, error.DeviceBusy, error.InputOutput => StartError.ChildNotTraceable,
+        ptrace.PtraceError.ProcessNotFound => StartError.ChildDied,
+        ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => StartError.ChildNotTraceable,
         else => StartError.Unexpected,
     };
 }
@@ -184,9 +202,9 @@ pub fn wait(this: TracedProcess) WaitError!void {
 
 pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
     return this.patchTraced(addr, ctl_fd) catch |err| switch (err) {
-        error.ProcessNotFound => PatchError.ChildDied,
-        error.PermissionDenied, error.DeviceBusy, error.InputOutput => PatchError.ChildNotTraceable,
-        error.OutOfMemory, error.AccessDenied, error.MappingAlreadyExists, error.MemoryMappingNotSupported, error.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
+        ptrace.PtraceError.ProcessNotFound => PatchError.ChildDied,
+        ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => PatchError.ChildNotTraceable,
+        MmapError.OutOfMemory, MmapError.AccessDenied, MmapError.MappingAlreadyExists, MmapError.MemoryMappingNotSupported, MmapError.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
         else => PatchError.Unexpected,
     };
 }
@@ -207,6 +225,16 @@ fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
     try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), &payload);
 }
 
+const MmapError = error{
+    AccessDenied,
+    LockedMemoryLimitExceeded,
+    MappingAlreadyExists,
+    MemoryMappingNotSupported,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    Unexpected,
+} || ptrace.WaitForError;
+
 fn mmap(
     this: TracedProcess,
     ptr: ?[*]align(std.heap.page_size_min) u8,
@@ -215,7 +243,7 @@ fn mmap(
     flags: linux.MAP,
     fd: linux.fd_t,
     offset: u64,
-) ![]align(std.heap.page_size_min) u8 {
+) MmapError![]align(std.heap.page_size_min) u8 {
     const addr: usize = @intFromPtr(ptr);
     const rc = try this.syscall(.mmap, .{
         addr,
@@ -231,28 +259,47 @@ fn mmap(
 
     switch (err) {
         .SUCCESS => unreachable,
-        .TXTBSY => return error.AccessDenied,
-        .ACCES => return error.AccessDenied,
-        .PERM => return error.PermissionDenied,
-        .AGAIN => return error.LockedMemoryLimitExceeded,
+        .TXTBSY => return MmapError.AccessDenied,
+        .ACCES => return MmapError.AccessDenied,
+        .PERM => return MmapError.PermissionDenied,
+        .AGAIN => return MmapError.LockedMemoryLimitExceeded,
         .BADF => unreachable,
         .OVERFLOW => unreachable,
-        .NODEV => return error.MemoryMappingNotSupported,
+        .NODEV => return MmapError.MemoryMappingNotSupported,
         .INVAL => unreachable,
-        .MFILE => return error.ProcessFdQuotaExceeded,
-        .NFILE => return error.SystemFdQuotaExceeded,
-        .NOMEM => return error.OutOfMemory,
-        .EXIST => return error.MappingAlreadyExists,
-        else => return error.Unexpected,
+        .MFILE => return MmapError.ProcessFdQuotaExceeded,
+        .NFILE => return MmapError.SystemFdQuotaExceeded,
+        .NOMEM => return MmapError.OutOfMemory,
+        .EXIST => return MmapError.MappingAlreadyExists,
+        else => return MmapError.Unexpected,
     }
 }
+
+pub const OpenError = error{
+    BadPathName,
+    AccessDenied,
+    FileTooBig,
+    IsDir,
+    SymLinkLoop,
+    ProcessFdQuotaExceeded,
+    NameTooLong,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    FileNotFound,
+    SystemResources,
+    NoSpaceLeft,
+    NotDir,
+    PathAlreadyExists,
+    DeviceBusy,
+    Unexpected,
+} || ptrace.WaitForError;
 
 pub fn open(
     this: TracedProcess,
     file_path: *anyopaque,
     flags: linux.O,
     perm: linux.mode_t,
-) !linux.fd_t {
+) OpenError!linux.fd_t {
     while (true) {
         const rc = try this.syscall(
             .open,
@@ -263,31 +310,31 @@ pub fn open(
             .SUCCESS => @intCast(rc),
             .INTR => continue,
 
-            .INVAL => error.BadPathName,
-            .ACCES => error.AccessDenied,
-            .FBIG => error.FileTooBig,
-            .OVERFLOW => error.FileTooBig,
-            .ISDIR => error.IsDir,
-            .LOOP => error.SymLinkLoop,
-            .MFILE => error.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => error.NameTooLong,
-            .NFILE => error.SystemFdQuotaExceeded,
-            .NODEV => error.NoDevice,
-            .NOENT => error.FileNotFound,
-            .SRCH => error.FileNotFound,
-            .NOMEM => error.SystemResources,
-            .NOSPC => error.NoSpaceLeft,
-            .NOTDIR => error.NotDir,
-            .PERM => error.PermissionDenied,
-            .EXIST => error.PathAlreadyExists,
-            .BUSY => error.DeviceBusy,
-            .ILSEQ => error.BadPathName,
-            else => error.Unexpected,
+            .INVAL => OpenError.BadPathName,
+            .ACCES => OpenError.AccessDenied,
+            .FBIG => OpenError.FileTooBig,
+            .OVERFLOW => OpenError.FileTooBig,
+            .ISDIR => OpenError.IsDir,
+            .LOOP => OpenError.SymLinkLoop,
+            .MFILE => OpenError.ProcessFdQuotaExceeded,
+            .NAMETOOLONG => OpenError.NameTooLong,
+            .NFILE => OpenError.SystemFdQuotaExceeded,
+            .NODEV => OpenError.NoDevice,
+            .NOENT => OpenError.FileNotFound,
+            .SRCH => OpenError.FileNotFound,
+            .NOMEM => OpenError.SystemResources,
+            .NOSPC => OpenError.NoSpaceLeft,
+            .NOTDIR => OpenError.NotDir,
+            .PERM => OpenError.PermissionDenied,
+            .EXIST => OpenError.PathAlreadyExists,
+            .BUSY => OpenError.DeviceBusy,
+            .ILSEQ => OpenError.BadPathName,
+            else => OpenError.Unexpected,
         };
     }
 }
 
-pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) !usize {
+pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
     const saved_regs = try ptrace.getRegs(this.pid);
     const ip = saved_regs.ip();
     const old_ins = try ptrace.peekWord(.text, this.pid, ip);
@@ -338,15 +385,21 @@ const ptrace = struct {
         };
     }
 
-    fn traceMe() !void {
+    pub const WaitForError = error{
+        WaitPidFailed,
+        ChildExited,
+        ChildKilled,
+    } || PtraceError;
+
+    fn traceMe() PtraceError!void {
         try ptraceSysCall(linux.PTRACE.TRACEME, 0, 0, 0);
     }
 
-    fn detach(pid: linux.pid_t) !void {
+    fn detach(pid: linux.pid_t) PtraceError!void {
         try ptraceSysCall(linux.PTRACE.DETACH, pid, 0, 0);
     }
 
-    fn setOptions(pid: linux.pid_t, comptime options: []const comptime_int) !void {
+    fn setOptions(pid: linux.pid_t, comptime options: []const comptime_int) PtraceError!void {
         comptime var options_val: usize = 0;
         comptime for (options) |o| {
             options_val |= o;
@@ -355,13 +408,13 @@ const ptrace = struct {
         try ptraceSysCall(linux.PTRACE.SETOPTIONS, pid, 0, options_val);
     }
 
-    fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) !void {
+    fn waitFor(pid: linux.pid_t, target: enum { exec, trap, stop }) WaitForError!void {
         while (true) {
             var status: u32 = undefined;
-            if (linux.errno(linux.waitpid(pid, @ptrCast(&status), 0)) != .SUCCESS) return error.WaitPidError;
+            if (linux.errno(linux.waitpid(pid, @ptrCast(&status), 0)) != .SUCCESS) return WaitForError.WaitPidFailed;
 
-            if (linux.W.IFEXITED(status)) return error.ChildExited;
-            if (linux.W.IFSIGNALED(status)) return error.ChildKilled;
+            if (linux.W.IFEXITED(status)) return WaitForError.ChildExited;
+            if (linux.W.IFSIGNALED(status)) return WaitForError.ChildKilled;
 
             if (linux.W.IFSTOPPED(status)) {
                 const sig = linux.W.STOPSIG(status);
@@ -380,32 +433,32 @@ const ptrace = struct {
         }
     }
 
-    fn waitTrapUntilIpReaches(pid: linux.pid_t, addr: usize) !void {
+    fn waitTrapUntilIpReaches(pid: linux.pid_t, addr: usize) WaitForError!void {
         try waitFor(pid, .trap);
         while ((try getRegs(pid)).ip() < addr) {
             try waitFor(pid, .trap);
         }
     }
 
-    fn cont(pid: linux.pid_t) !void {
+    fn cont(pid: linux.pid_t) PtraceError!void {
         try ptraceSysCall(linux.PTRACE.CONT, pid, 0, 0);
     }
 
-    fn singleStep(pid: linux.pid_t) !void {
+    fn singleStep(pid: linux.pid_t) PtraceError!void {
         try ptraceSysCall(linux.PTRACE.SINGLESTEP, pid, 0, 0);
     }
 
-    fn getRegs(pid: linux.pid_t) !UserRegs {
+    fn getRegs(pid: linux.pid_t) PtraceError!UserRegs {
         var regs: UserRegs = undefined;
         try ptraceSysCall(linux.PTRACE.GETREGS, pid, 0, @intFromPtr(&regs));
         return regs;
     }
 
-    fn setRegs(pid: linux.pid_t, regs: UserRegs) !void {
+    fn setRegs(pid: linux.pid_t, regs: UserRegs) PtraceError!void {
         try ptraceSysCall(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
     }
 
-    fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) !void {
+    fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) PtraceError!void {
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,
             .data => linux.PTRACE.POKEDATA,
@@ -452,7 +505,7 @@ const ptrace = struct {
         }
     }
 
-    fn peekWord(comptime location: Location, pid: linux.pid_t, addr: usize) !usize {
+    fn peekWord(comptime location: Location, pid: linux.pid_t, addr: usize) PtraceError!usize {
         const command = comptime switch (location) {
             .text => linux.PTRACE.PEEKTEXT,
             .data => linux.PTRACE.PEEKDATA,
