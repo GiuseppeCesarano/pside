@@ -64,6 +64,8 @@ pub fn deinit(this: *DiskWriter) void {
     _ = this.thread.?.stop();
     this.file.?.put();
     allocator.free(this.buffer);
+
+    this.* = undefined;
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {

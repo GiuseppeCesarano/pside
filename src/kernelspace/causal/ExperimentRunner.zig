@@ -71,6 +71,8 @@ pub fn deinit(this: *ExperimentRunner) void {
         taskFromKey(pair.key.raw).decrementReferences();
 
     this.clocks.deinit(atomic_allocator);
+
+    this.* = undefined;
 }
 
 pub fn profilePid(

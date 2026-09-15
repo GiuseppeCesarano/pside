@@ -21,7 +21,6 @@ recorder: ExperimentRecorder,
 runner: ExperimentRunner,
 
 profiler_thread: ?*kernel.Thread,
-deinit_guard: std.atomic.Value(bool),
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
     return .{
@@ -32,16 +31,15 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
         .runner = try .init(),
 
         .profiler_thread = null,
-        .deinit_guard = .init(false),
     };
 }
 
 pub fn deinit(this: *Engine) void {
-    if (this.deinit_guard.swap(true, .seq_cst)) return;
-
     if (this.profiler_thread) |t| _ = t.stop();
     this.runner.deinit();
     this.recorder.deinit();
+
+    this.* = undefined;
 }
 
 pub fn profilePid(

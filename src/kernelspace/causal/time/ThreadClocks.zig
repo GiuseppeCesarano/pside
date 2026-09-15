@@ -89,6 +89,8 @@ pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
     this.ref.drain();
     allocator.free(this.pairs);
     this.used.deinit(allocator);
+
+    this.* = undefined;
 }
 
 fn reserveSlotUnsafe(this: *const ThreadClocks, key: Key, hash: usize) !*Pair {

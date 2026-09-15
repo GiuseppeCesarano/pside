@@ -47,6 +47,8 @@ pub fn deinit(this: *Symbolizer, allocator: std.mem.Allocator, io: std.Io) void 
         .open => |*debug| debug.deinit(allocator, io),
         .unavailable => {},
     }
+
+    this.* = undefined;
 }
 
 pub fn symbolsUnavailable(this: Symbolizer) ?OpenError {

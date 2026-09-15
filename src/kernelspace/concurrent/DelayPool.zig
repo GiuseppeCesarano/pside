@@ -69,6 +69,8 @@ pub fn deinit(this: *DelayPool) void {
     }
 
     allocator.destroy(this.chunks);
+
+    this.* = undefined;
 }
 
 pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Error!void {
