@@ -33,12 +33,9 @@ fn resolveModulePath(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
     defer allocator.free(bin_path);
 
     const base_path = std.fs.path.dirname(bin_path) orelse "";
-    var uts: std.os.linux.utsname = undefined;
-    _ = std.os.linux.uname(&uts);
-    const release = uts.release;
-    const release_end = std.mem.findScalar(u8, &release, 0) orelse release.len;
+    var uts = std.posix.uname();
 
-    return std.mem.concat(allocator, u8, &.{ base_path, "/lib/modules/", release[0..release_end], "/extra/" ++ name ++ ".ko" });
+    return std.fs.path.join(allocator, &.{ base_path, "lib/modules", std.mem.sliceTo(&uts.release, 0), "extra", name ++ ".ko" });
 }
 
 fn handDeviceToOwner(path: [:0]const u8, owner: UserIds, io: std.Io) !void {

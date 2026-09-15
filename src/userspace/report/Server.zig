@@ -116,13 +116,18 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
     const target = request.head.target;
     std.log.debug("{s} {s}", .{ @tagName(request.head.method), target });
 
-    if (std.mem.eql(u8, target, "/"))
-        try this.serveFile(allocator, io, request, "index.html", "text/html")
-    else if (std.mem.eql(u8, target, "/uplot.min.js"))
-        try this.serveFile(allocator, io, request, "uplot.min.js", "application/javascript")
-    else if (std.mem.eql(u8, target, "/uplot.min.css"))
-        try this.serveFile(allocator, io, request, "uplot.min.css", "text/css")
-    else if (std.mem.eql(u8, target, "/api/vmas"))
+    const static = [_]struct { route: []const u8, filename: []const u8, content_type: []const u8 }{
+        .{ .route = "/", .filename = "index.html", .content_type = "text/html" },
+        .{ .route = "/uplot.min.js", .filename = "uplot.min.js", .content_type = "application/javascript" },
+        .{ .route = "/uplot.min.css", .filename = "uplot.min.css", .content_type = "text/css" },
+    };
+
+    for (static) |file| {
+        if (std.mem.eql(u8, target, file.route))
+            return this.serveFile(allocator, io, request, file.filename, file.content_type);
+    }
+
+    if (std.mem.eql(u8, target, "/api/vmas"))
         try this.serveVmas(allocator, request)
     else if (std.mem.startsWith(u8, target, "/api/vma?name="))
         try this.serveVma(allocator, request, target["/api/vma?name=".len..])
@@ -179,10 +184,7 @@ fn serveFile(
     const path = try std.fs.path.join(allocator, &.{ this.share_path, filename });
     defer allocator.free(path);
 
-    const path_z = try allocator.dupeSentinel(u8, path, 0);
-    defer allocator.free(path_z);
-
-    const file = std.Io.Dir.openFileAbsolute(io, path_z, .{}) catch |err| {
+    const file = std.Io.Dir.openFileAbsolute(io, path, .{}) catch |err| {
         std.log.err("could not open {s}: {s}", .{ path, @errorName(err) });
         try request.respond("", .{ .status = .not_found });
         return;

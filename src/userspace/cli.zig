@@ -197,7 +197,7 @@ pub fn execute(
     var args = args_it;
     if (args.next()) |possible_subcommand| {
         inline for (subcommands) |subcommand| {
-            if (std.mem.eql(u8, possible_subcommand, &functionName(subcommand)))
+            if (std.mem.eql(u8, possible_subcommand, functionName(subcommand)))
                 return @call(.auto, subcommand, prependTuple(data, Options{ .args = args }));
         }
     }
@@ -214,22 +214,7 @@ pub fn validateOptions(optional_errors: ?Options.Iterator, comptime msg: []const
     }
 }
 
-fn functionName(function: anytype) [functionNameLen(function)]u8 {
-    @setEvalBranchQuota(10_000);
-    const type_name = @typeName(@TypeOf(.{function}));
-    const start_target = " (function '";
-    const function_name_start = comptime std.mem.find(u8, type_name, start_target).? + start_target.len;
-    const function_name_end = comptime std.mem.findPos(u8, type_name, function_name_start, "')").?;
-
-    const name_slice = type_name[function_name_start..function_name_end];
-
-    comptime var name: [name_slice.len]u8 = undefined;
-    @memcpy(&name, name_slice);
-
-    return name;
-}
-
-fn functionNameLen(function: anytype) usize {
+fn functionName(comptime function: anytype) []const u8 {
     @setEvalBranchQuota(10_000);
     if (@typeInfo(@TypeOf(function)) != .@"fn") @compileError("subcommand field must be populated with a tuple of structs.");
 
@@ -238,7 +223,7 @@ fn functionNameLen(function: anytype) usize {
     const function_name_start = comptime std.mem.find(u8, type_name, start_target).? + start_target.len;
     const function_name_end = comptime std.mem.findPos(u8, type_name, function_name_start, "')").?;
 
-    return type_name[function_name_start..function_name_end].len;
+    return type_name[function_name_start..function_name_end];
 }
 
 fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @TypeOf(value)) {

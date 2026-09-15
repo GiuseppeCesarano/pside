@@ -36,10 +36,6 @@ pub fn deinit(this: VmaRanges) void {
         allocator.free(this.entries);
 }
 
-pub fn contains(this: VmaRanges, ip: usize) bool {
-    return this.findBase(ip) != null;
-}
-
 pub fn findBase(this: VmaRanges, ip: usize) ?usize {
     return for (this.entries) |range| {
         if (range.contains(ip)) break range.begin;

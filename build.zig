@@ -83,11 +83,15 @@ pub fn build(b: *std.Build) !void {
     check.dependOn(&check_obj.step);
 
     const zig_kernel_obj = b.addObject(kernel_obj_options);
-    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "init_module", {});
-    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "cleanup_module", {});
-    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "description", {});
-    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "license", {});
-    try zig_kernel_obj.force_undefined_symbols.put(b.allocator, "pside_engine_release", {});
+    for ([_][]const u8{
+        "init_module",
+        "cleanup_module",
+        "description",
+        "license",
+        "pside_engine_release",
+    }) |symbol|
+        try zig_kernel_obj.force_undefined_symbols.put(b.allocator, symbol, {});
+
     zig_kernel_obj.bundle_compiler_rt = false;
     zig_kernel_obj.link_function_sections = true;
     zig_kernel_obj.link_gc_sections = true;
@@ -217,11 +221,8 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(file.source, web_dir, file.dest).step);
 
     const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cli_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = bindings_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = report_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = record_mod })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = driver_mod })).step);
+    for ([_]*std.Build.Module{ cli_mod, bindings_mod, report_mod, record_mod, driver_mod }) |module|
+        test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
 
     const standalone_tests = [_]struct {
         name: []const u8,

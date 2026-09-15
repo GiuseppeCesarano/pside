@@ -80,8 +80,7 @@ fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ
 }
 
 fn isSudo(path: []const u8) bool {
-    const start = if (std.mem.findScalarLast(u8, path, '/')) |last_slash| last_slash + 1 else 0;
-    return std.mem.eql(u8, path[start..], "sudo");
+    return std.mem.eql(u8, std.fs.path.basename(path), "sudo");
 }
 
 fn expandBinaryPath(binary_path: []const u8, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError![*:0]const u8 {

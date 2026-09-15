@@ -56,27 +56,15 @@ pub fn close(this: KernelControlDevice, io: std.Io) void {
 }
 
 pub fn startProfilerOnPid(this: KernelControlDevice, start: communications.StartOptions) ControlError!void {
-    const data: communications.Data = .{ .start = start };
-    const rc = linux.ioctl(
-        this.ctl.handle,
-        @backingInt(communications.Commands.start_profiler),
-        @intFromPtr(&data),
-    );
-
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        else => |e| controlError(e),
-    };
+    return this.command(.start_profiler, .{ .start = start });
 }
 
 pub fn stop(this: KernelControlDevice) ControlError!void {
-    const data: communications.Data = .{ .empty = {} };
+    return this.command(.stop_profiler, .{ .empty = {} });
+}
 
-    const rc = linux.ioctl(
-        this.ctl.handle,
-        @backingInt(communications.Commands.stop_profiler),
-        @intFromPtr(&data),
-    );
+fn command(this: KernelControlDevice, cmd: communications.Commands, data: communications.Data) ControlError!void {
+    const rc = linux.ioctl(this.ctl.handle, @backingInt(cmd), @intFromPtr(&data));
 
     return switch (linux.errno(rc)) {
         .SUCCESS => {},

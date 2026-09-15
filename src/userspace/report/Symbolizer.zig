@@ -72,7 +72,7 @@ pub fn locate(this: *Symbolizer, allocator: std.mem.Allocator, relative_ip: u64)
     errdefer _ = this.cache.remove(address);
 
     const located: ?[]const u8 = if (debug) |d|
-        getSrcString(allocator, &d.dwarf, d.endian, address) catch null
+        getSrcString(allocator, &d.dwarf, d.endian, address)
     else
         null;
 
@@ -128,14 +128,11 @@ fn openDwarf(allocator: std.mem.Allocator, elf_header: std.elf.Header, buff: []c
     while (section_header_iterator.next() catch return OpenError.BadElf) |section| {
         if (section.sh_name >= section_header_string_table.len) continue;
         const name = std.mem.sliceTo(section_header_string_table[section.sh_name..], 0);
+        const stem = std.mem.cutPrefix(u8, name, ".") orelse continue;
+        const id = std.meta.stringToEnum(Dwarf.Section.Id, stem) orelse continue;
         const data = sectionData(buff, section) orelse continue;
 
-        inline for (@typeInfo(Dwarf.Section.Id).@"enum".field_names) |field_name| {
-            if (std.mem.eql(u8, name, "." ++ field_name)) {
-                const section_index = @backingInt(@field(Dwarf.Section.Id, field_name));
-                dwarf.sections[section_index] = .{ .data = data, .owned = false };
-            }
-        }
+        dwarf.sections[@backingInt(id)] = .{ .data = data, .owned = false };
     }
 
     if (dwarf.sections[@backingInt(Dwarf.Section.Id.debug_info)] == null) return OpenError.NoDebugInfo;
@@ -147,13 +144,6 @@ fn openDwarf(allocator: std.mem.Allocator, elf_header: std.elf.Header, buff: []c
     return dwarf;
 }
 
-const SrcStringError = error{
-    AddressNotFound,
-    InvalidFileIndex,
-    MalformedDebugInfo,
-    OutOfMemory,
-};
-
 fn sectionData(buff: []const u8, section: std.elf.Elf64_Shdr) ?[]const u8 {
     const start = std.math.cast(usize, section.sh_offset) orelse return null;
     const size = std.math.cast(usize, section.sh_size) orelse return null;
@@ -162,22 +152,19 @@ fn sectionData(buff: []const u8, section: std.elf.Elf64_Shdr) ?[]const u8 {
     return if (end <= buff.len) buff[start..end] else null;
 }
 
-fn getSrcString(allocator: std.mem.Allocator, dwarf: *Dwarf, endian: std.builtin.Endian, address: u64) SrcStringError![]const u8 {
-    const compile_unit = findCompileUnitByRange(dwarf, address) orelse return SrcStringError.AddressNotFound;
-    dwarf.populateSrcLocCache(allocator, endian, compile_unit) catch |err| return switch (err) {
-        Dwarf.ScanError.OutOfMemory => SrcStringError.OutOfMemory,
-        else => SrcStringError.MalformedDebugInfo,
-    };
+fn getSrcString(allocator: std.mem.Allocator, dwarf: *Dwarf, endian: std.builtin.Endian, address: u64) ?[]const u8 {
+    const compile_unit = findCompileUnitByRange(dwarf, address) orelse return null;
+    dwarf.populateSrcLocCache(allocator, endian, compile_unit) catch return null;
 
     const slc = &compile_unit.src_loc_cache.?;
-    const line_entry = slc.findSource(address) catch return SrcStringError.AddressNotFound;
-    if (line_entry.isInvalid()) return SrcStringError.AddressNotFound;
+    const line_entry = slc.findSource(address) catch return null;
+    if (line_entry.isInvalid()) return null;
 
     const file_index = line_entry.file - @intFromBool(slc.version < 5);
-    if (file_index >= slc.files.len) return SrcStringError.InvalidFileIndex;
+    if (file_index >= slc.files.len) return null;
 
     const file_path = slc.files[file_index].path;
-    return std.fmt.allocPrint(allocator, "{s}:{}", .{ file_path, line_entry.line });
+    return std.fmt.allocPrint(allocator, "{s}:{}", .{ file_path, line_entry.line }) catch null;
 }
 
 fn computeTextVaddr(elf_header: std.elf.Header, bytes: []const u8) OpenError!u64 {

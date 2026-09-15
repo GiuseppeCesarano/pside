@@ -52,7 +52,7 @@ pub fn close(this: OutputFile, io: std.Io) void {
     this.file.close(io);
 }
 
-fn computeFileHash(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
+fn computeFileHash(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !serialization.Header.Hash {
     //TODO: We shall also support hashing of the library the main exe loads.
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
@@ -61,12 +61,12 @@ fn computeFileHash(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !
     const bytes = try reader.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(bytes);
 
-    var out: [32]u8 = undefined;
+    var out: serialization.Header.Hash = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &out, .{});
     return out;
 }
 
-fn validate(file: std.Io.File, io: std.Io, program_hash: [32]u8) OpenError!void {
+fn validate(file: std.Io.File, io: std.Io, program_hash: serialization.Header.Hash) OpenError!void {
     var buf: [4096]u8 = undefined;
     var reader = file.reader(io, &buf);
     const header = serialization.Header.read(&reader.interface) catch return OpenError.NotAPsideFile;
@@ -80,7 +80,7 @@ fn create(
     owner: ?UserIds,
     program_path: []const u8,
     vma_name: []const u8,
-    program_hash: [32]u8,
+    program_hash: serialization.Header.Hash,
 ) !std.Io.File {
     const f = try std.Io.Dir.cwd().createFile(io, out_name, .{});
     errdefer f.close(io);

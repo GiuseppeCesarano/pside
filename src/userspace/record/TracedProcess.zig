@@ -14,28 +14,23 @@ const arch_specific = switch (@import("builtin").cpu.arch) {
 
 const UserRegs = arch_specific.UserRegs;
 const ForkError = error{ SystemResources, Unexpected };
-const RaiseError = error{Unexpected};
 
 const ChildStartError = error{
     AccessDenied,
     FileBusy,
     FileNotFound,
     FileSystem,
-    InvalidAddress,
     InvalidExe,
-    InvalidFileDescriptor,
     IsDir,
     NameTooLong,
     NotDir,
-    OperationUnsupported,
     ParentDead,
     PermissionDenied,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
     SystemResources,
-    UnsupportedFeature,
     Unexpected,
-} || UserIds.GetError || UserIds.DropError || ptrace.PtraceError || RaiseError;
+} || std.posix.PrctlError || std.posix.RaiseError || UserIds.GetError || UserIds.DropError || ptrace.PtraceError;
 
 pub const SpawnError = error{
     CouldNotFork,
@@ -46,7 +41,6 @@ pub const SpawnError = error{
 };
 
 pub const StartError = error{ ChildDied, ChildNotTraceable, Unexpected };
-pub const KillError = error{ PermissionDenied, ProcessNotFound, Unexpected };
 pub const WaitError = error{WaitFailed};
 pub const PatchError = error{ ChildDied, ChildNotTraceable, CouldNotMapInChild, Unexpected };
 
@@ -58,9 +52,16 @@ pub fn spawn(tracee_exe: Program, io: std.Io) SpawnError!TracedProcess {
     return spawnTraced(tracee_exe, io) catch |err| switch (err) {
         ForkError.SystemResources => SpawnError.CouldNotFork,
         ptrace.WaitForError.ChildExited, ptrace.WaitForError.ChildKilled => SpawnError.ChildDied,
-        ptrace.PtraceError.ProcessNotFound, ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => SpawnError.ChildNotTraceable,
         std.Io.Reader.Error.EndOfStream, std.Io.Reader.Error.ReadFailed => SpawnError.CouldNotReadEntrypoint,
-        else => SpawnError.Unexpected,
+        else => traceFailure(err),
+    };
+}
+
+fn traceFailure(err: anyerror) StartError {
+    return switch (err) {
+        ptrace.PtraceError.ProcessNotFound => StartError.ChildDied,
+        ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => StartError.ChildNotTraceable,
+        else => StartError.Unexpected,
     };
 }
 
@@ -92,18 +93,7 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
 }
 
 fn childStart(tracee_exe: Program) ChildStartError!void {
-    switch (linux.errno(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0))) {
-        .SUCCESS => {},
-        .ACCES => return ChildStartError.AccessDenied,
-        .BADF => return ChildStartError.InvalidFileDescriptor,
-        .FAULT => return ChildStartError.InvalidAddress,
-        .INVAL => unreachable,
-        .NODEV, .NXIO => return ChildStartError.UnsupportedFeature,
-        .OPNOTSUPP => return ChildStartError.OperationUnsupported,
-        .PERM, .BUSY => return ChildStartError.PermissionDenied,
-        .RANGE => unreachable,
-        else => return ChildStartError.Unexpected,
-    }
+    _ = try std.posix.prctl(.SET_PDEATHSIG, .{@backingInt(linux.SIG.KILL)});
 
     if (linux.getppid() == 1) return ChildStartError.ParentDead;
 
@@ -113,7 +103,7 @@ fn childStart(tracee_exe: Program) ChildStartError!void {
     }
 
     try ptrace.traceMe();
-    try raise(.STOP);
+    try std.posix.raise(.STOP);
 
     switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.slice))) {
         .SUCCESS => unreachable,
@@ -138,21 +128,8 @@ fn childStart(tracee_exe: Program) ChildStartError!void {
     }
 }
 
-fn raise(sig: linux.SIG) RaiseError!void {
-    const filled = linux.sigfillset();
-    var orig: linux.sigset_t = undefined;
-    _ = linux.sigprocmask(linux.SIG.BLOCK, &filled, &orig);
-    const rc = linux.tkill(linux.gettid(), sig);
-    _ = linux.sigprocmask(linux.SIG.SETMASK, &orig, null);
-
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        else => RaiseError.Unexpected,
-    };
-}
-
 fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
-    const max_pid_chars = comptime std.math.log10(@as(usize, std.math.maxInt(linux.pid_t)));
+    const max_pid_chars = comptime std.math.log10_int(@as(usize, std.math.maxInt(linux.pid_t)));
     const fmt = "/proc/{}/auxv";
 
     var buff: [fmt.len - 2 + max_pid_chars]u8 = undefined;
@@ -170,11 +147,7 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 }
 
 pub fn start(this: TracedProcess) StartError!void {
-    return this.startTraced() catch |err| switch (err) {
-        ptrace.PtraceError.ProcessNotFound => StartError.ChildDied,
-        ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => StartError.ChildNotTraceable,
-        else => StartError.Unexpected,
-    };
+    return this.startTraced() catch |err| traceFailure(err);
 }
 
 fn startTraced(this: TracedProcess) !void {
@@ -186,15 +159,6 @@ fn startTraced(this: TracedProcess) !void {
     try ptrace.detach(this.pid);
 }
 
-pub fn kill(this: TracedProcess) KillError!void {
-    return switch (linux.errno(linux.kill(this.pid, .KILL))) {
-        .SUCCESS => {},
-        .PERM => KillError.PermissionDenied,
-        .SRCH => KillError.ProcessNotFound,
-        else => KillError.Unexpected,
-    };
-}
-
 pub fn wait(this: TracedProcess) WaitError!void {
     var status: i32 = undefined;
     if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return WaitError.WaitFailed;
@@ -202,10 +166,8 @@ pub fn wait(this: TracedProcess) WaitError!void {
 
 pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
     return this.patchTraced(addr, ctl_fd) catch |err| switch (err) {
-        ptrace.PtraceError.ProcessNotFound => PatchError.ChildDied,
-        ptrace.PtraceError.PermissionDenied, ptrace.PtraceError.DeviceBusy, ptrace.PtraceError.InputOutput => PatchError.ChildNotTraceable,
         MmapError.OutOfMemory, MmapError.AccessDenied, MmapError.MappingAlreadyExists, MmapError.MemoryMappingNotSupported, MmapError.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
-        else => PatchError.Unexpected,
+        else => traceFailure(err),
     };
 }
 
@@ -230,6 +192,8 @@ const MmapError = error{
     LockedMemoryLimitExceeded,
     MappingAlreadyExists,
     MemoryMappingNotSupported,
+    OutOfMemory,
+    PermissionDenied,
     ProcessFdQuotaExceeded,
     SystemFdQuotaExceeded,
     Unexpected,
@@ -254,11 +218,8 @@ fn mmap(
         offset,
     });
 
-    const err = linux.errno(rc);
-    if (err == .SUCCESS) return @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(rc))[0..length];
-
-    switch (err) {
-        .SUCCESS => unreachable,
+    return switch (linux.errno(rc)) {
+        .SUCCESS => @as([*]align(std.heap.page_size_min) u8, @ptrFromInt(rc))[0..length],
         .TXTBSY => return MmapError.AccessDenied,
         .ACCES => return MmapError.AccessDenied,
         .PERM => return MmapError.PermissionDenied,
@@ -272,66 +233,7 @@ fn mmap(
         .NOMEM => return MmapError.OutOfMemory,
         .EXIST => return MmapError.MappingAlreadyExists,
         else => return MmapError.Unexpected,
-    }
-}
-
-pub const OpenError = error{
-    BadPathName,
-    AccessDenied,
-    FileTooBig,
-    IsDir,
-    SymLinkLoop,
-    ProcessFdQuotaExceeded,
-    NameTooLong,
-    SystemFdQuotaExceeded,
-    NoDevice,
-    FileNotFound,
-    SystemResources,
-    NoSpaceLeft,
-    NotDir,
-    PathAlreadyExists,
-    DeviceBusy,
-    Unexpected,
-} || ptrace.WaitForError;
-
-pub fn open(
-    this: TracedProcess,
-    file_path: *anyopaque,
-    flags: linux.O,
-    perm: linux.mode_t,
-) OpenError!linux.fd_t {
-    while (true) {
-        const rc = try this.syscall(
-            .open,
-            .{ @as(u64, @intFromPtr(file_path)), @as(u32, @bitCast(flags)), perm },
-        );
-
-        return switch (linux.errno(rc)) {
-            .SUCCESS => @intCast(rc),
-            .INTR => continue,
-
-            .INVAL => OpenError.BadPathName,
-            .ACCES => OpenError.AccessDenied,
-            .FBIG => OpenError.FileTooBig,
-            .OVERFLOW => OpenError.FileTooBig,
-            .ISDIR => OpenError.IsDir,
-            .LOOP => OpenError.SymLinkLoop,
-            .MFILE => OpenError.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => OpenError.NameTooLong,
-            .NFILE => OpenError.SystemFdQuotaExceeded,
-            .NODEV => OpenError.NoDevice,
-            .NOENT => OpenError.FileNotFound,
-            .SRCH => OpenError.FileNotFound,
-            .NOMEM => OpenError.SystemResources,
-            .NOSPC => OpenError.NoSpaceLeft,
-            .NOTDIR => OpenError.NotDir,
-            .PERM => OpenError.PermissionDenied,
-            .EXIST => OpenError.PathAlreadyExists,
-            .BUSY => OpenError.DeviceBusy,
-            .ILSEQ => OpenError.BadPathName,
-            else => OpenError.Unexpected,
-        };
-    }
+    };
 }
 
 pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
@@ -358,19 +260,16 @@ pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace
 }
 
 const ptrace = struct {
-    pub const Location = enum { text, data, user };
+    pub const Location = enum { text, data };
     const machine_word_alignment = std.mem.Alignment.fromByteUnits(@sizeOf(usize));
 
     pub const PtraceError = error{
-        DeadLock,
         DeviceBusy,
         InputOutput,
-        NameTooLong,
-        OperationUnsupported,
-        OutOfMemory,
-        ProcessNotFound,
         PermissionDenied,
-    } || error{Unexpected};
+        ProcessNotFound,
+        Unexpected,
+    };
 
     fn ptraceSysCall(request: u32, pid: linux.pid_t, addr: usize, data: usize) PtraceError!void {
         return switch (linux.errno(linux.ptrace(request, pid, addr, data, 0))) {
@@ -462,7 +361,6 @@ const ptrace = struct {
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,
             .data => linux.PTRACE.POKEDATA,
-            .user => linux.PTRACE.POKEUSER,
         };
 
         var reader: std.Io.Reader = .fixed(data);
@@ -509,7 +407,6 @@ const ptrace = struct {
         const command = comptime switch (location) {
             .text => linux.PTRACE.PEEKTEXT,
             .data => linux.PTRACE.PEEKDATA,
-            .user => linux.PTRACE.PEEKUSER,
         };
 
         const previus_aligned = machine_word_alignment.backward(addr);
