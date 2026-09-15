@@ -82,7 +82,12 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     else
         null;
 
-    executeRuns(io, parsed_options.flags.n, prepare, profiled_program, patch_addresses, &profiler);
+    executeRuns(io, parsed_options.flags.n, .{
+        .prepare = prepare,
+        .profiled_program = profiled_program,
+        .patch_addresses = patch_addresses,
+        .profiler = &profiler,
+    });
 
     std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(std.mem.span(profiled_program.path))});
 }
@@ -226,45 +231,39 @@ const PrepareCommand = struct {
     }
 };
 
-fn executeRuns(
-    io: std.Io,
-    runs_count: u32,
+const RunPlan = struct {
     prepare: ?PrepareCommand,
     profiled_program: Program,
     patch_addresses: []const usize,
     profiler: *Profiler,
-) void {
+};
+
+fn executeRuns(io: std.Io, runs_count: u32, plan: RunPlan) void {
     var run: u32 = 0;
     while (run < runs_count and !interrupted.load(.monotonic)) : (run += 1) {
         std.log.info("Run {}/{}", .{ run + 1, runs_count });
-        executeRun(io, prepare, profiled_program, patch_addresses, profiler);
+        executeRun(io, plan);
     }
 }
 
-fn executeRun(
-    io: std.Io,
-    prepare: ?PrepareCommand,
-    profiled_program: Program,
-    patch_addresses: []const usize,
-    profiler: *Profiler,
-) void {
-    if (prepare) |prepare_command|
+fn executeRun(io: std.Io, plan: RunPlan) void {
+    if (plan.prepare) |prepare_command|
         prepare_command.run(io) catch |err|
             std.process.fatal("Could not run prepare command '{s}' ({s})", .{ prepare_command.command, @errorName(err) });
 
-    var profiled_process = TracedProcess.spawn(profiled_program, io) catch |err| switch (err) {
+    var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| switch (err) {
         TracedProcess.SpawnError.ChildNotTraceable => std.process.fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
         else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
     };
     global_traced_pid.store(profiled_process.pid, .release);
 
-    profiler.start(profiled_process.pid) catch |err| switch (err) {
+    plan.profiler.start(profiled_process.pid) catch |err| switch (err) {
         KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{communications.control_device_path}),
         KernelControlDevice.ControlError.CouldNotAttachToProcess => std.process.fatal("The kernel could not attach to process {d}; check that perf events are available.", .{profiled_process.pid}),
         else => std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)}),
     };
 
-    for (patch_addresses) |address| profiled_process.patchProgressPoint(address, profiler.controlFd()) catch |err|
+    for (plan.patch_addresses) |address| profiled_process.patchProgressPoint(address, plan.profiler.controlFd()) catch |err|
         std.process.fatal("Could not patch the program's progress points ({s})", .{@errorName(err)});
 
     profiled_process.start() catch |err|
@@ -275,7 +274,7 @@ fn executeRun(
 
     global_traced_pid.store(0, .release);
 
-    profiler.stop() catch |err|
+    plan.profiler.stop() catch |err|
         std.process.fatal("Could not stop the profiler ({s})", .{@errorName(err)});
 }
 
