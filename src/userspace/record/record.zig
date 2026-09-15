@@ -3,6 +3,7 @@ const linux = std.os.linux;
 
 const cli = @import("cli");
 const communications = @import("communications");
+const safety = @import("safety");
 const UserIds = @import("UserIds");
 
 const elf_section_parser = @import("elf_section_parser.zig");
@@ -69,7 +70,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     };
     defer allocator.free(patch_addresses);
 
-    const profiler = Profiler.init(
+    var profiler = Profiler.init(
         control_device,
         output_file.file.handle,
         vma_name,
@@ -81,7 +82,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     else
         null;
 
-    executeRuns(io, parsed_options.flags.n, prepare, profiled_program, patch_addresses, profiler);
+    executeRuns(io, parsed_options.flags.n, prepare, profiled_program, patch_addresses, &profiler);
 
     std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(std.mem.span(profiled_program.path))});
 }
@@ -156,8 +157,11 @@ fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
 }
 
 const Profiler = struct {
+    const Session = enum { idle, profiling };
+
     device: KernelControlDevice,
     start_options: communications.StartOptions,
+    state: safety.State(Session),
 
     pub const InitError = communications.StartOptions.InitError;
 
@@ -170,6 +174,7 @@ const Profiler = struct {
         return .{
             .device = device,
             .start_options = try .init(undefined, output_fd, vma_name, attribute_kernel_samples),
+            .state = .init(.idle),
         };
     }
 
@@ -177,15 +182,23 @@ const Profiler = struct {
         return this.device.ctl.handle;
     }
 
-    fn start(this: Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
+    fn start(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
+        this.state.assertIs(.idle);
+
         var start_options = this.start_options;
         start_options.pid = pid;
 
-        return this.device.startProfilerOnPid(start_options);
+        try this.device.startProfilerOnPid(start_options);
+
+        this.state.transition(.profiling);
     }
 
-    fn stop(this: Profiler) KernelControlDevice.ControlError!void {
-        return this.device.stop();
+    fn stop(this: *Profiler) KernelControlDevice.ControlError!void {
+        this.state.assertIs(.profiling);
+
+        try this.device.stop();
+
+        this.state.transition(.idle);
     }
 };
 
@@ -219,7 +232,7 @@ fn executeRuns(
     prepare: ?PrepareCommand,
     profiled_program: Program,
     patch_addresses: []const usize,
-    profiler: Profiler,
+    profiler: *Profiler,
 ) void {
     var run: u32 = 0;
     while (run < runs_count and !interrupted.load(.monotonic)) : (run += 1) {
@@ -233,7 +246,7 @@ fn executeRun(
     prepare: ?PrepareCommand,
     profiled_program: Program,
     patch_addresses: []const usize,
-    profiler: Profiler,
+    profiler: *Profiler,
 ) void {
     if (prepare) |prepare_command|
         prepare_command.run(io) catch |err|

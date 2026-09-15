@@ -21,6 +21,9 @@ completion: kernel.Completion,
 records_header: payload.records.Header,
 healthy: bool,
 
+push_lock: std.debug.SafetyLock = .{},
+flush_lock: std.debug.SafetyLock = .{},
+
 pub const empty: DiskWriter = .{
     .buffer = &.{},
     .buffer_begin = .init(0),
@@ -69,6 +72,11 @@ pub fn deinit(this: *DiskWriter) void {
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
+    this.push_lock.lock();
+    defer this.push_lock.unlock();
+
+    std.debug.assert(this.buffer.len != 0);
+
     const bytes = std.mem.asBytes(&record);
 
     const len = this.buffer.len;
@@ -117,6 +125,9 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
 }
 
 pub fn flush(this: *DiskWriter) void {
+    this.flush_lock.lock();
+    defer this.flush_lock.unlock();
+
     if (!this.healthy) return;
 
     const begin = this.buffer_begin.load(.monotonic);

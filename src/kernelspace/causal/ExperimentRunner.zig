@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 
 const kernel = @import("kernel");
 const atomic_allocator = kernel.heap.atomic_allocator;
+const safety = @import("safety");
 
 const DelayPool = @import("../concurrent/DelayPool.zig");
 const VmaRanges = @import("../process/VmaRanges.zig");
@@ -18,6 +19,8 @@ const clocks_reserve = 1024;
 
 const max_exit_payment_us = 50 * std.time.us_per_ms;
 
+const Window = enum { idle, running };
+
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
 clocks: ThreadClocks,
@@ -30,6 +33,9 @@ has_errored: std.atomic.Value(bool),
 target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
+task_references: safety.AtomicCounter,
+window: safety.State(Window),
+
 pub fn init() !ExperimentRunner {
     return .{
         .profiled_pid = .init(0),
@@ -41,7 +47,20 @@ pub fn init() !ExperimentRunner {
         .has_errored = .init(false),
         .target_ip = .init(0),
         .delay_per_tick = .init(0),
+
+        .task_references = .zero,
+        .window = .init(.idle),
     };
+}
+
+fn retainTask(this: *ExperimentRunner, task: *kernel.Task) void {
+    task.incrementReferences();
+    this.task_references.increment();
+}
+
+fn releaseTask(this: *ExperimentRunner, task: *kernel.Task) void {
+    task.decrementReferences();
+    this.task_references.decrement();
 }
 
 fn keyFromTask(task: *const kernel.Task) Key {
@@ -55,6 +74,8 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
+    this.window.assertIs(.idle);
+
     kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
     kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
     kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
@@ -67,8 +88,12 @@ pub fn deinit(this: *ExperimentRunner) void {
     this.vma_ranges.deinit();
 
     var it = this.clocks.iterate();
+    defer it.finish();
+
     while (it.next()) |pair|
-        taskFromKey(pair.key.raw).decrementReferences();
+        this.releaseTask(taskFromKey(pair.key.raw));
+
+    this.task_references.assertZero();
 
     this.clocks.deinit(atomic_allocator);
 
@@ -85,11 +110,12 @@ pub fn profilePid(
 
     this.profiled_pid.store(pid, .monotonic);
     const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
+    this.task_references.increment();
 
     // Only this task is seeded; the rest join via onNewTask, so tracking can
     // be correct only if the target starts single-threaded.
     if (task.threadCount() != 1) {
-        task.decrementReferences();
+        this.releaseTask(task);
         std.log.err("Refusing to profile pid {d}: target already has multiple threads", .{pid});
         return error.MultiThreadedTarget;
     }
@@ -130,6 +156,9 @@ pub fn profilePid(
 }
 
 pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
+    this.window.assertIs(.idle);
+    defer this.window.transition(.running);
+
     this.delay_per_tick.store(delay_per_tick, .monotonic);
     this.target_ip.store(0, .seq_cst);
     this.vma_base.store(0, .seq_cst);
@@ -137,6 +166,9 @@ pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
 }
 
 pub fn endExperiment(this: *ExperimentRunner) void {
+    this.window.assertIs(.running);
+    defer this.window.transition(.idle);
+
     this.delay_per_tick.store(0, .seq_cst); // zero first so any in-flight tick is a no-op
     this.sampler.?.disable();
 }
@@ -166,6 +198,7 @@ pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
         defer kernel.preempt.enable();
 
         var it = this.clocks.iterate();
+        defer it.finish();
 
         // Read after the gate closed, a tick still in flight would push a clock
         // past it and underflow the lag
@@ -246,9 +279,11 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callc
     const parent_key = keyFromTask(parent);
     const child_key = keyFromTask(child);
 
-    child.incrementReferences();
-    const lag = this.fork(parent_key, child_key) catch
+    this.retainTask(child);
+    const lag = this.fork(parent_key, child_key) catch {
+        this.releaseTask(child);
         return this.abort("Error while forking");
+    };
 
     this.applyDelay(parent_key, lag);
     this.applyDelay(child_key, lag);
@@ -304,7 +339,7 @@ fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.
     const removed = this.clocks.remove(key);
     assert(removed);
 
-    task.decrementReferences();
+    this.releaseTask(task);
 
     if (payment != 0) kernel.time.sleep.us(payment);
 }

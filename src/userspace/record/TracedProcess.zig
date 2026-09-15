@@ -1,6 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
+const safety = @import("safety");
 const UserIds = @import("UserIds");
 
 const Program = @import("Program.zig");
@@ -44,9 +45,12 @@ pub const StartError = error{ ChildDied, ChildNotTraceable, Unexpected };
 pub const WaitError = error{WaitFailed};
 pub const PatchError = error{ ChildDied, ChildNotTraceable, CouldNotMapInChild, Unexpected };
 
+const Lifecycle = enum { attached, detached, reaped };
+
 pid: linux.pid_t,
 elf_entrypoint: usize,
 old_entry_ins: usize,
+state: safety.State(Lifecycle),
 
 pub fn spawn(tracee_exe: Program, io: std.Io) SpawnError!TracedProcess {
     return spawnTraced(tracee_exe, io) catch |err| switch (err) {
@@ -89,7 +93,7 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     try ptrace.cont(child_pid);
     try ptrace.waitTrapUntilIpReaches(child_pid, elf_entrypoint);
 
-    return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins };
+    return .{ .pid = child_pid, .elf_entrypoint = elf_entrypoint, .old_entry_ins = old_ins, .state = .init(.attached) };
 }
 
 fn childStart(tracee_exe: Program) ChildStartError!void {
@@ -146,8 +150,12 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     return reader.interface.takeInt(usize, .native);
 }
 
-pub fn start(this: TracedProcess) StartError!void {
-    return this.startTraced() catch |err| traceFailure(err);
+pub fn start(this: *TracedProcess) StartError!void {
+    this.state.assertIs(.attached);
+
+    this.startTraced() catch |err| return traceFailure(err);
+
+    this.state.transition(.detached);
 }
 
 fn startTraced(this: TracedProcess) !void {
@@ -159,12 +167,18 @@ fn startTraced(this: TracedProcess) !void {
     try ptrace.detach(this.pid);
 }
 
-pub fn wait(this: TracedProcess) WaitError!void {
+pub fn wait(this: *TracedProcess) WaitError!void {
+    this.state.assertIs(.detached);
+
     var status: i32 = undefined;
     if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return WaitError.WaitFailed;
+
+    this.state.transition(.reaped);
 }
 
 pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
+    this.state.assertIs(.attached);
+
     return this.patchTraced(addr, ctl_fd) catch |err| switch (err) {
         MmapError.OutOfMemory, MmapError.AccessDenied, MmapError.MappingAlreadyExists, MmapError.MemoryMappingNotSupported, MmapError.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
         else => traceFailure(err),
@@ -237,6 +251,8 @@ fn mmap(
 }
 
 pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
+    this.state.assertIs(.attached);
+
     const saved_regs = try ptrace.getRegs(this.pid);
     const ip = saved_regs.ip();
     const old_ins = try ptrace.peekWord(.text, this.pid, ip);

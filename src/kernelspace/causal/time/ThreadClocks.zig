@@ -6,6 +6,7 @@ const testing = std.testing;
 const BitSearch = @import("BitSearch");
 const min_cap = BitSearch.bits_per_word;
 const RefGate = @import("RefGate");
+const safety = @import("safety");
 
 /// Concurrent map optimized for thread-local clock propagation.
 const ThreadClocks = @This();
@@ -67,6 +68,7 @@ master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
 used: BitSearch,
+reservations: safety.AtomicCounter,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
     assert(isPowerOfTwo(reserve));
@@ -81,19 +83,22 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
         .ref = .{},
         .pairs = pairs,
         .used = try .init(allocator, reserve),
+        .reservations = .zero,
     };
 }
 
 pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
     this.ref.close();
     this.ref.drain();
+    this.reservations.assertZero();
+
     allocator.free(this.pairs);
     this.used.deinit(allocator);
 
     this.* = undefined;
 }
 
-fn reserveSlotUnsafe(this: *const ThreadClocks, key: Key, hash: usize) !*Pair {
+fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
     const len = this.pairs.len;
 
     // bit 0 is reserved for the collision flag; callers must pass it clear.
@@ -115,7 +120,10 @@ fn reserveSlotUnsafe(this: *const ThreadClocks, key: Key, hash: usize) !*Pair {
 
         if (current_key.isEql(.empty) and
             this.pairs[index].key.cmpxchgStrong(current_key, reservation, .acquire, .monotonic) == null)
+        {
+            this.reservations.increment();
             return &this.pairs[index];
+        }
 
         if (!current_key.hasCollided())
             _ = this.pairs[index].key.fetchOr(Key.empty_collided, .monotonic);
@@ -130,6 +138,8 @@ fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
     this.used.take(this.getIndexUnsafe(ptr));
 
     _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
+
+    this.reservations.decrement();
 }
 
 /// Looks up the clock slot for a given key.
@@ -339,6 +349,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     this.ref.close();
     this.ref.drain();
+    this.reservations.assertZero();
 
     if (this.pairs.len != old_len) {
         this.ref.open();

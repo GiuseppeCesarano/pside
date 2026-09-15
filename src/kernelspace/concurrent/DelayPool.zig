@@ -60,6 +60,7 @@ pub fn deinit(this: *DelayPool) void {
     // A pending delay still counts as a user and nothing is left to flush it
     this.cancelAllPending();
     this.waitAllDelays();
+    assert(this.users_count.load(.monotonic) == 0);
 
     var chunk: ?*Chunk = this.chunks.next.load(.monotonic);
 
