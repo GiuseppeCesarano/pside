@@ -68,7 +68,7 @@ master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
 used: BitSearch,
-reservations: safety.AtomicCounter,
+reservations: safety.AtomicReferenceCounter,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
     assert(isPowerOfTwo(reserve));
@@ -90,7 +90,7 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
 pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertZero();
+    this.reservations.assertEql(0);
 
     allocator.free(this.pairs);
     this.used.deinit(allocator);
@@ -349,7 +349,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertZero();
+    this.reservations.assertEql(0);
 
     if (this.pairs.len != old_len) {
         this.ref.open();

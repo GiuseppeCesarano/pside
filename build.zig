@@ -191,6 +191,7 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{
             .{ .name = "cli", .module = cli_mod },
             .{ .name = "communications", .module = communications_mod },
+            .{ .name = "safety", .module = safety_mod },
             .{ .name = "serialization", .module = serialization_mod },
         },
     });
@@ -240,7 +241,7 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
         .{ .name = "concurrent_bitsearch", .path = "src/kernelspace/concurrent/BitSearch.zig", .sanitize_thread = true },
         .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{ .{ .name = "RefGate", .module = ref_gate_mod }, .{ .name = "BitSearch", .module = bit_search_mod }, .{ .name = "safety", .module = safety_mod } } },
-        .{ .name = "common_safety", .path = "src/common/safety.zig" },
+        .{ .name = "common_safety", .path = "src/common/safety.zig", .sanitize_thread = true },
         .{ .name = "common_serialization", .path = "src/common/serialization.zig" },
         .{ .name = "kernelspace_soft_float", .path = "src/kernelspace/soft_float.zig" },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },

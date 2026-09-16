@@ -56,6 +56,8 @@ pub inline fn close(this: *RefGate) void {
 }
 
 pub inline fn drain(this: *RefGate) void {
+    assert(this.references.load(.monotonic) & lock_bit != 0);
+
     while ((this.references.load(.acquire) & references_mask) != 0)
         std.atomic.spinLoopHint();
 }

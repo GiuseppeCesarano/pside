@@ -19,7 +19,9 @@ const clocks_reserve = 1024;
 
 const max_exit_payment_us = 50 * std.time.us_per_ms;
 
-const Window = enum { idle, running };
+const ExperimentWindow = enum { idle, running };
+
+const BoundToTask = safety.BoundTo(kernel.Task.current, .{});
 
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
@@ -33,8 +35,9 @@ has_errored: std.atomic.Value(bool),
 target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
-task_references: safety.AtomicCounter,
-window: safety.State(Window),
+task_references: safety.AtomicReferenceCounter,
+Experiment: safety.State(ExperimentWindow),
+loop: BoundToTask,
 
 pub fn init() !ExperimentRunner {
     return .{
@@ -49,7 +52,8 @@ pub fn init() !ExperimentRunner {
         .delay_per_tick = .init(0),
 
         .task_references = .zero,
-        .window = .init(.idle),
+        .Experiment = .init(.idle),
+        .loop = .unbound,
     };
 }
 
@@ -74,15 +78,17 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
-    this.window.assertIs(.idle);
+    this.Experiment.assertIs(.idle);
 
-    kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
-    kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-    kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
-    kernel.tracepoint.task.newtask.unregister(onNewTask, this);
-    kernel.tracepoint.sync();
+    if (this.sampler) |s| {
+        kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
+        kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+        kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
+        kernel.tracepoint.task.newtask.unregister(onNewTask, this);
+        kernel.tracepoint.sync();
 
-    if (this.sampler) |s| s.deinit();
+        s.deinit();
+    }
 
     this.delay_pool.deinit();
     this.vma_ranges.deinit();
@@ -93,7 +99,7 @@ pub fn deinit(this: *ExperimentRunner) void {
     while (it.next()) |pair|
         this.releaseTask(taskFromKey(pair.key.raw));
 
-    this.task_references.assertZero();
+    this.task_references.assertEql(0);
 
     this.clocks.deinit(atomic_allocator);
 
@@ -156,8 +162,9 @@ pub fn profilePid(
 }
 
 pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
-    this.window.assertIs(.idle);
-    defer this.window.transition(.running);
+    this.loop.assertSame();
+    this.Experiment.assertIs(.idle);
+    defer this.Experiment.transition(.running);
 
     this.delay_per_tick.store(delay_per_tick, .monotonic);
     this.target_ip.store(0, .seq_cst);
@@ -166,8 +173,9 @@ pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
 }
 
 pub fn endExperiment(this: *ExperimentRunner) void {
-    this.window.assertIs(.running);
-    defer this.window.transition(.idle);
+    this.loop.assertSame();
+    this.Experiment.assertIs(.running);
+    defer this.Experiment.transition(.idle);
 
     this.delay_per_tick.store(0, .seq_cst); // zero first so any in-flight tick is a no-op
     this.sampler.?.disable();
@@ -188,6 +196,9 @@ pub fn hasErrored(this: *const ExperimentRunner) bool {
 }
 
 pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
+    this.loop.assertSame();
+    this.Experiment.assertIs(.running);
+
     {
         // The map walk and per-thread delay application must not be preempted,
         // since we hold the gate closed, if a tracepoint callback gets scheduled

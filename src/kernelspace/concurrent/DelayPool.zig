@@ -46,12 +46,12 @@ pub const empty: DelayPool = .{
 pub fn init(this: *DelayPool) !void {
     if (this.users_count.load(.monotonic) != uninitialized) return;
 
-    this.users_count = .init(0);
-
     this.chunks = try allocator.create(Chunk);
     this.initChunk(this.chunks);
 
     this.completion.init();
+
+    this.users_count = .init(0);
 }
 
 pub fn deinit(this: *DelayPool) void {

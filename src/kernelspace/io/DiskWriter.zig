@@ -2,8 +2,11 @@ const std = @import("std");
 
 const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
+const safety = @import("safety");
 const serialization = @import("serialization");
 const payload = serialization.payload;
+
+const BoundToTask = safety.BoundTo(kernel.Task.current, .{});
 
 const DiskWriter = @This();
 
@@ -21,8 +24,8 @@ completion: kernel.Completion,
 records_header: payload.records.Header,
 healthy: bool,
 
-push_lock: std.debug.SafetyLock = .{},
-flush_lock: std.debug.SafetyLock = .{},
+producer: BoundToTask = .unbound,
+consumer: BoundToTask = .unbound,
 
 pub const empty: DiskWriter = .{
     .buffer = &.{},
@@ -49,7 +52,10 @@ pub fn start(
     errdefer file.put();
 
     this.buffer = try allocator.alloc(u8, std.heap.page_size_min * 6);
-    errdefer allocator.free(this.buffer);
+    errdefer {
+        allocator.free(this.buffer);
+        this.buffer = &.{};
+    }
 
     this.completion.init(); // init before thread spawns
     this.file = file;
@@ -62,18 +68,18 @@ pub fn start(
 }
 
 pub fn deinit(this: *DiskWriter) void {
+    defer this.* = undefined;
+
     if (this.thread == null) return;
+
     this.completion.signal();
     _ = this.thread.?.stop();
     this.file.?.put();
     allocator.free(this.buffer);
-
-    this.* = undefined;
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
-    this.push_lock.lock();
-    defer this.push_lock.unlock();
+    this.producer.assertSame();
 
     std.debug.assert(this.buffer.len != 0);
 
@@ -125,8 +131,7 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
 }
 
 pub fn flush(this: *DiskWriter) void {
-    this.flush_lock.lock();
-    defer this.flush_lock.unlock();
+    this.consumer.assertSame();
 
     if (!this.healthy) return;
 

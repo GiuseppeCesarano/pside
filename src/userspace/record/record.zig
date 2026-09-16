@@ -21,7 +21,6 @@ const Flags = struct {
     k: bool = false,
 };
 
-var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
 var interrupted: std.atomic.Value(bool) = .init(false);
 
 pub fn record(options: cli.Options, init: std.process.Init) !void {
@@ -105,8 +104,7 @@ fn setSigintHandler() void {
 
 fn handleSigint(sig: linux.SIG) callconv(.c) void {
     if (sig == .INT) {
-        const pid = global_traced_pid.swap(0, .acq_rel);
-        if (pid != 0) _ = linux.kill(pid, .KILL);
+        TracedProcess.killTraced();
         interrupted.store(true, .monotonic);
     }
 }
@@ -253,9 +251,12 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
 
     var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| switch (err) {
         TracedProcess.SpawnError.ChildNotTraceable => std.process.fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
+        TracedProcess.SpawnError.ChildDied => if (interrupted.load(.monotonic))
+            return
+        else
+            std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
         else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
     };
-    global_traced_pid.store(profiled_process.pid, .release);
 
     plan.profiler.start(profiled_process.pid) catch |err| switch (err) {
         KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{communications.control_device_path}),
@@ -271,8 +272,6 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
 
     profiled_process.wait() catch |err|
         std.process.fatal("Could not wait on profiled process (pid: {}, err: {s})", .{ profiled_process.pid, @errorName(err) });
-
-    global_traced_pid.store(0, .release);
 
     plan.profiler.stop() catch |err|
         std.process.fatal("Could not stop the profiler ({s})", .{@errorName(err)});

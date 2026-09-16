@@ -3,15 +3,20 @@ const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
 
+const safety = @import("safety");
+
 const Profile = @import("Profile.zig");
 
 const Server = @This();
+
+const Connections = enum { drained, serving };
 
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
 profile: *const Profile,
 connections: Io.Group,
+state: safety.State(Connections),
 
 pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
@@ -26,10 +31,13 @@ pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Serv
         .share_path = share_path,
         .profile = profile,
         .connections = .init,
+        .state = .init(.drained),
     };
 }
 
 pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
+    this.state.assertIs(.drained);
+
     this.stop(io);
     this.server.deinit(io);
     allocator.free(this.share_path);
@@ -57,6 +65,8 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
 }
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
+    this.state.assertIs(.drained);
+
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);
 
@@ -68,10 +78,14 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
         this.connections.concurrent(io, handleConnection, .{ this, allocator, io, stream }) catch |err| {
             std.log.err("could not spawn connection handler: {s}", .{@errorName(err)});
             stream.close(io);
+            continue;
         };
+
+        this.state.transition(.serving);
     }
 
     this.connections.cancel(io);
+    this.state.transition(.drained);
 }
 
 pub fn stop(this: *Server, io: Io) void {

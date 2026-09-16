@@ -52,6 +52,13 @@ elf_entrypoint: usize,
 old_entry_ins: usize,
 state: safety.State(Lifecycle),
 
+var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
+
+pub fn killTraced() void {
+    const pid = global_traced_pid.swap(0, .acq_rel);
+    if (pid != 0) _ = linux.kill(pid, .KILL);
+}
+
 pub fn spawn(tracee_exe: Program, io: std.Io) SpawnError!TracedProcess {
     return spawnTraced(tracee_exe, io) catch |err| switch (err) {
         ForkError.SystemResources => SpawnError.CouldNotFork,
@@ -79,6 +86,8 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     };
 
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
+
+    global_traced_pid.store(child_pid, .release);
 
     try ptrace.waitFor(child_pid, .stop);
 
@@ -171,7 +180,11 @@ pub fn wait(this: *TracedProcess) WaitError!void {
     this.state.assertIs(.detached);
 
     var status: i32 = undefined;
-    if (linux.errno(linux.waitpid(this.pid, &status, 0)) != .SUCCESS) return WaitError.WaitFailed;
+    const wait_rc = linux.waitpid(this.pid, &status, 0);
+
+    global_traced_pid.store(0, .release);
+
+    if (linux.errno(wait_rc) != .SUCCESS) return WaitError.WaitFailed;
 
     this.state.transition(.reaped);
 }

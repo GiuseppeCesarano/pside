@@ -70,10 +70,10 @@ fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ
 
     var i: usize = 1;
     while (i < final_argc) : (i += 1) {
-        if (it.next()) |next_arg| {
-            const allocated_arg = try allocator.dupeSentinel(u8, next_arg, 0);
-            args_slice[i] = @ptrCast(allocated_arg);
-        }
+        const next_arg = it.next() orelse unreachable;
+
+        const allocated_arg = try allocator.dupeSentinel(u8, next_arg, 0);
+        args_slice[i] = @ptrCast(allocated_arg);
     }
 
     return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ, .is_sudo = is_sudo };
