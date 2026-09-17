@@ -7,6 +7,7 @@ const UserIds = @import("UserIds");
 const OutputFile = @This();
 
 file: std.Io.File,
+vma_declared: bool,
 
 pub const WriteError = error{CouldNotWrite};
 
@@ -19,7 +20,7 @@ pub const OpenError = error{
     Unexpected,
 };
 
-pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, vma_name: []const u8, owner: ?UserIds) OpenError!OutputFile {
+pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, owner: ?UserIds) OpenError!OutputFile {
     const file_name = std.fs.path.basename(program_path);
 
     const out_name = try std.mem.concat(allocator, u8, &.{ file_name, ".pside" });
@@ -40,11 +41,11 @@ pub fn open(allocator: std.mem.Allocator, io: std.Io, program_path: []const u8, 
         errdefer f.close(io);
         try validate(f, io, program_hash);
         std.log.info("Aggregating runs into existing {s}", .{out_name});
-        return .{ .file = f };
+        return .{ .file = f, .vma_declared = false };
     } else |_| {
         std.log.info("Recording to new {s}", .{out_name});
-        const f = create(io, out_name, owner, full_path, vma_name, program_hash) catch return OpenError.CouldNotCreate;
-        return .{ .file = f };
+        const f = create(io, out_name, owner, full_path, program_hash) catch return OpenError.CouldNotCreate;
+        return .{ .file = f, .vma_declared = false };
     }
 }
 
@@ -74,12 +75,27 @@ fn validate(file: std.Io.File, io: std.Io, program_hash: serialization.Header.Ha
     if (!std.mem.eql(u8, &program_hash, &header.binary_hash)) return OpenError.HashDontMatch;
 }
 
+pub fn declareVma(this: *OutputFile, io: std.Io, vma_name: []const u8) WriteError!void {
+    if (this.vma_declared) return;
+
+    const end = this.file.length(io) catch return WriteError.CouldNotWrite;
+
+    var buf: [4096]u8 = undefined;
+    var writer = this.file.writer(io, &buf);
+    writer.seekTo(end) catch return WriteError.CouldNotWrite;
+
+    const vma: payload.Vma = .{ .id = payload.default_vma_id, .name = vma_name };
+    vma.write(&writer.interface) catch return WriteError.CouldNotWrite;
+    writer.flush() catch return WriteError.CouldNotWrite;
+
+    this.vma_declared = true;
+}
+
 fn create(
     io: std.Io,
     out_name: []const u8,
     owner: ?UserIds,
     program_path: []const u8,
-    vma_name: []const u8,
     program_hash: serialization.Header.Hash,
 ) !std.Io.File {
     const f = try std.Io.Dir.cwd().createFile(io, out_name, .{});
@@ -93,11 +109,9 @@ fn create(
 
     const header: serialization.Header = .init(program_hash);
     const binary_path: payload.Frame = .{ .tag = .binary_path, .body = program_path };
-    const vma: payload.Vma = .{ .id = payload.default_vma_id, .name = vma_name };
 
     try header.write(w);
     try binary_path.write(w);
-    try vma.write(w);
     try writer.flush();
 
     return f;

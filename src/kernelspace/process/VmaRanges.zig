@@ -11,7 +11,9 @@ entries: []Range,
 
 pub const empty: VmaRanges = .{ .entries = &.{} };
 
-pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
+pub const SnapshotError = error{NoMatchingVma} || std.mem.Allocator.Error;
+
+pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) SnapshotError!VmaRanges {
     const filter_z: ?[*:0]const u8 = if (filter.len > 0) filter.ptr else null;
 
     var capacity: usize = 32;
@@ -20,6 +22,8 @@ pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) !VmaRanges {
         errdefer allocator.free(vma_ranges);
 
         const count = task.snapshotExecutableVmas(filter_z, vma_ranges);
+
+        if (count == 0) return SnapshotError.NoMatchingVma;
 
         if (count <= capacity) {
             std.debug.assert(allocator.resize(vma_ranges, count));

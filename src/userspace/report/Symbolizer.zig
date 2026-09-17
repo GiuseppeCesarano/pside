@@ -84,6 +84,8 @@ pub fn locate(this: *Symbolizer, allocator: std.mem.Allocator, relative_ip: u64)
 }
 
 fn openDebug(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) OpenError!Debug {
+    if (!std.fs.path.isAbsolute(binary_path)) return OpenError.BinaryUnreadable;
+
     const file = std.Io.Dir.openFileAbsolute(io, binary_path, .{}) catch return OpenError.BinaryUnreadable;
     errdefer file.close(io);
 

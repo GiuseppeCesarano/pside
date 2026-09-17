@@ -5,6 +5,7 @@ const name = communications.name;
 const kernel = @import("kernel");
 
 const Engine = @import("causal/Engine.zig");
+const VmaRanges = @import("process/VmaRanges.zig");
 
 comptime {
     _ = @import("soft_float.zig");
@@ -52,7 +53,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
     defer filp.unlock();
 
     switch (@as(communications.Commands, @fromBackingInt(@intCast(command)))) {
-        .start_profiler => {
+        .attach_profiler => {
             if (filp.getEngine() != null) return code(.BUSY);
 
             const engine = kernel.heap.allocator.create(Engine) catch return code(.NOMEM);
@@ -62,29 +63,42 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
             };
             filp.setEngine(engine);
 
-            const len = data.start.vma_name_len;
-            data.start.vma_name[len] = 0;
-            const raw = data.start.vma_name[0..len :0];
+            const len = data.attach.vma_name_len;
+            data.attach.vma_name[len] = 0;
+            const raw = data.attach.vma_name[0..len :0];
 
-            engine.profilePid(data.start.pid, data.start.output_fd, raw, data.start.attribute_kernel_samples) catch {
-                engine.deinit();
-                kernel.heap.allocator.destroy(engine);
-                filp.setEngine(null);
+            engine.attach(data.attach.pid, raw, data.attach.attribute_kernel_samples) catch |err| {
+                releaseEngine(filp, engine);
+
+                return switch (err) {
+                    VmaRanges.SnapshotError.NoMatchingVma => code(.NOENT),
+                    else => code(.IO),
+                };
+            };
+        },
+
+        .start_profiler => {
+            const engine: *Engine = @ptrCast(@alignCast(filp.getEngine() orelse return code(.NXIO)));
+            if (engine.isProfiling()) return code(.BUSY);
+
+            engine.start(data.start.output_fd) catch {
+                releaseEngine(filp, engine);
                 return code(.IO);
             };
         },
 
-        .stop_profiler => if (filp.getEngine()) |ptr| {
-            const engine: *Engine = @ptrCast(@alignCast(ptr));
-            engine.deinit();
-            kernel.heap.allocator.destroy(engine);
-            filp.setEngine(null);
-        },
+        .stop_profiler => if (filp.getEngine()) |ptr| releaseEngine(filp, @ptrCast(@alignCast(ptr))),
 
         else => return code(.INVAL),
     }
 
     return code(.SUCCESS);
+}
+
+fn releaseEngine(filp: *kernel.File, engine: *Engine) void {
+    engine.deinit();
+    kernel.heap.allocator.destroy(engine);
+    filp.setEngine(null);
 }
 
 fn code(return_code: std.os.linux.E) c_long {

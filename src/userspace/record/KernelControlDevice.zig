@@ -9,7 +9,9 @@ ctl: std.Io.File,
 
 pub const ControlError = error{
     SessionAlreadyRunning,
+    ProfilerNotAttached,
     CouldNotAttachToProcess,
+    NoMatchingVma,
     UnknownCommand,
     CommandNotReadable,
     OutOfMemory,
@@ -19,7 +21,9 @@ pub const ControlError = error{
 fn controlError(e: linux.E) ControlError {
     return switch (e) {
         .BUSY => ControlError.SessionAlreadyRunning,
+        .NXIO => ControlError.ProfilerNotAttached,
         .IO => ControlError.CouldNotAttachToProcess,
+        .NOENT => ControlError.NoMatchingVma,
         .INVAL => ControlError.UnknownCommand,
         .FAULT => ControlError.CommandNotReadable,
         .NOMEM => ControlError.OutOfMemory,
@@ -55,7 +59,11 @@ pub fn close(this: KernelControlDevice, io: std.Io) void {
     this.ctl.close(io);
 }
 
-pub fn startProfilerOnPid(this: KernelControlDevice, start: communications.StartOptions) ControlError!void {
+pub fn attachProfilerToPid(this: KernelControlDevice, attach: communications.AttachOptions) ControlError!void {
+    return this.command(.attach_profiler, .{ .attach = attach });
+}
+
+pub fn startProfiler(this: KernelControlDevice, start: communications.StartOptions) ControlError!void {
     return this.command(.start_profiler, .{ .start = start });
 }
 

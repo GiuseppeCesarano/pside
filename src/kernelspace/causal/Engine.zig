@@ -4,12 +4,15 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const kernel = @import("kernel");
+const safety = @import("safety");
 
 const ExperimentPlanner = @import("ExperimentPlanner.zig");
 const ExperimentRecorder = @import("ExperimentRecorder.zig");
 const ExperimentRunner = @import("ExperimentRunner.zig");
 
 const Engine = @This();
+
+const Session = enum { idle, attached, profiling };
 
 const progress_grow_threshold = 5;
 const progress_decay_threshold = progress_grow_threshold * 4;
@@ -21,6 +24,7 @@ recorder: ExperimentRecorder,
 runner: ExperimentRunner,
 
 profiler_thread: ?*kernel.Thread,
+state: safety.State(Session),
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
     return .{
@@ -31,6 +35,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
         .runner = try .init(),
 
         .profiler_thread = null,
+        .state = .init(.idle),
     };
 }
 
@@ -42,17 +47,31 @@ pub fn deinit(this: *Engine) void {
     this.* = undefined;
 }
 
-pub fn profilePid(
+pub fn isProfiling(this: *const Engine) bool {
+    return this.profiler_thread != null;
+}
+
+pub fn attach(
     this: *Engine,
     pid: linux.pid_t,
-    fd: linux.fd_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
 ) !void {
+    this.state.assertIs(.idle);
+
     this.planner = .init(@intCast(pid));
     try this.runner.profilePid(pid, vma_name, attribute_kernel_samples);
+
+    this.state.transition(.attached);
+}
+
+pub fn start(this: *Engine, fd: linux.fd_t) !void {
+    this.state.assertIs(.attached);
+
     try this.recorder.start(fd);
     this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
+
+    this.state.transition(.profiling);
 }
 
 fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {

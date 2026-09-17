@@ -55,7 +55,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ profiled_program, progress_point_name, allocator, io });
 
     const vma_name = resolveVmaName(parsed_options.flags.l, profiled_program.path);
-    const output_file = OutputFile.open(allocator, io, std.mem.span(profiled_program.path), vma_name, user_ids) catch |err| switch (err) {
+    var output_file = OutputFile.open(allocator, io, std.mem.span(profiled_program.path), user_ids) catch |err| switch (err) {
         OutputFile.OpenError.HashDontMatch => std.process.fatal("{s}.pside was recorded from a different build of the binary; delete it to start a fresh profile.", .{profiled_program.path}),
         OutputFile.OpenError.NotAPsideFile => std.process.fatal("{s}.pside is not a pside recording; delete it to start a fresh profile.", .{profiled_program.path}),
         else => std.process.fatal("Could not open {s}.pside ({s})", .{ profiled_program.path, @errorName(err) }),
@@ -86,6 +86,8 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         .profiled_program = profiled_program,
         .patch_addresses = patch_addresses,
         .profiler = &profiler,
+        .output_file = &output_file,
+        .vma_name = vma_name,
     });
 
     std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(std.mem.span(profiled_program.path))});
@@ -160,13 +162,14 @@ fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
 }
 
 const Profiler = struct {
-    const Session = enum { idle, profiling };
+    const Session = enum { idle, attached, profiling };
 
     device: KernelControlDevice,
-    start_options: communications.StartOptions,
+    output_fd: linux.fd_t,
+    attach_options: communications.AttachOptions,
     state: safety.State(Session),
 
-    pub const InitError = communications.StartOptions.InitError;
+    pub const InitError = communications.AttachOptions.InitError;
 
     fn init(
         device: KernelControlDevice,
@@ -176,7 +179,8 @@ const Profiler = struct {
     ) InitError!Profiler {
         return .{
             .device = device,
-            .start_options = try .init(undefined, output_fd, vma_name, attribute_kernel_samples),
+            .output_fd = output_fd,
+            .attach_options = try .init(undefined, vma_name, attribute_kernel_samples),
             .state = .init(.idle),
         };
     }
@@ -185,13 +189,25 @@ const Profiler = struct {
         return this.device.ctl.handle;
     }
 
-    fn start(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
+    fn vmaName(this: *const Profiler) []const u8 {
+        return this.attach_options.vma_name[0..this.attach_options.vma_name_len];
+    }
+
+    fn attach(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
         this.state.assertIs(.idle);
 
-        var start_options = this.start_options;
-        start_options.pid = pid;
+        var attach_options = this.attach_options;
+        attach_options.pid = pid;
 
-        try this.device.startProfilerOnPid(start_options);
+        try this.device.attachProfilerToPid(attach_options);
+
+        this.state.transition(.attached);
+    }
+
+    fn start(this: *Profiler) KernelControlDevice.ControlError!void {
+        this.state.assertIs(.attached);
+
+        try this.device.startProfiler(.{ .output_fd = this.output_fd });
 
         this.state.transition(.profiling);
     }
@@ -234,6 +250,8 @@ const RunPlan = struct {
     profiled_program: Program,
     patch_addresses: []const usize,
     profiler: *Profiler,
+    output_file: *OutputFile,
+    vma_name: []const u8,
 };
 
 fn executeRuns(io: std.Io, runs_count: u32, plan: RunPlan) void {
@@ -258,11 +276,21 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
         else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
     };
 
-    plan.profiler.start(profiled_process.pid) catch |err| switch (err) {
+    plan.profiler.attach(profiled_process.pid) catch |err| switch (err) {
         KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{communications.control_device_path}),
         KernelControlDevice.ControlError.CouldNotAttachToProcess => std.process.fatal("The kernel could not attach to process {d}; check that perf events are available.", .{profiled_process.pid}),
-        else => std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)}),
+        KernelControlDevice.ControlError.NoMatchingVma => std.process.fatal(
+            "No executable mapping named '{s}' when the program reached its entry point; -l takes the mapped file's name as it appears in /proc/<pid>/maps. pside snapshots the mappings once, at the entry point, so a library the program dlopens later cannot be targeted.",
+            .{plan.profiler.vmaName()},
+        ),
+        else => std.process.fatal("Could not attach the profiler ({s})", .{@errorName(err)}),
     };
+
+    plan.output_file.declareVma(io, plan.vma_name) catch |err|
+        std.process.fatal("Could not declare the profiled region in the output file ({s})", .{@errorName(err)});
+
+    plan.profiler.start() catch |err|
+        std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)});
 
     for (plan.patch_addresses) |address| profiled_process.patchProgressPoint(address, plan.profiler.controlFd()) catch |err|
         std.process.fatal("Could not patch the program's progress points ({s})", .{@errorName(err)});
