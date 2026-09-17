@@ -120,7 +120,7 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *DiskWriter = @ptrCast(@alignCast(ctx.?));
 
     while (!kernel.Thread.shouldStop()) {
-        _ = this.completion.timedWait(100);
+        _ = this.completion.wait();
         this.completion.reinit();
 
         this.flush();
