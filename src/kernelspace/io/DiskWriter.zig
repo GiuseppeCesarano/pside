@@ -8,6 +8,8 @@ const payload = serialization.payload;
 
 const BoundToTask = safety.BoundTo(kernel.Task.current, .{});
 
+const stop_poll_ms = 100;
+
 const DiskWriter = @This();
 
 thread: ?*kernel.Thread,
@@ -120,7 +122,10 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *DiskWriter = @ptrCast(@alignCast(ctx.?));
 
     while (!kernel.Thread.shouldStop()) {
-        _ = this.completion.wait();
+        // kthread_stop cannot release wait_for_completion, so re-check the flag
+        // ourselves. A timeout means nobody signalled: nothing to flush.
+        if (!this.completion.timedWait(stop_poll_ms)) continue;
+
         this.completion.reinit();
 
         this.flush();
