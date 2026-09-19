@@ -23,9 +23,13 @@ pub const Experiment = struct {
 pub fn nextExperiment(this: *ExperimentPlanner, sampler_frequency: u32) Experiment {
     const random = this.prng.random();
 
+    // 27 rolls over 21 levels: 0-6 all saturate to 0%, so the baseline every
+    // other level is read against gets 7/27 and the rest 1/27 each.
     const roll = random.uintLessThan(u16, 27);
     const speedup_percent = (roll -| 6) * 5;
-    const sampler_period = 1_000_000 / sampler_frequency;
+
+    // The speedup is delivered as a delay charged to everyone else.
+    const sampler_period = std.time.us_per_s / sampler_frequency;
     const delay_per_tick: u16 = @intCast((@as(u32, speedup_percent) * sampler_period) / 100);
 
     return .{

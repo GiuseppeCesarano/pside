@@ -76,6 +76,9 @@ fn traceFailure(err: anyerror) StartError {
     };
 }
 
+// Stops the child at its ELF entry point: the only moment where the loader has
+// finished (so mappings and addresses are final) but no instruction of the
+// program has run yet .
 fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     const fork_rc = linux.fork();
     const child_pid: linux.pid_t = switch (linux.errno(fork_rc)) {
@@ -91,6 +94,7 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
 
     try ptrace.waitFor(child_pid, .stop);
 
+    // Until the exec lands the mappings are still our own forked copy's.
     try ptrace.setOptions(child_pid, &.{linux.PTRACE.O.TRACEEXEC});
     try ptrace.cont(child_pid);
     try ptrace.waitFor(child_pid, .exec);
@@ -141,6 +145,8 @@ fn childStart(tracee_exe: Program) ChildStartError!void {
     }
 }
 
+// AT_ENTRY, not the header's e_entry: a PIE binary never runs at the latter.
+// The vector is (tag, value) word pairs, hence the one-word skip.
 fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
     const max_pid_chars = comptime std.math.log10_int(@as(usize, std.math.maxInt(linux.pid_t)));
     const fmt = "/proc/{}/auxv";
@@ -168,6 +174,7 @@ pub fn start(this: *TracedProcess) StartError!void {
 }
 
 fn startTraced(this: TracedProcess) !void {
+    // int3 leaves ip past the trap byte, so resuming as-is skips the entry.
     var regs = try ptrace.getRegs(this.pid);
     regs.setIp(this.elf_entrypoint);
     try ptrace.setRegs(this.pid, regs);
@@ -198,7 +205,10 @@ pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) 
     };
 }
 
+// The sled is 12 bytes, too small for the increment itself, so the patch is two
+// hops: sled jumps to a scratch page, scratch page counts and jumps back.
 fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
+    // Offsets are stored against e_entry, so this rebases them onto the load.
     const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
 
@@ -210,6 +220,7 @@ fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
     const trampoline = arch_specific.trampoline.get(@intFromPtr(code_page.ptr));
     try ptrace.poke(.text, this.pid, final_addr, &trampoline);
 
+    // Return past the sled, or the trampoline jumps to itself.
     const payload = arch_specific.payload.get(@intFromPtr(chardev_page.ptr), final_addr + arch_specific.trampoline.len);
     try ptrace.poke(.data, this.pid, @intFromPtr(code_page.ptr), &payload);
 }
@@ -263,6 +274,9 @@ fn mmap(
     };
 }
 
+// Runs a syscall in the child by borrowing its registers and current
+// instruction, then putting both back: mmap has to happen in its address space
+// and ptrace has no request for that.
 pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
     this.state.assertIs(.attached);
 
@@ -386,6 +400,8 @@ const ptrace = struct {
         try ptraceSysCall(linux.PTRACE.SETREGS, pid, 0, @intFromPtr(&regs));
     }
 
+    // POKE* only writes whole aligned words, so the unaligned head and short
+    // tail are read-modify-written to keep the bytes either side.
     fn poke(comptime location: Location, pid: linux.pid_t, addr: usize, data: []const u8) PtraceError!void {
         const command = comptime switch (location) {
             .text => linux.PTRACE.POKETEXT,

@@ -335,6 +335,8 @@ pub fn iterate(this: *ThreadClocks) Iterator {
 }
 
 pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
+    // Allocate before closing: readers spin on a closed gate, so nothing that
+    // can sleep may run inside it. That makes old_len a guess, re-read below.
     this.ref.increment();
     const old_len = this.pairs.len;
     this.ref.decrement();
@@ -351,6 +353,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
     this.ref.drain();
     this.reservations.assertEql(0);
 
+    // Another grower got there first; its table is already the size we wanted.
     if (this.pairs.len != old_len) {
         this.ref.open();
         allocator.free(new_pairs);
@@ -362,6 +365,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
     var it = this.used.iterate();
     while (it.next()) |slot| {
         const pair = &this.pairs[slot];
+        // The bit belongs to the old position, not to the key.
         const key = pair.key.raw.withoutCollisionBit();
         const value = pair.value.raw;
         const hash = key.hash();
@@ -375,6 +379,9 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
                 break;
             }
 
+            // getSlotUnsafe walks while the previous slot carries this bit, so
+            // an unmarked slot we probed past would strand the key we place
+            // further along and report a tracked thread as untracked.
             new_pairs[index].key.raw.data |= Key.collided_bit;
         } else unreachable;
     }
