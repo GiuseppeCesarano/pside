@@ -138,17 +138,53 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
         .{ .route = "/uplot.min.css", .filename = "uplot.min.css", .content_type = "text/css" },
     };
 
+    // Paths stay encoded: the routes are fixed ASCII and `serveFile` takes its
+    // filename from the table, never from the request.
+    const query_start = std.mem.findScalar(u8, target, '?');
+    const path = if (query_start) |at| target[0..at] else target;
+    const query = if (query_start) |at| target[at + 1 ..] else "";
+
     for (static) |file| {
-        if (std.mem.eql(u8, target, file.route))
+        if (std.mem.eql(u8, path, file.route))
             return this.serveFile(allocator, io, request, file.filename, file.content_type);
     }
 
-    if (std.mem.eql(u8, target, "/api/vmas"))
-        try this.serveVmas(allocator, request)
-    else if (std.mem.startsWith(u8, target, "/api/vma?name="))
-        try this.serveVma(allocator, request, target["/api/vma?name=".len..])
-    else
-        try request.respond("", .{ .status = .not_found });
+    if (std.mem.eql(u8, path, "/api/vmas"))
+        return this.serveVmas(allocator, request);
+
+    if (std.mem.eql(u8, path, "/api/vma")) {
+        const raw = queryValue(query, "name") orelse
+            return request.respond("", .{ .status = .bad_request });
+
+        const name = try percentDecodeAlloc(allocator, raw);
+        defer allocator.free(name);
+
+        return this.serveVma(allocator, request, name);
+    }
+
+    try request.respond("", .{ .status = .not_found });
+}
+
+// Splitting before decoding is what lets a value hold an encoded `&` or `=`.
+fn queryValue(query: []const u8, key: []const u8) ?[]const u8 {
+    var pairs = std.mem.splitScalar(u8, query, '&');
+    return while (pairs.next()) |pair| {
+        const equals = std.mem.findScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..equals], key)) break pair[equals + 1 ..];
+    } else null;
+}
+
+// Malformed escapes pass through as written, as std and browsers both do; a
+// name that fails to decode just will not match.
+fn percentDecodeAlloc(allocator: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
+    const buffer = try allocator.alloc(u8, raw.len);
+    errdefer allocator.free(buffer);
+
+    // std writes the result to the tail of the buffer, so pull it forward.
+    const decoded = std.Uri.percentDecodeBackwards(buffer, raw);
+    std.mem.copyForwards(u8, buffer, decoded);
+
+    return allocator.realloc(buffer, decoded.len);
 }
 
 fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request) !void {
@@ -232,4 +268,41 @@ fn resolveSharePath(allocator: std.mem.Allocator, io: Io) ![]const u8 {
         "usr/share/pside";
 
     return std.fs.path.join(allocator, &.{ prefix, suffix });
+}
+
+test "a query value is found by key and left encoded" {
+    try std.testing.expectEqualStrings("x", queryValue("name=x", "name").?);
+    try std.testing.expectEqualStrings("x", queryValue("a=1&name=x&b=2", "name").?);
+    try std.testing.expectEqualStrings("", queryValue("name=", "name").?);
+
+    try std.testing.expectEqualStrings("a%26b", queryValue("name=a%26b", "name").?);
+    try std.testing.expectEqualStrings("a%3Db", queryValue("name=a%3Db", "name").?);
+
+    try std.testing.expectEqual(null, queryValue("", "name"));
+    try std.testing.expectEqual(null, queryValue("other=1", "name"));
+    try std.testing.expectEqual(null, queryValue("name", "name"));
+    try std.testing.expectEqual(null, queryValue("namespace=1", "name"));
+}
+
+test "percent decoding round trips what the browser sends" {
+    const allocator = std.testing.allocator;
+
+    const cases = [_]struct { encoded: []const u8, decoded: []const u8 }{
+        .{ .encoded = "libstdc%2B%2B.so.6", .decoded = "libstdc++.so.6" },
+        .{ .encoded = "my%20app", .decoded = "my app" },
+        .{ .encoded = "a%26b", .decoded = "a&b" },
+        .{ .encoded = "%41", .decoded = "A" },
+        .{ .encoded = "libc.so.6", .decoded = "libc.so.6" },
+        .{ .encoded = "", .decoded = "" },
+        .{ .encoded = "%zz", .decoded = "%zz" },
+        .{ .encoded = "trailing%", .decoded = "trailing%" },
+        .{ .encoded = "%4", .decoded = "%4" },
+    };
+
+    for (cases) |case| {
+        const got = try percentDecodeAlloc(allocator, case.encoded);
+        defer allocator.free(got);
+
+        try std.testing.expectEqualStrings(case.decoded, got);
+    }
 }

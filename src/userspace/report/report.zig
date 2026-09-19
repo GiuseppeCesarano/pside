@@ -69,4 +69,5 @@ fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, profile
 test {
     _ = Profile;
     _ = Graph;
+    _ = Server;
 }
