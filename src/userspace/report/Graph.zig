@@ -49,11 +49,10 @@ pub fn init(location: []const u8, levels: [speedup_levels_len][]f32) Error!Graph
         .ci_low_total_area = 0,
     };
 
-    for (&graph.points, levels) |*point, samples|
+    for (&graph.points, levels) |*point, samples| {
         point.* = .compute(samples);
-
-    for (graph.points) |point|
         graph.ci_low_total_area += point.ci_low;
+    }
 
     return graph;
 }
@@ -130,7 +129,7 @@ fn medianAtOrBelow(draws: usize, share: f64) f64 {
     return majority_mass / mass;
 }
 
-test "bootstrap bounds bracket the median and stay inside the sample" {
+test "confidence bounds bracket the median and stay inside the sample" {
     var prng: std.Random.DefaultPrng = .init(0);
     const rng = prng.random();
 

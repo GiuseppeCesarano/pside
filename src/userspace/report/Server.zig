@@ -104,20 +104,14 @@ fn handleConnection(this: *Server, allocator: std.mem.Allocator, io: Io, stream_
 
     const page_size = std.heap.defaultQueryPageSize();
 
-    const recv_buffer = allocator.alloc(u8, page_size) catch |err| {
+    const buffers = allocator.alloc(u8, 2 * page_size) catch |err| {
         std.log.err("connection handler: {s}", .{@errorName(err)});
         return;
     };
-    defer allocator.free(recv_buffer);
+    defer allocator.free(buffers);
 
-    const send_buffer = allocator.alloc(u8, page_size) catch |err| {
-        std.log.err("connection handler: {s}", .{@errorName(err)});
-        return;
-    };
-    defer allocator.free(send_buffer);
-
-    var reader = stream.reader(io, recv_buffer);
-    var writer = stream.writer(io, send_buffer);
+    var reader = stream.reader(io, buffers[0..page_size]);
+    var writer = stream.writer(io, buffers[page_size..]);
     var http_server = http.Server.init(&reader.interface, &writer.interface);
 
     while (http_server.reader.state == .ready) {
@@ -144,9 +138,7 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
 
     // Paths stay encoded: the routes are fixed ASCII and `serveFile` takes its
     // filename from the table, never from the request.
-    const query_start = std.mem.findScalar(u8, target, '?');
-    const path = if (query_start) |at| target[0..at] else target;
-    const query = if (query_start) |at| target[at + 1 ..] else "";
+    const path, const query = std.mem.cutScalar(u8, target, '?') orelse .{ target, "" };
 
     for (static) |file| {
         if (std.mem.eql(u8, path, file.route))
@@ -173,8 +165,8 @@ fn handleRequest(this: *Server, allocator: std.mem.Allocator, io: Io, request: *
 fn queryValue(query: []const u8, key: []const u8) ?[]const u8 {
     var pairs = std.mem.splitScalar(u8, query, '&');
     return while (pairs.next()) |pair| {
-        const equals = std.mem.findScalar(u8, pair, '=') orelse continue;
-        if (std.mem.eql(u8, pair[0..equals], key)) break pair[equals + 1 ..];
+        const pair_key, const value = std.mem.cutScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair_key, key)) break value;
     } else null;
 }
 
@@ -197,20 +189,13 @@ fn serveVmas(this: *const Server, allocator: std.mem.Allocator, request: *http.S
         graph_count: usize,
     };
 
-    var list: std.ArrayListUnmanaged(VmaInfo) = try .initCapacity(allocator, this.profile.vmas.len);
-    defer list.deinit(allocator);
+    const infos = try allocator.alloc(VmaInfo, this.profile.vmas.len);
+    defer allocator.free(infos);
 
-    for (this.profile.vmas) |vma| list.appendAssumeCapacity(.{
-        .name = vma.name,
-        .graph_count = vma.graphs.len,
-    });
+    for (infos, this.profile.vmas) |*info, vma|
+        info.* = .{ .name = vma.name, .graph_count = vma.graphs.len };
 
-    const body = try std.json.Stringify.valueAlloc(allocator, list.items, .{});
-    defer allocator.free(body);
-
-    try request.respond(body, .{
-        .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
-    });
+    try respondJson(allocator, request, infos);
 }
 
 fn serveVma(this: *const Server, allocator: std.mem.Allocator, request: *http.Server.Request, name: []const u8) !void {
@@ -221,7 +206,11 @@ fn serveVma(this: *const Server, allocator: std.mem.Allocator, request: *http.Se
         return;
     };
 
-    const body = try std.json.Stringify.valueAlloc(allocator, vma_ptr.graphs, .{});
+    try respondJson(allocator, request, vma_ptr.graphs);
+}
+
+fn respondJson(allocator: std.mem.Allocator, request: *http.Server.Request, value: anytype) !void {
+    const body = try std.json.Stringify.valueAlloc(allocator, value, .{});
     defer allocator.free(body);
 
     try request.respond(body, .{

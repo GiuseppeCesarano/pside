@@ -46,8 +46,7 @@ pub fn report(options: cli.Options, init: std.process.Init) !void {
 }
 
 fn writeJson(allocator: std.mem.Allocator, io: std.Io, path: []const u8, profile: Profile) !void {
-    const suffix = ".pside";
-    const stem = if (std.mem.endsWith(u8, path, suffix)) path[0 .. path.len - suffix.len] else path;
+    const stem = std.mem.cutSuffix(u8, path, ".pside") orelse path;
 
     const out_name = try std.mem.concat(allocator, u8, &.{ stem, ".json" });
     defer allocator.free(out_name);
