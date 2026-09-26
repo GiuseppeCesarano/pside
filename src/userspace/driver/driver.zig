@@ -13,11 +13,17 @@ pub fn driver(options: cli.Options, init: std.process.Init) !void {
     try cli.execute(options.args, help, .{ load, unload }, .{init});
 }
 
-fn load(options: cli.Options, init: std.process.Init) !void {
+fn parseFlags(options: cli.Options) Flags {
     const parsed_options = options.parse(Flags);
 
     cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ") catch std.process.exit(1);
     cli.validateOptions(parsed_options.parse_errors, "Could not parse: ") catch std.process.exit(1);
+
+    return parsed_options.flags;
+}
+
+fn load(options: cli.Options, init: std.process.Init) !void {
+    const flags = parseFlags(options);
 
     const owner = try UserIds.sudoCallerFromEnviron(init.minimal.environ) orelse
         std.process.fatal("Loading the kernel module requires root, run with sudo", .{});
@@ -28,7 +34,7 @@ fn load(options: cli.Options, init: std.process.Init) !void {
         else => std.process.fatal("Could not load the kernel module ({s})", .{@errorName(err)}),
     };
 
-    if (parsed_options.flags.@"-silent") return;
+    if (flags.@"-silent") return;
 
     std.log.info("pside driver loaded. You can now run `pside record` without sudo.", .{});
     std.log.warn(
@@ -43,14 +49,11 @@ fn load(options: cli.Options, init: std.process.Init) !void {
 }
 
 fn unload(options: cli.Options, init: std.process.Init) !void {
-    const parsed_options = options.parse(Flags);
-
-    cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ") catch std.process.exit(1);
-    cli.validateOptions(parsed_options.parse_errors, "Could not parse: ") catch std.process.exit(1);
+    const flags = parseFlags(options);
 
     const was_loaded = try KernelModule.unload(init.io);
 
-    if (parsed_options.flags.@"-silent") return;
+    if (flags.@"-silent") return;
 
     if (was_loaded)
         std.log.info("pside driver unloaded.", .{})

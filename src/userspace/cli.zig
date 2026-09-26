@@ -4,95 +4,6 @@ const std = @import("std");
 
 fn OptionsImpl(ItType: type) type {
     return struct {
-        const allowed_types = struct {
-            pub const map = struct {
-                const types = [_]type{
-                    i32,
-                    i64,
-                    u32,
-                    u64,
-                    f32,
-                    f64,
-                    bool,
-                    []const u8,
-                };
-
-                const names = names_block: {
-                    var ret: [types.len][]const u8 = undefined;
-
-                    for (&ret, types) |*name, Type| {
-                        name.* = @typeName(Type);
-                    }
-
-                    break :names_block ret;
-                };
-            };
-
-            const Tag = tag_block: {
-                var field_values: [map.names.len]u8 = undefined;
-
-                for (&field_values, 0..) |*value, i| {
-                    value.* = i;
-                }
-
-                break :tag_block @Enum(u8, .exhaustive, &map.names, &field_values);
-            };
-
-            const Union = union_block: {
-                const Attributes = std.builtin.Type.Union.FieldAttributes;
-
-                var fields_attributes: [map.types.len]Attributes = undefined;
-                for (&fields_attributes, map.types) |*attributes, Type| {
-                    attributes.* = .{ .@"align" = @alignOf(Type) };
-                }
-
-                break :union_block @Union(.auto, null, &map.names, &map.types, &fields_attributes);
-            };
-
-            pub fn tagFromType(Type: type) Tag {
-                const index = std.mem.findScalar(type, &map.types, Type) orelse
-                    @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n");
-
-                return @fromBackingInt(@intCast(index));
-            }
-        };
-
-        const FlagInfo = struct {
-            name: []const u8,
-            type_tag: allowed_types.Tag,
-            offset_in_parent: usize,
-
-            pub fn init(Parent: type, name: []const u8, Type: type) FlagInfo {
-                return .{
-                    .name = name,
-                    .type_tag = allowed_types.tagFromType(Type),
-                    .offset_in_parent = @offsetOf(Parent, name),
-                };
-            }
-
-            fn parseIntoField(this: FlagInfo, parent_ptr: *anyopaque, parse_target: []const u8) !void {
-                const value: allowed_types.Union = switch (this.type_tag) {
-                    .i32 => .{ .i32 = try std.fmt.parseInt(i32, parse_target, 0) },
-                    .i64 => .{ .i64 = try std.fmt.parseInt(i64, parse_target, 0) },
-                    .u32 => .{ .u32 = try std.fmt.parseInt(u32, parse_target, 0) },
-                    .u64 => .{ .u64 = try std.fmt.parseInt(u64, parse_target, 0) },
-                    .f32 => .{ .f32 = try std.fmt.parseFloat(f32, parse_target) },
-                    .f64 => .{ .f64 = try std.fmt.parseFloat(f64, parse_target) },
-                    .bool => .{ .bool = if (std.mem.eql(u8, parse_target, "true")) true else if (std.mem.eql(u8, parse_target, "false")) false else return error.BoolDoNotMatch },
-                    .@"[]const u8" => .{ .@"[]const u8" = parse_target },
-                };
-
-                const field_ptr: *anyopaque = @as([*]u8, @ptrCast(parent_ptr)) + this.offset_in_parent;
-
-                inline for (allowed_types.map.types, 0..) |Type, i| {
-                    if (i == @backingInt(this.type_tag)) {
-                        @as(*Type, @ptrCast(@alignCast(field_ptr))).* = @field(value, allowed_types.map.names[i]);
-                        return;
-                    }
-                }
-            }
-        };
-
         pub const Iterator = struct {
             pub const Mask = std.bit_set.IntegerBitSet(128);
             args: ItType,
@@ -122,8 +33,8 @@ fn OptionsImpl(ItType: type) type {
         args: ItType,
 
         pub fn parse(this: @This(), FlagsSchema: type) Parsed(FlagsSchema) {
+            const schema = @typeInfo(FlagsSchema).@"struct";
             var parsed_flags: FlagsSchema = .{};
-            const flags_info = createFlagsInfo(FlagsSchema);
 
             var args = this.args;
             const Mask = Iterator.Mask;
@@ -142,22 +53,24 @@ fn OptionsImpl(ItType: type) type {
                 positional_mask.setValue(i, is_positional);
                 if (is_positional) continue;
 
-                for (flags_info) |flag_info| {
-                    const postfix = std.mem.cutPrefix(u8, arg[1..], flag_info.name) orelse continue;
-                    if (postfix.len != 0 and postfix[0] != '=') continue;
+                inline for (schema.field_names, schema.field_types) |name, Type| {
+                    if (flagSuffix(arg, name)) |suffix| {
+                        const parse_target = if (suffix.len != 0)
+                            suffix[1..]
+                        else if (Type == bool)
+                            "true"
+                        else if (args.next()) |target| blk: {
+                            i += 1;
+                            break :blk target;
+                        } else break;
 
-                    const parse_target = if (postfix.len != 0)
-                        postfix[1..]
-                    else if (flag_info.type_tag == .bool)
-                        "true"
-                    else if (args.next()) |target| blk: {
-                        i += 1;
-                        break :blk target;
-                    } else break;
+                        if (parseValue(Type, parse_target)) |value|
+                            @field(parsed_flags, name) = value
+                        else |_|
+                            parse_errors_mask.set(i);
 
-                    flag_info.parseIntoField(&parsed_flags, parse_target) catch parse_errors_mask.set(i);
-
-                    break;
+                        break;
+                    }
                 } else {
                     unknown_flags_mask.set(i);
                 }
@@ -170,19 +83,21 @@ fn OptionsImpl(ItType: type) type {
                 .parse_errors = if (parse_errors_mask.count() != 0) .{ .mask = parse_errors_mask.mask, .args = this.args } else null,
             };
         }
+    };
+}
 
-        fn createFlagsInfo(FlagsSchema: type) [@typeInfo(FlagsSchema).@"struct".field_names.len]FlagInfo {
-            const info = @typeInfo(FlagsSchema);
+fn flagSuffix(arg: []const u8, name: []const u8) ?[]const u8 {
+    const suffix = std.mem.cutPrefix(u8, arg[1..], name) orelse return null;
+    return if (suffix.len == 0 or suffix[0] == '=') suffix else null;
+}
 
-            if (info != .@"struct") @compileError("Input must be a struct\n");
-
-            comptime var runtime_flags: [info.@"struct".field_names.len]FlagInfo = undefined;
-            comptime for (info.@"struct".field_names, info.@"struct".field_types, &runtime_flags) |name, Type, *runtime_flag| {
-                runtime_flag.* = .init(FlagsSchema, name, Type);
-            };
-
-            return runtime_flags;
-        }
+fn parseValue(Type: type, text: []const u8) !Type {
+    return switch (Type) {
+        i32, i64, u32, u64 => std.fmt.parseInt(Type, text, 0),
+        f32, f64 => std.fmt.parseFloat(Type, text),
+        bool => if (std.mem.eql(u8, text, "true")) true else if (std.mem.eql(u8, text, "false")) false else error.BoolDoNotMatch,
+        []const u8 => text,
+        else => @compileError("Only the following types are allowed:\ni32\ni64\nu32\nu64\nf32\nf64\nbool\n[]const u8\n"),
     };
 }
 
@@ -227,14 +142,14 @@ fn functionName(comptime function: anytype) []const u8 {
 }
 
 fn prependTuple(tuple: anytype, value: anytype) PrependedTuple(@TypeOf(tuple), @TypeOf(value)) {
-    var preappended: PrependedTuple(@TypeOf(tuple), @TypeOf(value)) = undefined;
+    var prepended: PrependedTuple(@TypeOf(tuple), @TypeOf(value)) = undefined;
 
-    preappended[0] = value;
+    prepended[0] = value;
     inline for (tuple, 1..) |field, i| {
-        preappended[i] = field;
+        prepended[i] = field;
     }
 
-    return preappended;
+    return prepended;
 }
 
 fn PrependedTuple(Tuple: type, Value: type) type {

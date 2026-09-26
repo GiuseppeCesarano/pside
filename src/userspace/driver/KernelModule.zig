@@ -111,7 +111,7 @@ fn deleteModule() DeleteModuleError!void {
         .NOENT => DeleteModuleError.NoEntity,
 
         // delete_module could also return PERM, FAULT
-        // but each of those errors shouldn't be appliacable in our
+        // but neither of those errors should be applicable in our
         // case
         else => DeleteModuleError.Unknown,
     };
@@ -122,15 +122,13 @@ pub fn unload(io: std.Io) DeleteModuleError!bool {
     // returns FdOpen; in that case we just wait for the os to clean up the
     // child fds/mmaps.
     for (0..50) |_| {
-        deleteModule() catch |err| {
-            switch (err) {
-                DeleteModuleError.NoEntity => return false,
-                DeleteModuleError.FdOpen => {
-                    io.sleep(.fromMilliseconds(10), .real) catch {};
-                    continue;
-                },
-                else => return err,
-            }
+        deleteModule() catch |err| switch (err) {
+            DeleteModuleError.NoEntity => return false,
+            DeleteModuleError.FdOpen => {
+                io.sleep(.fromMilliseconds(10), .real) catch {};
+                continue;
+            },
+            else => return err,
         };
         return true;
     }
