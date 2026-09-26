@@ -186,13 +186,8 @@ pub fn ConfigurableState(Enum: type, config: Config, messages: StateMessages) ty
 
         /// `initAndCapture`, capturing from `ret_addr`.
         pub fn initAndCaptureAt(initial_state: Enum, ret_addr: usize) S {
-            if (!config.enabled) return .{
-                .state = {},
-                .last_transition = .empty,
-            };
-
             return .{
-                .state = initial_state,
+                .state = if (config.enabled) initial_state else {},
                 .last_transition = .captured(ret_addr),
             };
         }
@@ -479,7 +474,7 @@ test ConfigurableObligations {
 /// Declares that what is taken must later be given back, and asserts the
 /// program does it. Every `incur` leaves one obligation outstanding until a
 /// `discharge` settles it; `assert` checks the outstanding count wherever the
-/// program has an expectation about it
+/// program has an expectation about it.
 ///
 /// Obligations are counted, not identified: discharging the same one twice
 /// while another is outstanding goes unnoticed until the count reaches zero.
