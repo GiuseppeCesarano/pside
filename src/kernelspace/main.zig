@@ -12,7 +12,7 @@ comptime {
 }
 
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
-export const license linksection(".modinfo") = "license=GPL".*;
+export const license linksection(".modinfo") = "license=GPL v2".*;
 
 pub const std_options: std.Options = .{
     .logFn = kernel.logWithName(name),
