@@ -21,7 +21,13 @@ const max_exit_payment_us = 50 * std.time.us_per_ms;
 
 const ExperimentWindow = enum { idle, running };
 
-const BoundToTask = safety.BoundTo(kernel.Task.current, .{});
+const Arming = enum { unarmed, armed };
+
+const BoundToTask = safety.BoundTo(currentTask, .{});
+
+fn currentTask(_: *const anyopaque) *kernel.Task {
+    return kernel.Task.current();
+}
 
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
@@ -35,9 +41,11 @@ has_errored: std.atomic.Value(bool),
 target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
-task_references: safety.AtomicReferenceCounter,
+task_references: safety.Obligations,
+arming: safety.State(Arming),
 Experiment: safety.State(ExperimentWindow),
 loop: BoundToTask,
+pin: safety.Pinned,
 
 pub fn init() !ExperimentRunner {
     return .{
@@ -51,20 +59,22 @@ pub fn init() !ExperimentRunner {
         .target_ip = .init(0),
         .delay_per_tick = .init(0),
 
-        .task_references = .zero,
+        .task_references = .none,
+        .arming = .init(.unarmed),
         .Experiment = .init(.idle),
         .loop = .unbound,
+        .pin = .unbound,
     };
 }
 
 fn retainTask(this: *ExperimentRunner, task: *kernel.Task) void {
     task.incrementReferences();
-    this.task_references.increment();
+    this.task_references.incur();
 }
 
 fn releaseTask(this: *ExperimentRunner, task: *kernel.Task) void {
     task.decrementReferences();
-    this.task_references.decrement();
+    this.task_references.discharge();
 }
 
 fn keyFromTask(task: *const kernel.Task) Key {
@@ -78,7 +88,8 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
-    this.Experiment.assertIs(.idle);
+    this.pin.assertSame();
+    this.Experiment.assertEql(.idle);
 
     if (this.sampler) |s| {
         kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
@@ -99,7 +110,7 @@ pub fn deinit(this: *ExperimentRunner) void {
     while (it.next()) |pair|
         this.releaseTask(taskFromKey(pair.key.raw));
 
-    this.task_references.assertEql(0);
+    this.task_references.assert(.eq, 0);
 
     this.clocks.deinit(atomic_allocator);
 
@@ -112,11 +123,14 @@ pub fn profilePid(
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
 ) !void {
+    this.arming.assertEql(.unarmed);
+    this.pin.assertSame();
+
     try this.delay_pool.init();
 
     this.profiled_pid.store(pid, .monotonic);
     const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
-    this.task_references.increment();
+    this.task_references.incur();
 
     // Only this task is seeded; the rest join via onNewTask, so tracking can
     // be correct only if the target starts single-threaded.
@@ -159,11 +173,14 @@ pub fn profilePid(
         },
     };
     this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
+
+    this.arming.transition(.armed);
 }
 
 pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
     this.loop.assertSame();
-    this.Experiment.assertIs(.idle);
+    this.arming.assertEql(.armed);
+    this.Experiment.assertEql(.idle);
     defer this.Experiment.transition(.running);
 
     this.delay_per_tick.store(delay_per_tick, .monotonic);
@@ -174,7 +191,8 @@ pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
 
 pub fn endExperiment(this: *ExperimentRunner) void {
     this.loop.assertSame();
-    this.Experiment.assertIs(.running);
+    this.arming.assertEql(.armed);
+    this.Experiment.assertEql(.running);
     defer this.Experiment.transition(.idle);
 
     this.delay_per_tick.store(0, .seq_cst); // zero first so any in-flight tick is a no-op
@@ -197,7 +215,8 @@ pub fn hasErrored(this: *const ExperimentRunner) bool {
 
 pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
     this.loop.assertSame();
-    this.Experiment.assertIs(.running);
+    this.arming.assertEql(.armed);
+    this.Experiment.assertEql(.running);
 
     {
         // The map walk and per-thread delay application must not be preempted,

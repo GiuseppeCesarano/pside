@@ -6,7 +6,11 @@ const safety = @import("safety");
 const serialization = @import("serialization");
 const payload = serialization.payload;
 
-const BoundToTask = safety.BoundTo(kernel.Task.current, .{});
+const BoundToTask = safety.BoundTo(currentTask, .{});
+
+fn currentTask(_: *const anyopaque) *kernel.Task {
+    return kernel.Task.current();
+}
 
 const stop_poll_ms = 100;
 
@@ -28,6 +32,7 @@ healthy: bool,
 
 producer: BoundToTask = .unbound,
 consumer: BoundToTask = .unbound,
+pin: safety.Pinned = .unbound,
 
 pub const empty: DiskWriter = .{
     .buffer = &.{},
@@ -66,6 +71,7 @@ pub fn start(
     this.healthy = true;
     errdefer this.file = null;
 
+    this.pin.assertSame();
     this.thread = try kernel.Thread.run(writerFn, this, "pside_disk_writer");
 }
 
@@ -74,6 +80,7 @@ pub fn deinit(this: *DiskWriter) void {
 
     if (this.thread == null) return;
 
+    this.pin.assertSame();
     this.completion.signal();
     _ = this.thread.?.stop();
     this.file.?.put();
@@ -82,6 +89,7 @@ pub fn deinit(this: *DiskWriter) void {
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
     this.producer.assertSame();
+    this.pin.assertSame();
 
     std.debug.assert(this.buffer.len != 0);
 

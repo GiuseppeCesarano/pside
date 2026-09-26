@@ -5,6 +5,7 @@
 #include <linux/device.h>
 #include <linux/ftrace_regs.h>
 #include <linux/io.h>
+#include <linux/kallsyms.h>
 #include <linux/kprobes.h>
 #include <linux/kthread.h>
 #include <linux/ktime.h>
@@ -18,6 +19,7 @@
 #include <linux/rcupdate.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
+#include <linux/stacktrace.h>
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
 
@@ -56,10 +58,12 @@ typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
 /* Prototypes */
 
 /* Logging */
-void c_pr_err(const char *);
-void c_pr_warn(const char *);
-void c_pr_info(const char *);
-void c_pr_debug(const char *);
+void c_printk(int, const char *, size_t);
+
+/* Symbolization */
+size_t c_ksym_symbol_len(void);
+size_t c_sprint_symbol(char *, unsigned long);
+unsigned int c_stack_trace_save(unsigned long *, unsigned int, unsigned int);
 
 /* Copy from/to userspace */
 unsigned long c_copy_to_user(void *, const void *, unsigned long);
@@ -167,10 +171,34 @@ ssize_t c_file_size(struct file *);
 /* Implementations */
 
 /* Logging */
-void c_pr_err(const char *msg) { pr_err("%s", msg); }
-void c_pr_warn(const char *msg) { pr_warn("%s", msg); }
-void c_pr_info(const char *msg) { pr_info("%s", msg); }
-void c_pr_debug(const char *msg) { pr_debug("%s", msg); }
+void c_printk(int level, const char *line, size_t len) {
+  switch (level) {
+  case 0:
+    pr_err("%.*s\n", (int)len, line);
+    break;
+  case 1:
+    pr_warn("%.*s\n", (int)len, line);
+    break;
+  case 2:
+    pr_info("%.*s\n", (int)len, line);
+    break;
+  default:
+    pr_debug("%.*s\n", (int)len, line);
+    break;
+  }
+}
+
+/* Symbolization */
+size_t c_ksym_symbol_len(void) { return KSYM_SYMBOL_LEN; }
+
+size_t c_sprint_symbol(char *buffer, unsigned long address) {
+  return sprint_symbol(buffer, address);
+}
+
+unsigned int c_stack_trace_save(unsigned long *store, unsigned int size,
+                                unsigned int skip) {
+  return stack_trace_save(store, size, skip);
+}
 
 /* Copy from/to userspace */
 unsigned long c_copy_to_user(void *to, const void *from, unsigned long n) {

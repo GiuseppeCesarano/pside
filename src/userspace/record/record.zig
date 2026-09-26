@@ -194,7 +194,7 @@ const Profiler = struct {
     }
 
     fn attach(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
-        this.state.assertIs(.idle);
+        this.state.assertEql(.idle);
 
         var attach_options = this.attach_options;
         attach_options.pid = pid;
@@ -205,7 +205,7 @@ const Profiler = struct {
     }
 
     fn start(this: *Profiler) KernelControlDevice.ControlError!void {
-        this.state.assertIs(.attached);
+        this.state.assertEql(.attached);
 
         try this.device.startProfiler(.{ .output_fd = this.output_fd });
 
@@ -213,7 +213,7 @@ const Profiler = struct {
     }
 
     fn stop(this: *Profiler) KernelControlDevice.ControlError!void {
-        this.state.assertIs(.profiling);
+        this.state.assertEql(.profiling);
 
         try this.device.stop();
 

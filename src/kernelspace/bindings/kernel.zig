@@ -157,31 +157,156 @@ pub const heap = struct {
     };
 };
 
+//TODO: redo
+pub const PrintkWriter = struct {
+    pub const line_capacity = 1024;
+
+    level: std.log.Level,
+    interface: std.Io.Writer,
+
+    extern fn c_printk(c_int, [*]const u8, usize) void;
+
+    pub fn init(level: std.log.Level, buffer: []u8) PrintkWriter {
+        return .{
+            .level = level,
+            .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer },
+        };
+    }
+
+    fn emit(this: *const PrintkWriter, bytes: []const u8) void {
+        const text = if (bytes.len != 0 and bytes[bytes.len - 1] == '\n') bytes[0 .. bytes.len - 1] else bytes;
+        c_printk(@intFromEnum(this.level), text.ptr, text.len);
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const this: *PrintkWriter = @alignCast(@fieldParentPtr("interface", w));
+
+        const buffered = w.buffered();
+        if (buffered.len != 0) {
+            this.emit(buffered);
+            w.end = 0;
+            return 0;
+        }
+
+        for (data[0 .. data.len - 1]) |bytes| {
+            if (bytes.len == 0) continue;
+            this.emit(bytes);
+            return bytes.len;
+        }
+
+        const pattern = data[data.len - 1];
+        if (splat == 0 or pattern.len == 0) return 0;
+        this.emit(pattern);
+        return pattern.len;
+    }
+};
+
 pub fn logWithName(comptime module_name: []const u8) fn (comptime std.log.Level, comptime @EnumLiteral(), comptime fmt: []const u8, anytype) void {
     return struct {
-        extern fn c_pr_err([*:0]const u8) void;
-        extern fn c_pr_warn([*:0]const u8) void;
-        extern fn c_pr_info([*:0]const u8) void;
-        extern fn c_pr_debug([*:0]const u8) void;
-
         pub fn log(comptime level: std.log.Level, comptime scope: @EnumLiteral(), comptime fmt: []const u8, args: anytype) void {
-            var buf: [128]u8 = undefined;
             const scope_name = if (scope == .default) module_name else @tagName(scope);
-            const scoped_fmt = scope_name ++ ": " ++ fmt ++ "\n";
-            const string = if (@inComptime())
-                std.fmt.comptimePrint(scoped_fmt, args)
-            else
-                std.fmt.bufPrintSentinel(&buf, scoped_fmt, args, 0) catch scope_name ++ " PRINT FAILED: No space left in formatting buffer\n";
 
-            switch (level) {
-                .err => c_pr_err(string),
-                .warn => c_pr_warn(string),
-                .info => c_pr_info(string),
-                .debug => c_pr_debug(string),
-            }
+            var buffer: [PrintkWriter.line_capacity]u8 = undefined;
+            var printk: PrintkWriter = .init(level, &buffer);
+            printk.interface.print(scope_name ++ ": " ++ fmt, args) catch {};
+            printk.interface.flush() catch {};
         }
     }.log;
 }
+
+pub const Io = @import("Io.zig");
+pub const io = Io.io;
+
+// TODO REDO
+pub const debug = struct {
+    pub fn getDebugInfoAllocator() std.mem.Allocator {
+        return heap.atomic_allocator;
+    }
+
+    pub const PrintLineError = error{SourceUnavailable};
+
+    pub fn printLineFromFile(_: std.Io, _: *std.Io.Writer, _: std.debug.SourceLocation) PrintLineError!void {
+        return PrintLineError.SourceUnavailable;
+    }
+
+    pub fn panic(message: []const u8, _: ?usize) noreturn {
+        @branchHint(.cold);
+        std.log.err("panic: {s}", .{message});
+        @trap();
+    }
+
+    pub const SelfInfo = struct {
+        pub const init: SelfInfo = .{};
+        pub const can_unwind = true;
+
+        extern fn c_ksym_symbol_len() usize;
+        extern fn c_sprint_symbol([*]u8, usize) usize;
+        extern fn c_stack_trace_save([*]usize, c_uint, c_uint) c_uint;
+
+        pub const UnwindContext = struct {
+            pc: usize,
+            addresses: [max_frames]usize,
+            len: usize,
+            next: usize,
+
+            const max_frames = 32;
+
+            pub fn init(_: *const std.debug.cpu_context.Native) UnwindContext {
+                var context: UnwindContext = .{ .pc = 0, .addresses = undefined, .len = 0, .next = 0 };
+                context.len = c_stack_trace_save(&context.addresses, max_frames, 0);
+                return context;
+            }
+
+            pub fn deinit(_: *UnwindContext) void {}
+
+            pub fn getFp(_: *UnwindContext) usize {
+                return 0;
+            }
+        };
+
+        pub fn unwindFrame(_: *SelfInfo, _: std.Io, context: *UnwindContext) std.debug.SelfInfoError!usize {
+            if (context.next == context.len) return 0;
+
+            context.pc = context.addresses[context.next];
+            context.next += 1;
+            return context.pc;
+        }
+
+        pub fn deinit(_: *SelfInfo, _: std.Io) void {}
+
+        pub fn getSymbols(
+            _: *SelfInfo,
+            _: std.Io,
+            symbol_allocator: std.mem.Allocator,
+            text_arena: std.mem.Allocator,
+            address: usize,
+            _: bool,
+            symbols: *std.ArrayList(std.debug.Symbol),
+        ) std.debug.SelfInfoError!void {
+            const buffer = try text_arena.alloc(u8, c_ksym_symbol_len());
+            const text = buffer[0..c_sprint_symbol(buffer.ptr, address)];
+
+            const name, const module = if (std.mem.lastIndexOf(u8, text, " [")) |bracket|
+                .{ text[0..bracket], std.mem.trimEnd(u8, text[bracket + 2 ..], "]") }
+            else
+                .{ text, "vmlinux" };
+
+            try symbols.append(symbol_allocator, .{
+                .name = name,
+                .compile_unit_name = module,
+                .source_location = null,
+            });
+        }
+
+        pub fn getModuleName(_: *SelfInfo, _: std.Io, _: usize) std.debug.SelfInfoError![]const u8 {
+            return std.debug.SelfInfoError.MissingDebugInfo;
+        }
+
+        pub fn getModuleSlide(_: *SelfInfo, _: std.Io, _: usize) std.debug.SelfInfoError!usize {
+            return std.debug.SelfInfoError.MissingDebugInfo;
+        }
+    };
+};
 
 pub const time = struct {
     pub const delay = struct {

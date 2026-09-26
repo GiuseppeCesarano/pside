@@ -17,6 +17,7 @@ share_path: []const u8,
 profile: *const Profile,
 connections: Io.Group,
 state: safety.State(Connections),
+pin: safety.Pinned,
 
 pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });
@@ -32,11 +33,13 @@ pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Serv
         .profile = profile,
         .connections = .init,
         .state = .init(.drained),
+        .pin = .unbound,
     };
 }
 
 pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
-    this.state.assertIs(.drained);
+    this.state.assertEql(.drained);
+    this.pin.assertSame();
 
     this.stop(io);
     this.server.deinit(io);
@@ -65,7 +68,8 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
 }
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
-    this.state.assertIs(.drained);
+    this.state.assertEql(.drained);
+    this.pin.assertSame();
 
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);

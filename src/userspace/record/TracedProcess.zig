@@ -166,7 +166,7 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 }
 
 pub fn start(this: *TracedProcess) StartError!void {
-    this.state.assertIs(.attached);
+    this.state.assertEql(.attached);
 
     this.startTraced() catch |err| return traceFailure(err);
 
@@ -184,7 +184,7 @@ fn startTraced(this: TracedProcess) !void {
 }
 
 pub fn wait(this: *TracedProcess) WaitError!void {
-    this.state.assertIs(.detached);
+    this.state.assertEql(.detached);
 
     var status: i32 = undefined;
     const wait_rc = linux.waitpid(this.pid, &status, 0);
@@ -196,8 +196,8 @@ pub fn wait(this: *TracedProcess) WaitError!void {
     this.state.transition(.reaped);
 }
 
-pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
-    this.state.assertIs(.attached);
+pub fn patchProgressPoint(this: *TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {
+    this.state.assertEql(.attached);
 
     return this.patchTraced(addr, ctl_fd) catch |err| switch (err) {
         MmapError.OutOfMemory, MmapError.AccessDenied, MmapError.MappingAlreadyExists, MmapError.MemoryMappingNotSupported, MmapError.LockedMemoryLimitExceeded => PatchError.CouldNotMapInChild,
@@ -207,7 +207,7 @@ pub fn patchProgressPoint(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) 
 
 // The sled is 12 bytes, too small for the increment itself, so the patch is two
 // hops: sled jumps to a scratch page, scratch page counts and jumps back.
-fn patchTraced(this: TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
+fn patchTraced(this: *TracedProcess, addr: usize, ctl_fd: linux.fd_t) !void {
     // Offsets are stored against e_entry, so this rebases them onto the load.
     const final_addr = addr +% this.elf_entrypoint;
     const code_page = try this.mmap(null, std.heap.pageSize(), @bitCast(linux.PROT{ .EXEC = true, .READ = true, .WRITE = true }), .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
@@ -238,7 +238,7 @@ const MmapError = error{
 } || ptrace.WaitForError;
 
 fn mmap(
-    this: TracedProcess,
+    this: *TracedProcess,
     ptr: ?[*]align(std.heap.page_size_min) u8,
     length: usize,
     prot: u32,
@@ -277,8 +277,8 @@ fn mmap(
 // Runs a syscall in the child by borrowing its registers and current
 // instruction, then putting both back: mmap has to happen in its address space
 // and ptrace has no request for that.
-pub fn syscall(this: TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
-    this.state.assertIs(.attached);
+pub fn syscall(this: *TracedProcess, syscall_id: linux.SYS, args: anytype) ptrace.WaitForError!usize {
+    this.state.assertEql(.attached);
 
     const saved_regs = try ptrace.getRegs(this.pid);
     const ip = saved_regs.ip();

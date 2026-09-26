@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 const BitSearch = @import("BitSearch");
 const chunk_len = BitSearch.bits_per_word;
 const kernel = @import("kernel");
+const safety = @import("safety");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 
@@ -33,18 +34,26 @@ const Chunk = struct {
 
 const uninitialized = std.math.maxInt(u32);
 
+const Readiness = enum { uninitialized, ready };
+
 chunks: *Chunk,
 users_count: std.atomic.Value(u32),
 completion: kernel.Completion,
+readiness: safety.State(Readiness),
+pin: safety.Pinned,
 
 pub const empty: DelayPool = .{
     .chunks = undefined,
     .users_count = .init(uninitialized),
     .completion = undefined,
+    .readiness = .init(.uninitialized),
+    .pin = .unbound,
 };
 
 pub fn init(this: *DelayPool) !void {
     if (this.users_count.load(.monotonic) != uninitialized) return;
+
+    this.pin.assertSame();
 
     this.chunks = try allocator.create(Chunk);
     this.initChunk(this.chunks);
@@ -52,10 +61,14 @@ pub fn init(this: *DelayPool) !void {
     this.completion.init();
 
     this.users_count = .init(0);
+    this.readiness.transition(.ready);
 }
 
 pub fn deinit(this: *DelayPool) void {
     if (this.users_count.load(.monotonic) == uninitialized) return;
+
+    this.readiness.assertEql(.ready);
+    this.pin.assertSame();
 
     // A pending delay still counts as a user and nothing is left to flush it
     this.cancelAllPending();
@@ -75,6 +88,8 @@ pub fn deinit(this: *DelayPool) void {
 }
 
 pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Error!void {
+    this.readiness.assertEql(.ready);
+
     const slot = try this.reserve(task, delay_time);
     errdefer this.cancel(slot);
 
@@ -82,6 +97,8 @@ pub fn delay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Error!void
 }
 
 pub fn pendDelay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!void {
+    this.readiness.assertEql(.ready);
+
     const slot = try this.reserve(task, delay_time);
     const chunk = this.chunkOf(slot);
 
@@ -89,6 +106,8 @@ pub fn pendDelay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Alloca
 }
 
 pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
+    this.readiness.assertEql(.ready);
+
     var failure: ?kernel.Task.WorkAddError = null;
     var chunk: ?*Chunk = this.chunks;
 
@@ -116,6 +135,7 @@ pub fn waitAllDelays(this: *DelayPool) void {
 }
 
 fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!*DelayWork {
+    this.pin.assertSame();
     assert(delay_time != 0);
 
     _ = this.users_count.fetchAdd(1, .monotonic);

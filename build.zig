@@ -61,7 +61,6 @@ pub fn build(b: *std.Build) !void {
             .optimize = kernel_optimize,
             .link_libc = false,
             .link_libcpp = false,
-            .single_threaded = true,
             .strip = false,
             .unwind_tables = .none,
             .code_model = .kernel,

@@ -19,6 +19,16 @@ pub const std_options: std.Options = .{
     .page_size_min = 4096,
 };
 
+pub const std_options_debug_io = kernel.io;
+
+pub const panic = std.debug.FullPanic(kernel.debug.panic);
+
+pub const debug = struct {
+    pub const SelfInfo = kernel.debug.SelfInfo;
+    pub const getDebugInfoAllocator = kernel.debug.getDebugInfoAllocator;
+    pub const printLineFromFile = kernel.debug.printLineFromFile;
+};
+
 var ctl: kernel.CharDevice = undefined;
 
 export fn init_module() linksection(".init.text") c_int {

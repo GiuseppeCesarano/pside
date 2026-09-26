@@ -25,6 +25,7 @@ runner: ExperimentRunner,
 
 profiler_thread: ?*kernel.Thread,
 state: safety.State(Session),
+pin: safety.Pinned,
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
     return .{
@@ -36,10 +37,12 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
 
         .profiler_thread = null,
         .state = .init(.idle),
+        .pin = .unbound,
     };
 }
 
 pub fn deinit(this: *Engine) void {
+    this.pin.assertSame();
     if (this.profiler_thread) |t| _ = t.stop();
     this.runner.deinit();
     this.recorder.deinit();
@@ -57,7 +60,7 @@ pub fn attach(
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
 ) !void {
-    this.state.assertIs(.idle);
+    this.state.assertEql(.idle);
 
     this.planner = .init(@intCast(pid));
     try this.runner.profilePid(pid, vma_name, attribute_kernel_samples);
@@ -66,9 +69,10 @@ pub fn attach(
 }
 
 pub fn start(this: *Engine, fd: linux.fd_t) !void {
-    this.state.assertIs(.attached);
+    this.state.assertEql(.attached);
 
     try this.recorder.start(fd);
+    this.pin.assertSame();
     this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
 
     this.state.transition(.profiling);

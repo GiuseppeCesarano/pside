@@ -68,7 +68,8 @@ master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
 used: BitSearch,
-reservations: safety.AtomicReferenceCounter,
+reservations: safety.Obligations,
+iterators: safety.Obligations,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
     assert(isPowerOfTwo(reserve));
@@ -83,14 +84,16 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
         .ref = .{},
         .pairs = pairs,
         .used = try .init(allocator, reserve),
-        .reservations = .zero,
+        .reservations = .none,
+        .iterators = .none,
     };
 }
 
 pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
+    this.iterators.assert(.eq, 0);
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertEql(0);
+    this.reservations.assert(.eq, 0);
 
     allocator.free(this.pairs);
     this.used.deinit(allocator);
@@ -121,7 +124,7 @@ fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
         if (current_key.isEql(.empty) and
             this.pairs[index].key.cmpxchgStrong(current_key, reservation, .acquire, .monotonic) == null)
         {
-            this.reservations.increment();
+            this.reservations.incur();
             return &this.pairs[index];
         }
 
@@ -139,7 +142,7 @@ fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
 
     _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
 
-    this.reservations.decrement();
+    this.reservations.discharge();
 }
 
 /// Looks up the clock slot for a given key.
@@ -317,6 +320,7 @@ pub const Iterator = struct {
 
     pub fn finish(this: *Iterator) void {
         if (this.closed) {
+            this.clocks.iterators.discharge();
             this.clocks.ref.open();
             this.closed = false;
         }
@@ -326,6 +330,7 @@ pub const Iterator = struct {
 pub fn iterate(this: *ThreadClocks) Iterator {
     this.ref.close();
     this.ref.drain();
+    this.iterators.incur();
 
     return .{
         .clocks = this,
@@ -351,7 +356,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertEql(0);
+    this.reservations.assert(.eq, 0);
 
     // Another grower got there first; its table is already the size we wanted.
     if (this.pairs.len != old_len) {
