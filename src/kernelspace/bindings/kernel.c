@@ -267,16 +267,11 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
 }
 
 struct task_struct *c_get_task_from_tid(pid_t tid) {
-  struct pid *pid_struct = NULL;
-  struct task_struct *task = NULL;
-
-  pid_struct = find_get_pid(tid);
-  if (!pid_struct) {
+  struct pid *pid_struct = find_get_pid(tid);
+  if (!pid_struct)
     return NULL;
-  }
 
-  task = get_pid_task(pid_struct, PIDTYPE_PID);
-
+  struct task_struct *task = get_pid_task(pid_struct, PIDTYPE_PID);
   put_pid(pid_struct);
 
   return task;
@@ -449,20 +444,9 @@ struct perf_event *
 c_perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
                                    pid_t pid, perf_overflow_handler_t callback,
                                    void *context) {
-  struct task_struct *task = NULL;
-  struct pid *pid_struct = NULL;
-
-  pid_struct = find_get_pid(pid);
-  if (!pid_struct) {
+  struct task_struct *task = c_get_task_from_tid(pid);
+  if (!task)
     return ERR_PTR(-ESRCH);
-  }
-
-  task = get_pid_task(pid_struct, PIDTYPE_PID);
-  put_pid(pid_struct);
-
-  if (!task) {
-    return ERR_PTR(-ESRCH);
-  }
 
   struct perf_event *event =
       perf_event_create_kernel_counter(attr, cpu, task, callback, context);
@@ -526,50 +510,47 @@ void c_tracepoint_init(void) {
   for_each_kernel_tracepoint(lookup_all_tps, NULL);
 }
 
-int c_register_sched_switch(void *callback, void *data) {
-  if (!tp_prov.sched_switch)
+static int register_tp(struct tracepoint *tp, void *callback, void *data) {
+  if (!tp)
     return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_switch, callback, data);
+  return tracepoint_probe_register(tp, callback, data);
+}
+
+static void unregister_tp(struct tracepoint *tp, void *callback, void *data) {
+  if (tp)
+    tracepoint_probe_unregister(tp, callback, data);
+}
+
+int c_register_sched_switch(void *callback, void *data) {
+  return register_tp(tp_prov.sched_switch, callback, data);
 }
 
 void c_unregister_sched_switch(void *callback, void *data) {
-  if (tp_prov.sched_switch) {
-    tracepoint_probe_unregister(tp_prov.sched_switch, callback, data);
-  }
+  unregister_tp(tp_prov.sched_switch, callback, data);
 }
 
 int c_register_sched_waking(void *callback, void *data) {
-  if (!tp_prov.sched_waking)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_waking, callback, data);
+  return register_tp(tp_prov.sched_waking, callback, data);
 }
 
 void c_unregister_sched_waking(void *callback, void *data) {
-  if (tp_prov.sched_waking) {
-    tracepoint_probe_unregister(tp_prov.sched_waking, callback, data);
-  }
+  unregister_tp(tp_prov.sched_waking, callback, data);
 }
 
 int c_register_task_newtask(void *callback, void *data) {
-  if (!tp_prov.task_newtask)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.task_newtask, callback, data);
+  return register_tp(tp_prov.task_newtask, callback, data);
 }
+
 void c_unregister_task_newtask(void *callback, void *data) {
-  if (tp_prov.task_newtask) {
-    tracepoint_probe_unregister(tp_prov.task_newtask, callback, data);
-  }
+  unregister_tp(tp_prov.task_newtask, callback, data);
 }
+
 int c_register_sched_process_exit(void *callback, void *data) {
-  if (!tp_prov.sched_process_exit)
-    return -ENOENT;
-  return tracepoint_probe_register(tp_prov.sched_process_exit, callback, data);
+  return register_tp(tp_prov.sched_process_exit, callback, data);
 }
 
 void c_unregister_sched_process_exit(void *callback, void *data) {
-  if (tp_prov.sched_process_exit) {
-    tracepoint_probe_unregister(tp_prov.sched_process_exit, callback, data);
-  }
+  unregister_tp(tp_prov.sched_process_exit, callback, data);
 }
 
 void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }

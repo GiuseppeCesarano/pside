@@ -55,6 +55,10 @@ pub const Value = packed struct(u64) {
     pub fn atValue(ticks: Ticks) Value {
         return .{ .ticks = ticks, .master_at_sleep = ticks };
     }
+
+    fn lag(this: Value) Ticks {
+        return this.master_at_sleep -| this.ticks;
+    }
 };
 
 pub const Pair = struct {
@@ -101,7 +105,7 @@ pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
     this.* = undefined;
 }
 
-fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
+fn reserveSlotUnsafe(this: *ThreadClocks, key: Key) !*Pair {
     const len = this.pairs.len;
 
     // bit 0 is reserved for the collision flag; callers must pass it clear.
@@ -109,6 +113,7 @@ fn reserveSlotUnsafe(this: *ThreadClocks, key: Key, hash: usize) !*Pair {
     assert(isPowerOfTwo(len));
     const index_mask = len - 1;
     const max_retries = @max(16, len / 32);
+    const hash = key.hash();
 
     var i: usize = 0;
     while (i < max_retries) : (i += 1) {
@@ -157,11 +162,12 @@ fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
 /// Conversely, the 'target' task (the one receiving the delay/tick) must always
 /// exist in the map; if a target task lookup returns null, it indicates a
 /// fundamental tracking failure and should be asserted with .?.
-fn getSlotUnsafe(this: *const ThreadClocks, key: Key, hash: usize) ?*Pair {
+fn getSlotUnsafe(this: *const ThreadClocks, key: Key) ?*Pair {
     const len = this.pairs.len;
 
     assert(isPowerOfTwo(len));
     const index_mask = len - 1;
+    const hash = key.hash();
 
     var i: usize = 0;
     var current_key: Key = .empty_collided;
@@ -182,7 +188,7 @@ pub fn put(this: *ThreadClocks, key: Key, ticks: Ticks) !void {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = try this.reserveSlotUnsafe(key, key.hash());
+    const slot = try this.reserveSlotUnsafe(key);
 
     slot.value.store(.atValue(ticks), .monotonic);
 
@@ -193,7 +199,7 @@ fn valueOf(this: *ThreadClocks, key: Key) Value {
     this.ref.increment();
     defer this.ref.decrement();
 
-    return this.getSlotUnsafe(key, key.hash()).?.value.load(.monotonic);
+    return this.getSlotUnsafe(key).?.value.load(.monotonic);
 }
 
 pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
@@ -201,16 +207,14 @@ pub fn ticksOf(this: *ThreadClocks, key: Key) Ticks {
 }
 
 pub fn lagOf(this: *ThreadClocks, key: Key) Ticks {
-    const value = this.valueOf(key);
-
-    return value.master_at_sleep -| value.ticks;
+    return this.valueOf(key).lag();
 }
 
 pub fn tick(this: *ThreadClocks, key: Key) !void {
     try this.ref.tryIncrement();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()).?;
+    const slot = this.getSlotUnsafe(key).?;
     const value_as_ticks: *std.atomic.Value(u64) = @ptrCast(&slot.value);
 
     const value: Value = @bitCast(value_as_ticks.fetchAdd(Value.ticks_lsb, .monotonic));
@@ -224,29 +228,29 @@ pub fn prepareForSleep(this: *ThreadClocks, key: Key) void {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()).?;
+    const slot = this.getSlotUnsafe(key).?;
     const master = this.master.load(.monotonic);
     const ticks = slot.value.load(.monotonic).ticks;
 
     slot.value.store(.{ .ticks = ticks, .master_at_sleep = master }, .monotonic);
 }
 
-/// Wakes a sleeping thread, the sleeping thread must have calld prepareForSleep.
+/// Wakes a sleeping thread, the sleeping thread must have called prepareForSleep.
 /// Returns the delay amounts those threads should sleep, null when the map is gated:
 /// callers run in irq context and cannot spin on a gate this cpu may itself hold.
 pub fn wake(this: *ThreadClocks, waker: Key, wakee: Key) ?[2]Ticks {
     this.ref.tryIncrement() catch return null;
     defer this.ref.decrement();
 
-    const wakee_slot = this.getSlotUnsafe(wakee, wakee.hash()).?;
+    const wakee_slot = this.getSlotUnsafe(wakee).?;
     const wakee_value = wakee_slot.value.load(.monotonic);
 
     const master = this.master.load(.monotonic);
 
-    const waker_slot = this.getSlotUnsafe(waker, waker.hash());
+    const waker_slot = this.getSlotUnsafe(waker);
     const waker_ticks = if (waker_slot) |slot| slot.value.load(.monotonic).ticks else master;
 
-    const wakee_lag = wakee_value.master_at_sleep -| wakee_value.ticks;
+    const wakee_lag = wakee_value.lag();
     const wakee_credit = wakee_value.ticks -| wakee_value.master_at_sleep;
 
     wakee_slot.value.store(.atValue(master), .monotonic);
@@ -262,7 +266,7 @@ pub fn catchUp(this: *ThreadClocks, key: Key) ?Ticks {
     this.ref.tryIncrement() catch return null;
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()) orelse return null;
+    const slot = this.getSlotUnsafe(key) orelse return null;
 
     const master = this.master.load(.monotonic);
     const old = slot.value.swap(.atValue(master), .monotonic);
@@ -279,7 +283,7 @@ pub fn remove(this: *ThreadClocks, key: Key) bool {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const slot = this.getSlotUnsafe(key, key.hash()) orelse return false;
+    const slot = this.getSlotUnsafe(key) orelse return false;
     this.removePairUnsafe(slot);
 
     return true;
@@ -291,8 +295,8 @@ pub fn fork(this: *ThreadClocks, parent: Key, child: Key) !Ticks {
     this.ref.increment();
     defer this.ref.decrement();
 
-    const parent_slot = this.getSlotUnsafe(parent, parent.hash()).?;
-    const child_slot = try this.reserveSlotUnsafe(child, child.hash());
+    const parent_slot = this.getSlotUnsafe(parent).?;
+    const child_slot = try this.reserveSlotUnsafe(child);
 
     const master = this.master.load(.monotonic);
     const parent_ticks = parent_slot.value.load(.monotonic).ticks;
@@ -404,7 +408,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 }
 
 fn isTaken(this: *const ThreadClocks, key: Key) bool {
-    const slot = this.getSlotUnsafe(key, key.hash()) orelse return false;
+    const slot = this.getSlotUnsafe(key) orelse return false;
 
     return this.used.isTaken(this.getIndexUnsafe(slot));
 }

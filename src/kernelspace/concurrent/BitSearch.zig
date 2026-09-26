@@ -10,10 +10,10 @@ pub const bits_per_word = @bitSizeOf(usize);
 words: []AtomicWord,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !BitSearch {
-    const bits = try allocator.alloc(AtomicWord, @divExact(reserve, bits_per_word));
-    @memset(bits, .init(0));
+    const words = try allocator.alloc(AtomicWord, @divExact(reserve, bits_per_word));
+    @memset(words, .init(0));
 
-    return .{ .words = bits };
+    return .{ .words = words };
 }
 
 pub fn deinit(this: BitSearch, allocator: std.mem.Allocator) void {
@@ -21,7 +21,7 @@ pub fn deinit(this: BitSearch, allocator: std.mem.Allocator) void {
 }
 
 fn wordOf(index: usize) usize {
-    return @divFloor(index, bits_per_word);
+    return index / bits_per_word;
 }
 
 fn bitOf(index: usize) usize {
@@ -73,16 +73,14 @@ pub fn isTaken(this: *const BitSearch, index: usize) bool {
 pub fn release(this: *BitSearch, index: usize) void {
     const word = &this.words[wordOf(index)];
     const bit = bitOf(index);
-    const mask = ~bit;
-    assert(word.fetchAnd(mask, .monotonic) & bit != 0);
+    assert(word.fetchAnd(~bit, .monotonic) & bit != 0);
 }
 
 pub fn releaseUnordered(this: *BitSearch, index: usize) void {
     const word = &this.words[wordOf(index)];
     const bit = bitOf(index);
-    const mask = ~bit;
     assert(word.raw & bit != 0);
-    word.raw &= mask;
+    word.raw &= ~bit;
 }
 
 pub const Iterator = struct {

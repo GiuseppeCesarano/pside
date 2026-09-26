@@ -8,8 +8,8 @@ const testing = std.testing;
 /// drain() waits for in-flight ones to reach zero before the writer proceeds.
 const RefGate = @This();
 
-const lock_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
-const references_mask = ~lock_bit;
+const closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
+const references_mask = ~closed_bit;
 
 references: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
 
@@ -17,12 +17,12 @@ pub inline fn increment(this: *RefGate) void {
     var ref = this.references.fetchAdd(1, .acquire);
     assert((ref & references_mask) != references_mask);
 
-    while (ref & lock_bit != 0) {
+    while (ref & closed_bit != 0) {
         @branchHint(.cold);
 
         _ = this.references.fetchSub(1, .monotonic);
 
-        while (this.references.load(.monotonic) & lock_bit != 0)
+        while (this.references.load(.monotonic) & closed_bit != 0)
             std.atomic.spinLoopHint();
 
         ref = this.references.fetchAdd(1, .acquire);
@@ -31,12 +31,12 @@ pub inline fn increment(this: *RefGate) void {
 }
 
 pub inline fn tryIncrement(this: *RefGate) !void {
-    if (this.references.load(.monotonic) & lock_bit != 0)
+    if (this.references.load(.monotonic) & closed_bit != 0)
         return error.WouldBlock;
 
     const ref = this.references.fetchAdd(1, .acquire);
     assert((ref & references_mask) != references_mask);
-    if (ref & lock_bit != 0) {
+    if (ref & closed_bit != 0) {
         _ = this.references.fetchSub(1, .monotonic);
         return error.WouldBlock;
     }
@@ -47,8 +47,8 @@ pub inline fn decrement(this: *RefGate) void {
 }
 
 pub inline fn close(this: *RefGate) void {
-    while (this.references.load(.monotonic) & lock_bit != 0 or
-        this.references.fetchOr(lock_bit, .acquire) & lock_bit != 0)
+    while (this.references.load(.monotonic) & closed_bit != 0 or
+        this.references.fetchOr(closed_bit, .acquire) & closed_bit != 0)
     {
         @branchHint(.cold);
         std.atomic.spinLoopHint();
@@ -56,14 +56,14 @@ pub inline fn close(this: *RefGate) void {
 }
 
 pub inline fn drain(this: *RefGate) void {
-    assert(this.references.load(.monotonic) & lock_bit != 0);
+    assert(this.references.load(.monotonic) & closed_bit != 0);
 
     while ((this.references.load(.acquire) & references_mask) != 0)
         std.atomic.spinLoopHint();
 }
 
 pub inline fn open(this: *RefGate) void {
-    assert(this.references.fetchAnd(references_mask, .release) & lock_bit != 0);
+    assert(this.references.fetchAnd(references_mask, .release) & closed_bit != 0);
 }
 
 test "RefGate: basic usage" {
