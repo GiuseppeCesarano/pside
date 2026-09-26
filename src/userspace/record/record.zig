@@ -255,9 +255,10 @@ const RunPlan = struct {
 };
 
 fn executeRuns(io: std.Io, runs_count: u32, plan: RunPlan) void {
-    var run: u32 = 0;
-    while (run < runs_count and !interrupted.load(.monotonic)) : (run += 1) {
-        std.log.info("Run {}/{}", .{ run + 1, runs_count });
+    for (1..runs_count + 1) |run| {
+        if (interrupted.load(.monotonic)) break;
+
+        std.log.info("Run {}/{}", .{ run, runs_count });
         executeRun(io, plan);
     }
 }
@@ -267,13 +268,13 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
         prepare_command.run(io) catch |err|
             std.process.fatal("Could not run prepare command '{s}' ({s})", .{ prepare_command.command, @errorName(err) });
 
-    var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| switch (err) {
-        TracedProcess.SpawnError.ChildNotTraceable => std.process.fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
-        TracedProcess.SpawnError.ChildDied => if (interrupted.load(.monotonic))
-            return
-        else
-            std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
-        else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
+    var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| {
+        if (err == TracedProcess.SpawnError.ChildDied and interrupted.load(.monotonic)) return;
+
+        switch (err) {
+            TracedProcess.SpawnError.ChildNotTraceable => std.process.fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
+            else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
+        }
     };
 
     plan.profiler.attach(profiled_process.pid) catch |err| switch (err) {

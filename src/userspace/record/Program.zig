@@ -4,7 +4,7 @@ const Program = @This();
 
 path: [*:0]const u8,
 args: [*:null]const ?[*:0]const u8,
-enviroment_map: std.process.Environ,
+environment_map: std.process.Environ,
 is_sudo: bool,
 
 pub const InitError = error{
@@ -19,7 +19,7 @@ pub const InitError = error{
 };
 
 pub fn initFromParsedOptions(parsed: anytype, environ: std.process.Environ, allocator: std.mem.Allocator, io: std.Io) InitError!Program {
-    if (!std.mem.eql(u8, parsed.flags.c, "")) {
+    if (parsed.flags.c.len != 0) {
         if (parsed.positional_arguments != null) return InitError.ExtraPositionalArguments;
 
         return initFromString(parsed.flags.c, environ, allocator, io);
@@ -65,18 +65,11 @@ fn initWithIterator(iterator: anytype, argc: usize, environ: std.process.Environ
     const args_slice = try allocator.allocSentinel(?[*:0]const u8, final_argc, null);
     errdefer allocator.free(args_slice);
 
-    const allocated_name = try allocator.dupeSentinel(u8, name, 0);
-    args_slice[0] = @ptrCast(allocated_name);
+    args_slice[0] = (try allocator.dupeSentinel(u8, name, 0)).ptr;
+    for (args_slice[1..]) |*arg|
+        arg.* = (try allocator.dupeSentinel(u8, it.next().?, 0)).ptr;
 
-    var i: usize = 1;
-    while (i < final_argc) : (i += 1) {
-        const next_arg = it.next() orelse unreachable;
-
-        const allocated_arg = try allocator.dupeSentinel(u8, next_arg, 0);
-        args_slice[i] = @ptrCast(allocated_arg);
-    }
-
-    return .{ .path = path, .args = @ptrCast(args_slice.ptr), .enviroment_map = environ, .is_sudo = is_sudo };
+    return .{ .path = path, .args = @ptrCast(args_slice.ptr), .environment_map = environ, .is_sudo = is_sudo };
 }
 
 fn isSudo(path: []const u8) bool {

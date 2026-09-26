@@ -82,22 +82,12 @@ pub const UserRegs = struct {
     }
 
     pub fn prepSyscall(this: *UserRegs, syscall_id: std.os.linux.SYS, args: anytype) void {
-        const fields = [_]usize{
-            @offsetOf(UserRegs, "rdi"),
-            @offsetOf(UserRegs, "rsi"),
-            @offsetOf(UserRegs, "rdx"),
-            @offsetOf(UserRegs, "r10"),
-            @offsetOf(UserRegs, "r8"),
-            @offsetOf(UserRegs, "r9"),
-        };
-        std.debug.assert(args.len <= fields.len);
-        const len = @min(args.len, fields.len);
+        const argument_registers = [_][]const u8{ "rdi", "rsi", "rdx", "r10", "r8", "r9" };
+        comptime std.debug.assert(args.len <= argument_registers.len);
 
         this.rax = @backingInt(syscall_id);
-        inline for (args, fields[0..len]) |arg, field| {
-            const field_ptr: *usize = @ptrFromInt(@as(usize, @intFromPtr(this)) + field);
-            field_ptr.* = arg;
-        }
+        inline for (args, argument_registers[0..args.len]) |arg, register|
+            @field(this, register) = arg;
     }
 };
 

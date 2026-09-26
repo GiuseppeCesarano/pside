@@ -14,10 +14,7 @@ pub const ParseError = error{
 
 pub fn getPatchAddr(user_program: Program, name: []const u8, allocator: std.mem.Allocator, io: std.Io) ParseError![]const usize {
     const path = std.mem.span(user_program.path);
-    var file = (if (std.fs.path.isAbsolute(path))
-        std.Io.Dir.openFileAbsolute(io, path, .{})
-    else
-        std.Io.Dir.cwd().openFile(io, path, .{})) catch return ParseError.ProgramUnreadable;
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return ParseError.ProgramUnreadable;
     defer file.close(io);
 
     var buffer: [255]u8 = undefined;

@@ -78,7 +78,7 @@ fn traceFailure(err: anyerror) StartError {
 
 // Stops the child at its ELF entry point: the only moment where the loader has
 // finished (so mappings and addresses are final) but no instruction of the
-// program has run yet .
+// program has run yet.
 fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
     const fork_rc = linux.fork();
     const child_pid: linux.pid_t = switch (linux.errno(fork_rc)) {
@@ -115,14 +115,14 @@ fn childStart(tracee_exe: Program) ChildStartError!void {
     if (linux.getppid() == 1) return ChildStartError.ParentDead;
 
     if (!tracee_exe.is_sudo and linux.geteuid() == 0) {
-        if (try UserIds.sudoCallerFromEnviron(tracee_exe.enviroment_map)) |calling_user|
+        if (try UserIds.sudoCallerFromEnviron(tracee_exe.environment_map)) |calling_user|
             try calling_user.setCurrentProcessIds();
     }
 
     try ptrace.traceMe();
     try std.posix.raise(.STOP);
 
-    switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.enviroment_map.block.slice))) {
+    switch (linux.errno(linux.execve(tracee_exe.path, tracee_exe.args, tracee_exe.environment_map.block.slice))) {
         .SUCCESS => unreachable,
         .FAULT => unreachable,
         .@"2BIG" => return ChildStartError.SystemResources,
@@ -408,43 +408,32 @@ const ptrace = struct {
             .data => linux.PTRACE.POKEDATA,
         };
 
-        var reader: std.Io.Reader = .fixed(data);
         var i: usize = addr;
+        var rest = data;
 
         if (!machine_word_alignment.check(i)) {
             const aligned_addr = machine_word_alignment.backward(i);
             const offset = i - aligned_addr;
-
-            const space_left_in_word = @sizeOf(usize) - offset;
-            const copy_len = @min(space_left_in_word, data.len);
+            const copy_len = @min(@sizeOf(usize) - offset, rest.len);
 
             var word = try peekWord(location, pid, aligned_addr);
-            @memcpy(std.mem.asBytes(&word)[offset .. offset + copy_len], data[0..copy_len]);
-
+            @memcpy(std.mem.asBytes(&word)[offset .. offset + copy_len], rest[0..copy_len]);
             try ptraceSysCall(command, pid, aligned_addr, word);
 
             i += copy_len;
-            reader.toss(copy_len);
+            rest = rest[copy_len..];
         }
 
-        while (reader.peekArray(@sizeOf(usize))) |bytes| : (i += @sizeOf(usize)) {
-            try ptraceSysCall(command, pid, i, std.mem.bytesToValue(usize, bytes));
-            reader.toss(@sizeOf(usize));
-        } else |err| switch (err) {
-            std.Io.Reader.Error.EndOfStream => {
-                const len = reader.bufferedLen();
-                if (len == 0) return;
+        while (rest.len >= @sizeOf(usize)) {
+            try ptraceSysCall(command, pid, i, std.mem.bytesToValue(usize, rest[0..@sizeOf(usize)]));
+            i += @sizeOf(usize);
+            rest = rest[@sizeOf(usize)..];
+        }
 
-                var bytes: [@sizeOf(usize)]u8 = undefined;
-                const read = reader.readSliceShort(bytes[0..len]) catch unreachable;
-                std.debug.assert(read == len);
-
-                const old = try peekWord(location, pid, i);
-                @memcpy(bytes[len..], std.mem.asBytes(&old)[len..]);
-
-                try ptraceSysCall(command, pid, i, std.mem.bytesToValue(usize, &bytes));
-            },
-            else => unreachable,
+        if (rest.len != 0) {
+            var word = try peekWord(location, pid, i);
+            @memcpy(std.mem.asBytes(&word)[0..rest.len], rest);
+            try ptraceSysCall(command, pid, i, word);
         }
     }
 
@@ -454,14 +443,14 @@ const ptrace = struct {
             .data => linux.PTRACE.PEEKDATA,
         };
 
-        const previus_aligned = machine_word_alignment.backward(addr);
+        const previous_aligned = machine_word_alignment.backward(addr);
 
         var data: [2]usize = undefined;
 
-        try ptraceSysCall(command, pid, previus_aligned, @intFromPtr(&data[0]));
-        try ptraceSysCall(command, pid, previus_aligned + @sizeOf(usize), @intFromPtr(&data[1]));
+        try ptraceSysCall(command, pid, previous_aligned, @intFromPtr(&data[0]));
+        try ptraceSysCall(command, pid, previous_aligned + @sizeOf(usize), @intFromPtr(&data[1]));
 
-        const diff = addr - previus_aligned;
+        const diff = addr - previous_aligned;
         return std.mem.bytesToValue(usize, std.mem.asBytes(&data)[diff .. diff + @sizeOf(usize)]);
     }
 };
