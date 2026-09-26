@@ -124,7 +124,7 @@ html, body {
     transition: color .12s, background .12s;
 }
 .switch button:hover { color: var(--ink); background: var(--paper-2); }
-.switch button[aria-pressed="true"], .switch button.on {
+.switch button[aria-pressed="true"] {
     color: var(--ground);
     background: var(--ink);
     font-weight: 600;
@@ -608,15 +608,28 @@ html, body {
 		return s.toFixed(dec);
 	    }
 
-	    function countUp(el, target) {
-		if (reduced || target <= 0) { el.textContent = target; return; }
-		const dur = 520, start = performance.now();
+	    function tween(dur, step, delay = 0) {
+		const start = performance.now() + delay;
 		const tick = now => {
-		    const p = Math.min(1, (now - start) / dur);
-		    el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3)));
+		    const p = Math.min(1, Math.max(0, (now - start) / dur));
+		    step(1 - Math.pow(1 - p, 3), p >= 1);
 		    if (p < 1) requestAnimationFrame(tick);
 		};
 		requestAnimationFrame(tick);
+	    }
+
+	    function oncePerFrame(fn) {
+		let queued = false;
+		return () => {
+		    if (queued) return;
+		    queued = true;
+		    requestAnimationFrame(() => { queued = false; fn(); });
+		};
+	    }
+
+	    function countUp(el, target) {
+		if (reduced || target <= 0) { el.textContent = target; return; }
+		tween(520, eased => { el.textContent = Math.round(target * eased); });
 	    }
 
 	    function stats(s) {
@@ -688,16 +701,10 @@ html, body {
 	    }
 
 	    function printIn(svg, delay) {
-		const dur = 320, start = performance.now() + delay;
 		svg.style.clipPath = 'inset(0 100% 0 0)';
-		const tick = now => {
-		    const p = Math.min(1, Math.max(0, (now - start) / dur));
-		    const eased = 1 - Math.pow(1 - p, 3);
-		    if (p >= 1) { svg.style.clipPath = ''; return; }
-		    svg.style.clipPath = 'inset(0 ' + ((1 - eased) * 100).toFixed(1) + '% 0 0)';
-		    requestAnimationFrame(tick);
-		};
-		requestAnimationFrame(tick);
+		tween(320, (eased, done) => {
+		    svg.style.clipPath = done ? '' : 'inset(0 ' + ((1 - eased) * 100).toFixed(1) + '% 0 0)';
+		}, delay);
 	    }
 
 	    function rowMarkup(s) {
@@ -781,14 +788,17 @@ html, body {
 	    $('wall-list').addEventListener('keydown', e => {
 		const rows = $('wall-list').querySelectorAll('.line');
 		if (!rows.length) return;
-		switch (e.key) {
-		    case 'ArrowDown': e.preventDefault(); moveCursor(cursorIndex + 1); break;
-		    case 'ArrowUp': e.preventDefault(); moveCursor(cursorIndex - 1); break;
-		    case 'PageDown': e.preventDefault(); moveCursor(cursorIndex + 12); break;
-		    case 'PageUp': e.preventDefault(); moveCursor(cursorIndex - 12); break;
-		    case 'Home': e.preventDefault(); moveCursor(0); break;
-		    case 'End': e.preventDefault(); moveCursor(rows.length - 1); break;
-		}
+		const target = {
+		    ArrowDown: cursorIndex + 1,
+		    ArrowUp: cursorIndex - 1,
+		    PageDown: cursorIndex + 12,
+		    PageUp: cursorIndex - 12,
+		    Home: 0,
+		    End: rows.length - 1,
+		}[e.key];
+		if (target === undefined) return;
+		e.preventDefault();
+		moveCursor(target);
 	    });
 
 	    $('filter').addEventListener('input', applyView);
@@ -916,6 +926,15 @@ html, body {
 		const tip = document.createElement('div');
 		tip.className = 'chart-tip';
 
+		const fontFamily = getComputedStyle(document.body).fontFamily;
+		const axisStyle = {
+		    font: '11px ' + fontFamily,
+		    labelFont: '10px ' + fontFamily,
+		    stroke: INK_2,
+		    grid: { stroke: RULE, width: 1 },
+		    ticks: { stroke: RULE, width: 1 },
+		};
+
 		const opts = {
 		    width: 760,
 		    height: 320,
@@ -1004,12 +1023,8 @@ html, body {
 		    },
 		    axes: [
 			{
-			    font: '11px ' + getComputedStyle(document.body).fontFamily,
-			    stroke: INK_2,
-			    grid: { stroke: RULE, width: 1 },
-			    ticks: { stroke: RULE, width: 1 },
+			    ...axisStyle,
 			    label: 'virtual speedup',
-			    labelFont: '10px ' + getComputedStyle(document.body).fontFamily,
 			    labelSize: 26,
 			    splits: u => {
 				const step = u.bbox.width / devicePixelRatio < 420 ? 4 : 2;
@@ -1020,12 +1035,8 @@ html, body {
 			    values: (u, sp) => sp.map(v => v == null ? '' : (v * STEP) + '%'),
 			},
 			{
-			    font: '11px ' + getComputedStyle(document.body).fontFamily,
-			    stroke: INK_2,
-			    grid: { stroke: RULE, width: 1 },
-			    ticks: { stroke: RULE, width: 1 },
+			    ...axisStyle,
 			    label: axisLabel(),
-			    labelFont: '10px ' + getComputedStyle(document.body).fontFamily,
 			    size: 70,
 			    values: (u, sp) => sp.map(v => v == null ? '' : fmtAxis(v, span)),
 			},
@@ -1037,14 +1048,10 @@ html, body {
 		u.animateIn = () => {
 		    if (reduced) { t = 1; u.setData([xs, medians, ciLow, ciHigh]); return; }
 		    t = 0;
-		    const dur = 460, start = performance.now();
-		    const tick = now => {
-			const p = Math.min(1, (now - start) / dur);
-			t = 1 - Math.pow(1 - p, 3);
+		    tween(460, eased => {
+			t = eased;
 			u.setData([xs, grow(medians), grow(ciLow), grow(ciHigh)]);
-			if (p < 1) requestAnimationFrame(tick);
-		    };
-		    requestAnimationFrame(tick);
+		    });
 		};
 
 		return u;
@@ -1139,27 +1146,15 @@ html, body {
 		loadSection(sections[0].name);
 	    })();
 
-	    if (window.ResizeObserver) {
-		let queued = false;
-		new ResizeObserver(() => {
-		    if (queued) return;
-		    queued = true;
-		    requestAnimationFrame(() => { queued = false; sizePlot(); });
-		}).observe($('scope-body'));
-	    }
+	    if (window.ResizeObserver)
+		new ResizeObserver(oncePerFrame(sizePlot)).observe($('scope-body'));
 
-	    let resizeQueued = false;
-	    window.addEventListener('resize', () => {
-		if (resizeQueued) return;
-		resizeQueued = true;
-		requestAnimationFrame(() => {
-		    resizeQueued = false;
-		    const before = traceWidth;
-		    measureTrace();
-		    sizePlot();
-		    if (before !== traceWidth && shown.length) renderWall();
-		});
-	    });
+	    window.addEventListener('resize', oncePerFrame(() => {
+		const before = traceWidth;
+		measureTrace();
+		sizePlot();
+		if (before !== traceWidth && shown.length) renderWall();
+	    }));
 	</script>
     </body>
 </html>
