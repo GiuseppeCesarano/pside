@@ -4,10 +4,10 @@ const testing = std.testing;
 
 const BitSearch = @This();
 
+words: []AtomicWord,
+
 const AtomicWord = std.atomic.Value(usize);
 pub const bits_per_word = @bitSizeOf(usize);
-
-words: []AtomicWord,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !BitSearch {
     const words = try allocator.alloc(AtomicWord, @divExact(reserve, bits_per_word));

@@ -9,8 +9,6 @@ const Profile = @import("Profile.zig");
 
 const Server = @This();
 
-const Connections = enum { drained, serving };
-
 server: net.Server,
 should_shut_down: std.atomic.Value(bool),
 share_path: []const u8,
@@ -18,6 +16,8 @@ profile: *const Profile,
 connections: Io.Group,
 state: safety.State(Connections),
 pin: safety.Pinned,
+
+const Connections = enum { drained, serving };
 
 pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Server {
     var net_server = try (try net.IpAddress.parse("::1", 0)).listen(io, .{ .reuse_address = true });

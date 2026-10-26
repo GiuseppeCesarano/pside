@@ -13,24 +13,6 @@ const Ticks = ThreadClocks.Ticks;
 
 const ExperimentRunner = @This();
 
-pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
-
-const clocks_reserve = 1024;
-
-const max_exit_payment_us = 50 * std.time.us_per_ms;
-
-const Window = enum { idle, running };
-
-const Arming = enum { unarmed, armed };
-
-const BoundToTask = safety.BoundTo(currentTask);
-
-const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
-
-fn currentTask(_: *const anyopaque) *kernel.Task {
-    return kernel.Task.current();
-}
-
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
 clocks: ThreadClocks,
@@ -48,6 +30,24 @@ arming: safety.State(Arming),
 window: safety.State(Window),
 loop: BoundToTask,
 pin: safety.Pinned,
+
+const Window = enum { idle, running };
+
+const Arming = enum { unarmed, armed };
+
+const BoundToTask = safety.BoundTo(currentTask);
+
+const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
+
+pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
+
+const clocks_reserve = 1024;
+
+const max_exit_payment_us = 50 * std.time.us_per_ms;
+
+fn currentTask(_: *const anyopaque) *kernel.Task {
+    return kernel.Task.current();
+}
 
 pub fn init() !ExperimentRunner {
     return .{

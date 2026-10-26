@@ -8,10 +8,10 @@ const testing = std.testing;
 /// drain() waits for in-flight ones to reach zero before the writer proceeds.
 const RefGate = @This();
 
+references: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
+
 const closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
 const references_mask = ~closed_bit;
-
-references: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
 
 pub inline fn increment(this: *RefGate) void {
     var ref = this.references.fetchAdd(1, .acquire);

@@ -14,6 +14,14 @@ const arch_specific = switch (@import("builtin").cpu.arch) {
 };
 
 const UserRegs = arch_specific.UserRegs;
+
+pid: linux.pid_t,
+elf_entrypoint: usize,
+old_entry_ins: usize,
+state: safety.State(Lifecycle),
+
+const Lifecycle = enum { attached, detached, reaped };
+
 const ForkError = error{ SystemResources, Unexpected };
 
 const ChildStartError = error{
@@ -44,13 +52,6 @@ pub const SpawnError = error{
 pub const StartError = error{ ChildDied, ChildNotTraceable, Unexpected };
 pub const WaitError = error{WaitFailed};
 pub const PatchError = error{ ChildDied, ChildNotTraceable, CouldNotMapInChild, Unexpected };
-
-const Lifecycle = enum { attached, detached, reaped };
-
-pid: linux.pid_t,
-elf_entrypoint: usize,
-old_entry_ins: usize,
-state: safety.State(Lifecycle),
 
 var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
 

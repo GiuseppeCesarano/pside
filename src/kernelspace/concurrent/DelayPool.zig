@@ -11,17 +11,12 @@ const atomic_allocator = kernel.heap.atomic_allocator;
 
 const DelayPool = @This();
 
-pub const Error = Allocator.Error || kernel.Task.WorkAddError;
-
-const chunk_words = @divExact(chunk_len, BitSearch.bits_per_word);
-const entries_span = chunk_len * @sizeOf(DelayWork);
-
-const DelayWork = struct {
-    work: kernel.Task.Work,
-    task: *kernel.Task,
-    time: std.atomic.Value(usize),
-    pool: *DelayPool,
-};
+chunks: *Chunk,
+users_count: std.atomic.Value(u32),
+completion: kernel.Completion,
+pending: safety.Obligations,
+readiness: safety.State(Readiness),
+pin: safety.Pinned,
 
 const Chunk = struct {
     entries: [chunk_len]DelayWork,
@@ -32,16 +27,21 @@ const Chunk = struct {
     next: std.atomic.Value(?*Chunk),
 };
 
-const uninitialized = std.math.maxInt(u32);
+const DelayWork = struct {
+    work: kernel.Task.Work,
+    task: *kernel.Task,
+    time: std.atomic.Value(usize),
+    pool: *DelayPool,
+};
 
 const Readiness = enum { uninitialized, ready };
 
-chunks: *Chunk,
-users_count: std.atomic.Value(u32),
-completion: kernel.Completion,
-pending: safety.Obligations,
-readiness: safety.State(Readiness),
-pin: safety.Pinned,
+pub const Error = Allocator.Error || kernel.Task.WorkAddError;
+
+const chunk_words = @divExact(chunk_len, BitSearch.bits_per_word);
+const entries_span = chunk_len * @sizeOf(DelayWork);
+
+const uninitialized = std.math.maxInt(u32);
 
 pub const empty: DelayPool = .{
     .chunks = undefined,

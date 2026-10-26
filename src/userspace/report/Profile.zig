@@ -10,16 +10,8 @@ const Symbolizer = @import("Symbolizer.zig");
 
 const Profile = @This();
 
-pub const Error = error{
-    FileUnreadable,
-    NotAPsideFile,
-    MissingBinaryPath,
-    MalformedVmaFrame,
-    MalformedRecordsFrame,
-    UnknownVmaId,
-    BadSpeedupPercent,
-    OutOfMemory,
-};
+vmas: []Vma,
+symbols_unavailable: ?Symbolizer.OpenError,
 
 pub const Vma = struct {
     name: []const u8,
@@ -33,8 +25,16 @@ pub const Vma = struct {
     }
 };
 
-vmas: []Vma,
-symbols_unavailable: ?Symbolizer.OpenError,
+pub const Error = error{
+    FileUnreadable,
+    NotAPsideFile,
+    MissingBinaryPath,
+    MalformedVmaFrame,
+    MalformedRecordsFrame,
+    UnknownVmaId,
+    BadSpeedupPercent,
+    OutOfMemory,
+};
 
 pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Error!Profile {
     var file_map = try mapFile(io, path);
@@ -89,16 +89,16 @@ fn findBinaryPath(from: std.Io.Reader) ?[]const u8 {
 }
 
 const Parser = struct {
-    const Levels = [speedup_levels_len]std.ArrayListUnmanaged(f32);
-    const Sites = std.StringArrayHashMapUnmanaged(Levels);
-
     // Symbolizer does small allocations, and arena doesn't reuse freed memory,
     // on some profiles this costed 5 more GiB, using gpa instead.
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     symbolizer: Symbolizer,
-    buckets: std.StringArrayHashMapUnmanaged(Sites) = .empty,
+    buckets: std.array_hash_map.String(Sites) = .empty,
     names: std.AutoHashMapUnmanaged(payload.VmaId, []const u8) = .empty,
+
+    const Levels = [speedup_levels_len]std.ArrayList(f32);
+    const Sites = std.array_hash_map.String(Levels);
 
     fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) Parser {
         return .{

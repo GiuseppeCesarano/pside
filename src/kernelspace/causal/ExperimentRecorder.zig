@@ -6,6 +6,8 @@ const DiskWriter = @import("../io/DiskWriter.zig");
 
 const ExperimentRecorder = @This();
 
+disk_writer: DiskWriter,
+
 pub const Error = error{ Full, DelayExceedsWindow };
 
 pub const Reading = struct {
@@ -13,8 +15,6 @@ pub const Reading = struct {
     vclock: u64,
     time_us: u64,
 };
-
-disk_writer: DiskWriter,
 
 pub const empty: ExperimentRecorder = .{ .disk_writer = .empty };
 

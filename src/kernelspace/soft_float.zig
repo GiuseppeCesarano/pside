@@ -134,13 +134,13 @@ fn expectFromUnsigned64(a: u64) !void {
 
 test "divide special values" {
     const values = [_]f32{
-        0.0,                    -0.0,
-        1.0,                    -1.0,
-        2.0,                    0.5,
-        3.0,                    -7.25,
-        std.math.inf(f32),      -std.math.inf(f32),
-        std.math.nan(f32),      std.math.floatMax(f32),
-        std.math.floatMin(f32), std.math.floatTrueMin(f32),
+        0.0,                     -0.0,
+        1.0,                     -1.0,
+        2.0,                     0.5,
+        3.0,                     -7.25,
+        std.math.inf(f32),       -std.math.inf(f32),
+        std.math.nan(f32),       std.math.floatMax(f32),
+        std.math.floatMin(f32),  std.math.floatTrueMin(f32),
         -std.math.floatMin(f32),
     };
     for (values) |a| for (values) |b| try expectDivide(a, b);
@@ -168,16 +168,15 @@ test "divide subnormal results" {
 
 test "fromUnsigned64 boundaries" {
     const values = [_]u64{
-        0,                  1,
-        2,                  3,
-        0x7F_FFFF,          0x80_0000,
-        0x80_0001,          0xFF_FFFF,
-        0x100_0000,         0x100_0001,
-        0x100_0002,         0x100_0003,
-        1 << 32,            (1 << 32) + 1,
-        1 << 63,            (1 << 63) + (1 << 39),
-        std.math.maxInt(u64),
-        std.math.maxInt(u64) - 1,
+        0,                    1,
+        2,                    3,
+        0x7F_FFFF,            0x80_0000,
+        0x80_0001,            0xFF_FFFF,
+        0x100_0000,           0x100_0001,
+        0x100_0002,           0x100_0003,
+        1 << 32,              (1 << 32) + 1,
+        1 << 63,              (1 << 63) + (1 << 39),
+        std.math.maxInt(u64), std.math.maxInt(u64) - 1,
     };
     for (values) |a| try expectFromUnsigned64(a);
 }

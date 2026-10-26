@@ -3,6 +3,9 @@ const Dwarf = std.debug.Dwarf;
 
 const Symbolizer = @This();
 
+debug_info: union(enum) { open: Debug, unavailable: OpenError },
+cache: std.AutoHashMapUnmanaged(u64, []const u8),
+
 pub const OpenError = error{
     BinaryUnreadable,
     BadElf,
@@ -25,9 +28,6 @@ pub const Debug = struct {
         this.file.close(io);
     }
 };
-
-debug_info: union(enum) { open: Debug, unavailable: OpenError },
-cache: std.AutoHashMapUnmanaged(u64, []const u8),
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) Symbolizer {
     if (openDebug(allocator, io, binary_path)) |debug| {

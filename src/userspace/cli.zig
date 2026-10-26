@@ -4,10 +4,13 @@ const std = @import("std");
 
 fn OptionsImpl(ItType: type) type {
     return struct {
+        args: ItType,
+
         pub const Iterator = struct {
-            pub const Mask = std.bit_set.IntegerBitSet(128);
             args: ItType,
             mask: Mask.MaskInt,
+
+            pub const Mask = std.bit_set.IntegerBitSet(128);
 
             pub fn next(this: *Iterator) ?[]const u8 {
                 while (this.mask & 1 == 0 and this.args.next() != null) : (this.mask >>= 1) {}
@@ -29,8 +32,6 @@ fn OptionsImpl(ItType: type) type {
                 parse_errors: ?Iterator,
             };
         }
-
-        args: ItType,
 
         pub fn parse(this: @This(), FlagsSchema: type) Parsed(FlagsSchema) {
             const schema = @typeInfo(FlagsSchema).@"struct";

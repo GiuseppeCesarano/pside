@@ -103,15 +103,10 @@ pub fn build(b: *std.Build) !void {
     // kbuild expects a .<obj>.cmd file for every prebuilt object it links.
     const kbuild_cmd_name = try std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" });
     const kbuild_debug_flags = if (kernel_optimize == .debug) "ccflags-y := -DDEBUG" else "";
-    const strip_kernel_mod = "strip --strip-debug" ++
-        " --remove-section=.BTF" ++
-        " --remove-section=.BTF.ext" ++
-        " --remove-section=.eh_frame" ++
-        " --remove-section=.eh_frame_hdr" ++
-        " --remove-section=.gcc_except_table" ++
+    const strip_kernel_mod = b.fmt("objcopy{s}" ++
         " --remove-section=.comment" ++
         " --remove-section=.note.GNU-stack" ++
-        " pside.ko";
+        " pside.ko", .{if (kernel_optimize == .debug) "" else " --strip-debug"});
 
     const kernel_module_files = b.addWriteFiles();
     _ = kernel_module_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
@@ -126,13 +121,12 @@ pub fn build(b: *std.Build) !void {
             "\n" ++
             "# Zig can't emit rethunk/endbr yet, neutering objtool silences the mitigation warnings.\n" ++
             "all:\n" ++
-            "\tstrip --strip-debug {s}\n" ++
-            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules objtool=true\n" ++
+            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules objtool=true CONFIG_DEBUG_INFO_BTF_MODULES=\n" ++
             "\t{s}\n" ++
             "\n" ++
             "clean:\n" ++
             "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n",
-        .{ kbuild_debug_flags, zig_kernel_obj.out_filename, zig_kernel_obj.out_filename, strip_kernel_mod },
+        .{ kbuild_debug_flags, zig_kernel_obj.out_filename, strip_kernel_mod },
     ));
     kernel_module_files.step.dependOn(&zig_kernel_obj.step);
 

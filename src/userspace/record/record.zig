@@ -162,12 +162,12 @@ fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
 }
 
 const Profiler = struct {
-    const Session = enum { idle, attached, profiling };
-
     device: KernelControlDevice,
     output_fd: linux.fd_t,
     attach_options: communications.AttachOptions,
     state: safety.State(Session),
+
+    const Session = enum { idle, attached, profiling };
 
     pub const InitError = communications.AttachOptions.InitError;
 

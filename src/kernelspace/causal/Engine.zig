@@ -12,11 +12,6 @@ const ExperimentRunner = @import("ExperimentRunner.zig");
 
 const Engine = @This();
 
-const Session = enum { idle, attached, profiling };
-
-const progress_grow_threshold = 5;
-const progress_decay_threshold = progress_grow_threshold * 4;
-
 progress: *std.atomic.Value(usize),
 
 planner: ExperimentPlanner,
@@ -26,6 +21,11 @@ runner: ExperimentRunner,
 profiler_thread: ?*kernel.Thread,
 state: safety.State(Session),
 pin: safety.Pinned,
+
+const Session = enum { idle, attached, profiling };
+
+const progress_grow_threshold = 5;
+const progress_decay_threshold = progress_grow_threshold * 4;
 
 pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
     return .{

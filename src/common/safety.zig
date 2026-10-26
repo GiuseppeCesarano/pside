@@ -229,12 +229,12 @@ pub fn ConfigurableState(States: type, config: Config, messages: StateMessages) 
     return struct {
         const S = @This();
 
+        state: if (config.enabled) Enum else void,
+        last_transition: TransitionTrace,
+
         const TransitionTrace = CapturedStackTrace(config.traceFrames());
 
         const mutex = CheckMutex(S, config);
-
-        state: if (config.enabled) Enum else void,
-        last_transition: TransitionTrace,
 
         /// Initializes the state to `initial_state`, without capturing a
         /// stack trace.
@@ -439,13 +439,13 @@ pub fn ConfigurableObligations(config: Config, messages: ObligationsMessages) ty
     return struct {
         const O = @This();
 
-        const ObligationsTrace = CapturedStackTrace(config.traceFrames());
-
-        const mutex = CheckMutex(O, config);
-
         counter: if (config.enabled) u32 else void,
         last_incur: ObligationsTrace,
         last_discharge: ObligationsTrace,
+
+        const ObligationsTrace = CapturedStackTrace(config.traceFrames());
+
+        const mutex = CheckMutex(O, config);
 
         pub const none: O = .{
             .counter = if (config.enabled) 0 else {},
@@ -647,27 +647,27 @@ pub fn ConfigurableBoundTo(
     return struct {
         const B = @This();
 
+        identity: if (config.enabled) ?Identity else void,
+        last_change: Trace,
+
         pub const Identity = @typeInfo(@TypeOf(identityFn)).@"fn".return_type.?;
 
-        fn queryIdentity(self: *const B) Identity {
-            return identityFn(self);
-        }
+        const Trace = CapturedStackTrace(config.traceFrames());
 
         /// Identities that define `format` are printed through it.
         const identity_fmt = if (std.meta.hasMethod(Identity, "format")) "{f}" else "{any}";
 
-        const Trace = CapturedStackTrace(config.traceFrames());
-
         const mutex = CheckMutex(B, config);
-
-        identity: if (config.enabled) ?Identity else void,
-        last_change: Trace,
 
         /// Nothing bound.
         pub const unbound: B = .{
             .identity = if (config.enabled) null else {},
             .last_change = .empty,
         };
+
+        fn queryIdentity(self: *const B) Identity {
+            return identityFn(self);
+        }
 
         /// Binds `identity`, without capturing a stack trace.
         pub fn init(identity: Identity) B {
@@ -1025,10 +1025,10 @@ test BoundTo {
         }
 
         const Handle = struct {
-            const BoundToGeneration = BoundTo(currentGeneration);
-
             arena_generation: *const u32,
             generation: BoundToGeneration,
+
+            const BoundToGeneration = BoundTo(currentGeneration);
 
             fn currentGeneration(generation: anytype) u32 {
                 const h: *const Handle = @alignCast(@fieldParentPtr("generation", generation));

@@ -2,10 +2,10 @@ const std = @import("std");
 
 const ExperimentPlanner = @This();
 
-const initial_experiment_duration = 50 * std.time.us_per_ms;
-
 prng: std.Random.DefaultPrng,
 experiment_duration: usize,
+
+const initial_experiment_duration = 50 * std.time.us_per_ms;
 
 pub fn init(seed: u64) ExperimentPlanner {
     return .{

@@ -5,13 +5,9 @@ const speedup_levels_len = serialization.speedup_levels_len;
 
 const Graph = @This();
 
-pub const Error = error{NotEnoughSamples};
-
-pub const min_samples_per_level = 5;
-
-const confidence = 0.95;
-const lower_tail = (1.0 - confidence) / 2.0;
-const upper_tail = 1.0 - lower_tail;
+location: []const u8,
+points: [speedup_levels_len]Point,
+ci_low_total_area: f32,
 
 const Point = struct {
     ci_high: f32,
@@ -36,9 +32,13 @@ const Point = struct {
     }
 };
 
-location: []const u8,
-points: [speedup_levels_len]Point,
-ci_low_total_area: f32,
+pub const Error = error{NotEnoughSamples};
+
+pub const min_samples_per_level = 5;
+
+const confidence = 0.95;
+const lower_tail = (1.0 - confidence) / 2.0;
+const upper_tail = 1.0 - lower_tail;
 
 pub fn init(location: []const u8, levels: [speedup_levels_len][]f32) Error!Graph {
     if (!enoughSamples(levels)) return Error.NotEnoughSamples;

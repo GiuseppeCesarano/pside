@@ -6,14 +6,6 @@ const safety = @import("safety");
 const serialization = @import("serialization");
 const payload = serialization.payload;
 
-const BoundToTask = safety.BoundTo(currentTask);
-
-fn currentTask(_: *const anyopaque) *kernel.Task {
-    return kernel.Task.current();
-}
-
-const stop_poll_ms = 100;
-
 const DiskWriter = @This();
 
 thread: ?*kernel.Thread,
@@ -33,6 +25,14 @@ healthy: bool,
 producer: BoundToTask = .unbound,
 consumer: BoundToTask = .unbound,
 pin: safety.Pinned = .unbound,
+
+const BoundToTask = safety.BoundTo(currentTask);
+
+const stop_poll_ms = 100;
+
+fn currentTask(_: *const anyopaque) *kernel.Task {
+    return kernel.Task.current();
+}
 
 pub const empty: DiskWriter = .{
     .buffer = &.{},

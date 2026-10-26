@@ -83,6 +83,12 @@ pub const speedup_levels_len = 21;
 pub const speedup_step_per_level = 5; // 5 * 20 = 100%;
 
 pub const Header = extern struct {
+    magic: [8]u8,
+    version: Version,
+    flags: Flags,
+    _: u32 = 0,
+    binary_hash: Hash,
+
     pub const Version = extern struct {
         major: u8,
         minor: u8,
@@ -98,12 +104,6 @@ pub const Header = extern struct {
 
     pub const magic_value: [8]u8 = "pside\x00\x00\x00".*;
     pub const current_version: Version = .{ .major = 0, .minor = 2 };
-
-    magic: [8]u8,
-    version: Version,
-    flags: Flags,
-    _: u32 = 0,
-    binary_hash: Hash,
 
     pub fn init(binary_hash: Hash) Header {
         return .{
@@ -133,16 +133,16 @@ pub const Header = extern struct {
 
 pub const payload = struct {
     pub const Header = extern struct {
+        tag: Tag,
+        flags: u16 = 0,
+        len: u32,
+
         pub const Tag = enum(u16) {
             binary_path = 0,
             vma = 1,
             records = 2,
             _,
         };
-
-        tag: Tag,
-        flags: u16 = 0,
-        len: u32,
 
         fn write(this: payload.Header, w: *std.Io.Writer) std.Io.Writer.Error!void {
             try w.writeAll(std.mem.asBytes(&this));
@@ -153,6 +153,9 @@ pub const payload = struct {
     pub const default_vma_id: VmaId = 0;
 
     pub const Frame = struct {
+        tag: payload.Header.Tag,
+        body: []const u8,
+
         pub const Iterator = struct {
             reader: *std.Io.Reader,
 
@@ -171,9 +174,6 @@ pub const payload = struct {
                 return .{ .tag = tag, .body = body };
             }
         };
-
-        tag: payload.Header.Tag,
-        body: []const u8,
 
         pub fn write(this: Frame, w: *std.Io.Writer) std.Io.Writer.Error!void {
             const header: payload.Header = .{ .tag = this.tag, .len = @intCast(this.body.len) };
@@ -210,15 +210,15 @@ pub const payload = struct {
 
     pub const records = struct {
         pub const Header = extern struct {
+            kind: Kind,
+            record_size: u16,
+            vma_id: VmaId,
+
             pub const Kind = enum(u16) {
                 throughput = 0,
                 latency = 1,
                 _,
             };
-
-            kind: Kind,
-            record_size: u16,
-            vma_id: VmaId,
         };
 
         pub const Throughput = extern struct {

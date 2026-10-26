@@ -175,7 +175,7 @@ pub const PrintkWriter = struct {
 
     fn emit(this: *const PrintkWriter, bytes: []const u8) void {
         const text = if (bytes.len != 0 and bytes[bytes.len - 1] == '\n') bytes[0 .. bytes.len - 1] else bytes;
-        c_printk(@intFromEnum(this.level), text.ptr, text.len);
+        c_printk(@backingInt(this.level), text.ptr, text.len);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -407,9 +407,10 @@ pub const Task = opaque {
     }
 
     pub const Work = extern struct {
-        pub const Callback = *const fn (*Work) callconv(.c) void;
         next: ?*Work align(@alignOf(usize)),
         func: Callback,
+
+        pub const Callback = *const fn (*Work) callconv(.c) void;
     };
 
     pub const NotifyMode = enum(c_int) {

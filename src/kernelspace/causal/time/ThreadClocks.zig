@@ -8,10 +8,15 @@ const min_cap = BitSearch.bits_per_word;
 const RefGate = @import("RefGate");
 const safety = @import("safety");
 
-const Reservations = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
-
 /// Concurrent map optimized for thread-local clock propagation.
 const ThreadClocks = @This();
+
+master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
+ref: RefGate,
+pairs: []Pair,
+used: BitSearch,
+reservations: Reservations,
+iterators: safety.Obligations,
 
 pub const Ticks = u32;
 
@@ -70,12 +75,7 @@ pub const Pair = struct {
     const empty: Pair = .{ .key = .init(.empty), .value = undefined };
 };
 
-master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
-ref: RefGate,
-pairs: []Pair,
-used: BitSearch,
-reservations: Reservations,
-iterators: safety.Obligations,
+const Reservations = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
     assert(isPowerOfTwo(reserve));

@@ -5,11 +5,12 @@ pub const name = "pside";
 pub const control_device_path: [:0]const u8 = "/dev/" ++ name;
 
 pub const Commands = enum(c_uint) {
-    pub const Tag = @typeInfo(Commands).@"enum".tag_type;
     attach_profiler = iow('k', 0, Data),
     start_profiler = iow('k', 1, Data),
     stop_profiler = iow('k', 2, Data),
     _,
+
+    pub const Tag = @typeInfo(Commands).@"enum".tag_type;
 };
 
 pub const vma_name_max_len = std.math.maxInt(u8) + 1;
