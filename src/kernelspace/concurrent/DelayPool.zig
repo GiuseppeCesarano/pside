@@ -62,7 +62,7 @@ pub fn init(this: *DelayPool) !void {
 
     this.completion.init();
 
-    this.users_count = .init(0);
+    this.users_count = .init(1);
     this.readiness.transition(.ready);
 }
 
@@ -78,10 +78,10 @@ pub fn deinit(this: *DelayPool) void {
     this.waitAllDelays();
     assert(this.users_count.load(.monotonic) == 0);
 
-    var chunk: ?*Chunk = this.chunks.next.load(.monotonic);
+    var chunk: ?*Chunk = this.chunks.next.load(.acquire);
 
     while (chunk) |c| {
-        chunk = c.next.load(.monotonic);
+        chunk = c.next.load(.acquire);
         atomic_allocator.destroy(c);
     }
 
@@ -115,7 +115,7 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
     var failure: ?kernel.Task.WorkAddError = null;
     var chunk: ?*Chunk = this.chunks;
 
-    while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+    while (chunk) |c| : (chunk = c.next.load(.acquire)) {
         var it = c.pending.iterate();
 
         while (it.next()) |index| {
@@ -137,8 +137,8 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
 }
 
 pub fn waitAllDelays(this: *DelayPool) void {
-    this.completion.reinit();
-    if (this.users_count.load(.monotonic) != 0) this.completion.wait();
+    this.releaseUser();
+    this.completion.wait();
 }
 
 fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!*DelayWork {
@@ -160,7 +160,7 @@ fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Er
 fn getEntry(this: *DelayPool) ?*DelayWork {
     var chunk: ?*Chunk = this.chunks;
 
-    return while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+    return while (chunk) |c| : (chunk = c.next.load(.acquire)) {
         if (c.free.takeFirstFree()) |index| break &c.entries[index];
     } else null;
 }
@@ -194,14 +194,14 @@ fn reserveInNewAllocation(this: *DelayPool) Allocator.Error!*DelayWork {
 
 fn appendChunk(this: *DelayPool, new_chunk: *Chunk) void {
     var chunk = this.chunks;
-    while (chunk.next.cmpxchgStrong(null, new_chunk, .monotonic, .monotonic)) |taken| chunk = taken.?;
+    while (chunk.next.cmpxchgStrong(null, new_chunk, .release, .acquire)) |taken| chunk = taken.?;
 }
 
 fn chunkOf(this: *DelayPool, slot: *DelayWork) *Chunk {
     const slot_address = @intFromPtr(slot);
 
     var chunk: ?*Chunk = this.chunks;
-    return while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+    return while (chunk) |c| : (chunk = c.next.load(.acquire)) {
         const base = @intFromPtr(&c.entries);
         if (slot_address >= base and slot_address - base < entries_span) break c;
     } else unreachable;
@@ -227,7 +227,7 @@ fn cancel(this: *DelayPool, slot: *DelayWork) void {
 fn cancelAllPending(this: *DelayPool) void {
     var chunk: ?*Chunk = this.chunks;
 
-    while (chunk) |c| : (chunk = c.next.load(.monotonic)) {
+    while (chunk) |c| : (chunk = c.next.load(.acquire)) {
         var it = c.pending.iterate();
 
         while (it.next()) |index| {
@@ -241,7 +241,7 @@ fn cancelAllPending(this: *DelayPool) void {
 }
 
 fn releaseUser(this: *DelayPool) void {
-    if (this.users_count.fetchSub(1, .monotonic) == 1) this.completion.signal();
+    if (this.users_count.fetchSub(1, .acq_rel) == 1) this.completion.signal();
 }
 
 fn executeDelay(work: *kernel.Task.Work) callconv(.c) void {

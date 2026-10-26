@@ -322,6 +322,9 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callc
 }
 
 fn fork(this: *ExperimentRunner, parent: Key, child: Key) !Ticks {
+    kernel.preempt.disable();
+    defer kernel.preempt.enable();
+
     return this.clocks.fork(parent, child) catch blk: {
         try this.clocks.grow(atomic_allocator);
         break :blk try this.clocks.fork(parent, child);
@@ -368,8 +371,13 @@ fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.
     const key = keyFromTask(task);
     const payment = this.exitPayment(key);
 
-    const removed = this.clocks.remove(key);
-    assert(removed);
+    {
+        kernel.preempt.disable();
+        defer kernel.preempt.enable();
+
+        const removed = this.clocks.remove(key);
+        assert(removed);
+    }
 
     this.releaseTask(task);
 
@@ -380,7 +388,12 @@ fn exitPayment(this: *ExperimentRunner, key: Key) usize {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     if (delay_per_tick == 0 or !kernel.execution.canSleep()) return 0;
 
-    const lag = this.clocks.catchUp(key) orelse return 0;
+    const lag = lag: {
+        kernel.preempt.disable();
+        defer kernel.preempt.enable();
+
+        break :lag this.clocks.catchUp(key) orelse return 0;
+    };
 
     return @min(@as(usize, lag) * delay_per_tick, max_exit_payment_us);
 }

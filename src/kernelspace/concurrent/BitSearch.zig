@@ -47,7 +47,7 @@ pub fn takeFirstFree(this: *BitSearch) ?usize {
 
         while (free != 0) {
             const target_bit = free & -%free;
-            const previous = word.fetchOr(target_bit, .monotonic);
+            const previous = word.fetchOr(target_bit, .acquire);
 
             if (previous & target_bit == 0) {
                 @branchHint(.likely);
@@ -73,7 +73,7 @@ pub fn isTaken(this: *const BitSearch, index: usize) bool {
 pub fn release(this: *BitSearch, index: usize) void {
     const word = &this.words[wordOf(index)];
     const bit = bitOf(index);
-    assert(word.fetchAnd(~bit, .monotonic) & bit != 0);
+    assert(word.fetchAnd(~bit, .release) & bit != 0);
 }
 
 pub fn releaseUnordered(this: *BitSearch, index: usize) void {
