@@ -8,6 +8,8 @@ const min_cap = BitSearch.bits_per_word;
 const RefGate = @import("RefGate");
 const safety = @import("safety");
 
+const Reservations = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
+
 /// Concurrent map optimized for thread-local clock propagation.
 const ThreadClocks = @This();
 
@@ -72,7 +74,7 @@ master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
 used: BitSearch,
-reservations: safety.Obligations,
+reservations: Reservations,
 iterators: safety.Obligations,
 
 pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
@@ -94,10 +96,10 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
 }
 
 pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
-    this.iterators.assert(.eq, 0);
+    this.iterators.assertCount(.eq, 0);
     this.ref.close();
     this.ref.drain();
-    this.reservations.assert(.eq, 0);
+    this.reservations.assertCount(.eq, 0);
 
     allocator.free(this.pairs);
     this.used.deinit(allocator);
@@ -360,7 +362,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     this.ref.close();
     this.ref.drain();
-    this.reservations.assert(.eq, 0);
+    this.reservations.assertCount(.eq, 0);
 
     // Another grower got there first; its table is already the size we wanted.
     if (this.pairs.len != old_len) {

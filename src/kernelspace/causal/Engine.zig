@@ -42,7 +42,7 @@ pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
 }
 
 pub fn deinit(this: *Engine) void {
-    this.pin.assertSame();
+    this.pin.assertCurrentIfBound();
     if (this.profiler_thread) |t| _ = t.stop();
     this.runner.deinit();
     this.recorder.deinit();
@@ -72,7 +72,7 @@ pub fn start(this: *Engine, fd: linux.fd_t) !void {
     this.state.assertEql(.attached);
 
     try this.recorder.start(fd);
-    this.pin.assertSame();
+    this.pin.bind();
     this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
 
     this.state.transition(.profiling);

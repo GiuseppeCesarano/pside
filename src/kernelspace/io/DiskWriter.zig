@@ -6,7 +6,7 @@ const safety = @import("safety");
 const serialization = @import("serialization");
 const payload = serialization.payload;
 
-const BoundToTask = safety.BoundTo(currentTask, .{});
+const BoundToTask = safety.BoundTo(currentTask);
 
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
@@ -71,7 +71,7 @@ pub fn start(
     this.healthy = true;
     errdefer this.file = null;
 
-    this.pin.assertSame();
+    this.pin.bind();
     this.thread = try kernel.Thread.run(writerFn, this, "pside_disk_writer");
 }
 
@@ -80,7 +80,7 @@ pub fn deinit(this: *DiskWriter) void {
 
     if (this.thread == null) return;
 
-    this.pin.assertSame();
+    this.pin.assertCurrent();
     this.completion.signal();
     _ = this.thread.?.stop();
     this.file.?.put();
@@ -88,8 +88,8 @@ pub fn deinit(this: *DiskWriter) void {
 }
 
 pub fn push(this: *DiskWriter, record: anytype) !void {
-    this.producer.assertSame();
-    this.pin.assertSame();
+    this.producer.bindOrAssert();
+    this.pin.assertCurrent();
 
     std.debug.assert(this.buffer.len != 0);
 
@@ -128,6 +128,7 @@ fn pushBytesUnchecked(this: *DiskWriter, bytes: []const u8) void {
 
 fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
     const this: *DiskWriter = @ptrCast(@alignCast(ctx.?));
+    this.consumer.bind();
 
     while (!kernel.Thread.shouldStop()) {
         // kthread_stop cannot release wait_for_completion, so re-check the flag
@@ -144,7 +145,7 @@ fn writerFn(ctx: ?*anyopaque) callconv(.c) c_int {
 }
 
 pub fn flush(this: *DiskWriter) void {
-    this.consumer.assertSame();
+    this.consumer.assertCurrent();
 
     if (!this.healthy) return;
 

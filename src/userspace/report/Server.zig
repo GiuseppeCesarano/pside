@@ -39,7 +39,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Serv
 
 pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
     this.state.assertEql(.drained);
-    this.pin.assertSame();
+    this.pin.assertCurrentIfBound();
 
     this.stop(io);
     this.server.deinit(io);
@@ -69,7 +69,13 @@ pub fn openInBrowser(this: *const Server, io: Io) void {
 
 pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
     this.state.assertEql(.drained);
-    this.pin.assertSame();
+    this.pin.bindOrAssert();
+
+    this.state.transition(.serving);
+    defer {
+        this.connections.cancel(io);
+        this.state.transition(.drained);
+    }
 
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);
@@ -84,12 +90,7 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
             stream.close(io);
             continue;
         };
-
-        this.state.transition(.serving);
     }
-
-    this.connections.cancel(io);
-    this.state.transition(.drained);
 }
 
 pub fn stop(this: *Server, io: Io) void {

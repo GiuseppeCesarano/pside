@@ -39,6 +39,7 @@ const Readiness = enum { uninitialized, ready };
 chunks: *Chunk,
 users_count: std.atomic.Value(u32),
 completion: kernel.Completion,
+pending: safety.Obligations,
 readiness: safety.State(Readiness),
 pin: safety.Pinned,
 
@@ -46,6 +47,7 @@ pub const empty: DelayPool = .{
     .chunks = undefined,
     .users_count = .init(uninitialized),
     .completion = undefined,
+    .pending = .none,
     .readiness = .init(.uninitialized),
     .pin = .unbound,
 };
@@ -53,7 +55,7 @@ pub const empty: DelayPool = .{
 pub fn init(this: *DelayPool) !void {
     if (this.users_count.load(.monotonic) != uninitialized) return;
 
-    this.pin.assertSame();
+    this.pin.bind();
 
     this.chunks = try allocator.create(Chunk);
     this.initChunk(this.chunks);
@@ -68,10 +70,11 @@ pub fn deinit(this: *DelayPool) void {
     if (this.users_count.load(.monotonic) == uninitialized) return;
 
     this.readiness.assertEql(.ready);
-    this.pin.assertSame();
+    this.pin.assertCurrent();
 
     // A pending delay still counts as a user and nothing is left to flush it
     this.cancelAllPending();
+    this.pending.assertCount(.eq, 0);
     this.waitAllDelays();
     assert(this.users_count.load(.monotonic) == 0);
 
@@ -103,6 +106,7 @@ pub fn pendDelay(this: *DelayPool, task: *kernel.Task, delay_time: usize) Alloca
     const chunk = this.chunkOf(slot);
 
     chunk.pending.take(indexOf(chunk, slot));
+    this.pending.incur();
 }
 
 pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
@@ -117,6 +121,7 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
         while (it.next()) |index| {
             const slot = &c.entries[index];
             c.pending.release(index);
+            this.pending.discharge();
 
             slot.task.addWork(&slot.work, .signal) catch |err| {
                 this.cancel(slot);
@@ -125,6 +130,8 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
             };
         }
     }
+
+    this.pending.assertCount(.eq, 0);
 
     if (failure) |err| return err;
 }
@@ -135,7 +142,7 @@ pub fn waitAllDelays(this: *DelayPool) void {
 }
 
 fn reserve(this: *DelayPool, task: *kernel.Task, delay_time: usize) Allocator.Error!*DelayWork {
-    this.pin.assertSame();
+    this.pin.assertCurrent();
     assert(delay_time != 0);
 
     _ = this.users_count.fetchAdd(1, .monotonic);
@@ -226,6 +233,7 @@ fn cancelAllPending(this: *DelayPool) void {
         while (it.next()) |index| {
             c.entries[index].task.decrementReferences();
             c.pending.release(index);
+            this.pending.discharge();
             c.free.release(index);
             this.releaseUser();
         }

@@ -19,11 +19,13 @@ const clocks_reserve = 1024;
 
 const max_exit_payment_us = 50 * std.time.us_per_ms;
 
-const ExperimentWindow = enum { idle, running };
+const Window = enum { idle, running };
 
 const Arming = enum { unarmed, armed };
 
-const BoundToTask = safety.BoundTo(currentTask, .{});
+const BoundToTask = safety.BoundTo(currentTask);
+
+const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
 
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
@@ -41,9 +43,9 @@ has_errored: std.atomic.Value(bool),
 target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
 
-task_references: safety.Obligations,
+task_references: TaskReferences,
 arming: safety.State(Arming),
-Experiment: safety.State(ExperimentWindow),
+window: safety.State(Window),
 loop: BoundToTask,
 pin: safety.Pinned,
 
@@ -61,7 +63,7 @@ pub fn init() !ExperimentRunner {
 
         .task_references = .none,
         .arming = .init(.unarmed),
-        .Experiment = .init(.idle),
+        .window = .init(.idle),
         .loop = .unbound,
         .pin = .unbound,
     };
@@ -88,8 +90,8 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
-    this.pin.assertSame();
-    this.Experiment.assertEql(.idle);
+    this.pin.assertCurrentIfBound();
+    this.window.assertEql(.idle);
 
     if (this.sampler) |s| {
         kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
@@ -110,7 +112,7 @@ pub fn deinit(this: *ExperimentRunner) void {
     while (it.next()) |pair|
         this.releaseTask(taskFromKey(pair.key.raw));
 
-    this.task_references.assert(.eq, 0);
+    this.task_references.assertCount(.eq, 0);
 
     this.clocks.deinit(atomic_allocator);
 
@@ -124,7 +126,7 @@ pub fn profilePid(
     attribute_kernel_samples: bool,
 ) !void {
     this.arming.assertEql(.unarmed);
-    this.pin.assertSame();
+    this.pin.bind();
 
     try this.delay_pool.init();
 
@@ -178,10 +180,10 @@ pub fn profilePid(
 }
 
 pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
-    this.loop.assertSame();
+    this.loop.bindOrAssert();
     this.arming.assertEql(.armed);
-    this.Experiment.assertEql(.idle);
-    defer this.Experiment.transition(.running);
+    this.window.assertEql(.idle);
+    defer this.window.transition(.running);
 
     this.delay_per_tick.store(delay_per_tick, .monotonic);
     this.target_ip.store(0, .seq_cst);
@@ -190,10 +192,10 @@ pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
 }
 
 pub fn endExperiment(this: *ExperimentRunner) void {
-    this.loop.assertSame();
+    this.loop.assertCurrent();
     this.arming.assertEql(.armed);
-    this.Experiment.assertEql(.running);
-    defer this.Experiment.transition(.idle);
+    this.window.assertEql(.running);
+    defer this.window.transition(.idle);
 
     this.delay_per_tick.store(0, .seq_cst); // zero first so any in-flight tick is a no-op
     this.sampler.?.disable();
@@ -214,9 +216,9 @@ pub fn hasErrored(this: *const ExperimentRunner) bool {
 }
 
 pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
-    this.loop.assertSame();
+    this.loop.assertCurrent();
     this.arming.assertEql(.armed);
-    this.Experiment.assertEql(.running);
+    this.window.assertEql(.running);
 
     {
         // The map walk and per-thread delay application must not be preempted,
