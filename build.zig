@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const KernelHeaders = @import("build/KernelHeaders.zig");
+
 pub fn build(b: *std.Build) !void {
     const is_release_bundle = b.option(bool, "release", "Build CLI in ReleaseSmall and Kernel in ReleaseFast") orelse false;
     const optimize = if (is_release_bundle) .small else b.standardOptimizeOption(.{});
@@ -10,13 +12,17 @@ pub fn build(b: *std.Build) !void {
             .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
         }},
     });
+    const kernel_headers = try KernelHeaders.detect(b);
     const kernel_target = b.resolveTargetQuery(switch (target.result.cpu.arch) {
         .x86_64 => .{
             .cpu_arch = .x86_64,
-            .os_tag = .freestanding,
+            .os_tag = .linux,
             .abi = .none,
-            .cpu_features_add = std.Target.x86.featureSet(&.{ .soft_float, .retpoline, .retpoline_external_thunk }),
-            .cpu_features_sub = std.Target.x86.featureSet(&.{ .mmx, .sse, .sse2, .avx, .avx2 }),
+            .cpu_features_add = switch (kernel_headers) {
+                .usable => |headers| headers.zigFeatures(),
+                .unusable => KernelHeaders.base_features,
+            },
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .avx, .avx2 }),
         },
         else => @panic("Correct feature flags unimplemented for target arch..."),
     });
@@ -50,6 +56,7 @@ pub fn build(b: *std.Build) !void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .imports = &.{.{ .name = "safety", .module = safety_mod }},
     });
 
     const kernel_obj_options: std.Build.ObjectOptions = .{
@@ -86,60 +93,10 @@ pub fn build(b: *std.Build) !void {
     const check_obj = b.addObject(kernel_obj_options);
     check.dependOn(&check_obj.step);
 
-    const zig_kernel_obj = b.addObject(kernel_obj_options);
-    for ([_][]const u8{
-        "init_module",
-        "cleanup_module",
-        "description",
-        "license",
-        "pside_engine_release",
-    }) |symbol|
-        try zig_kernel_obj.force_undefined_symbols.put(b.allocator, symbol, {});
-
-    zig_kernel_obj.bundle_compiler_rt = false;
-    zig_kernel_obj.link_function_sections = true;
-    zig_kernel_obj.link_gc_sections = true;
-
-    // kbuild expects a .<obj>.cmd file for every prebuilt object it links.
-    const kbuild_cmd_name = try std.mem.concat(b.allocator, u8, &.{ ".", zig_kernel_obj.out_filename, ".cmd" });
-    const kbuild_debug_flags = if (kernel_optimize == .debug) "ccflags-y := -DDEBUG" else "";
-    const strip_kernel_mod = b.fmt("objcopy{s}" ++
-        " --remove-section=.comment" ++
-        " --remove-section=.note.GNU-stack" ++
-        " pside.ko", .{if (kernel_optimize == .debug) "" else " --strip-debug"});
-
-    const kernel_module_files = b.addWriteFiles();
-    _ = kernel_module_files.addCopyFile(zig_kernel_obj.getEmittedBin(), zig_kernel_obj.out_filename);
-    _ = kernel_module_files.addCopyFile(b.path("src/kernelspace/bindings/kernel.c"), "kernel.c");
-    _ = kernel_module_files.add(kbuild_cmd_name, "");
-    _ = kernel_module_files.add("Makefile", b.fmt(
-        "{s}\n" ++
-            "obj-m += pside.o\n" ++
-            "pside-objs := kernel.o {s}\n" ++
-            "\n" ++
-            "PWD := $(CURDIR)\n" ++
-            "\n" ++
-            "# Zig can't emit rethunk/endbr yet, neutering objtool silences the mitigation warnings.\n" ++
-            "all:\n" ++
-            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules objtool=true CONFIG_DEBUG_INFO_BTF_MODULES=\n" ++
-            "\t{s}\n" ++
-            "\n" ++
-            "clean:\n" ++
-            "\t$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean\n",
-        .{ kbuild_debug_flags, zig_kernel_obj.out_filename, strip_kernel_mod },
-    ));
-    kernel_module_files.step.dependOn(&zig_kernel_obj.step);
-
-    const run_kbuild = b.addSystemCommand(&.{"make"});
-    run_kbuild.setCwd(kernel_module_files.getDirectory());
-    run_kbuild.step.dependOn(&kernel_module_files.step);
-
-    const built_ko = try kernel_module_files.getDirectory().join(b.allocator, "pside.ko");
-    const uts = std.posix.uname();
-    const ko_install_path = try std.mem.concat(b.allocator, u8, &.{ "lib/modules/", std.mem.sliceTo(&uts.release, 0), "/extra/pside.ko" });
-    const install_ko = b.addInstallFile(built_ko, ko_install_path);
-    install_ko.step.dependOn(&run_kbuild.step);
-    b.getInstallStep().dependOn(&install_ko.step);
+    switch (kernel_headers) {
+        .usable => |headers| try installKernelModule(b, headers, kernel_obj_options),
+        .unusable => |reason| b.getInstallStep().dependOn(&b.addFail(reason).step),
+    }
 
     const cli_mod = b.addModule("cli", .{
         .root_source_file = b.path("src/userspace/cli.zig"),
@@ -253,4 +210,86 @@ pub fn build(b: *std.Build) !void {
         });
         test_step.dependOn(&b.addRunArtifact(tests).step);
     }
+}
+
+fn installKernelModule(b: *std.Build, headers: KernelHeaders, zig_obj_options: std.Build.ObjectOptions) !void {
+    const target = zig_obj_options.root_module.resolved_target.?;
+    const optimize = zig_obj_options.root_module.optimize.?;
+    const lto: std.zig.LtoMode = if (optimize == .debug) .none else .full;
+
+    const zig_kernel_obj = b.addObject(zig_obj_options);
+    for ([_][]const u8{
+        "init_module",
+        "cleanup_module",
+        "description",
+        "license",
+        "pside_engine_release",
+    }) |symbol|
+        try zig_kernel_obj.force_undefined_symbols.put(b.allocator, symbol, {});
+
+    zig_kernel_obj.bundle_compiler_rt = false;
+    zig_kernel_obj.link_function_sections = true;
+    zig_kernel_obj.link_gc_sections = true;
+    zig_kernel_obj.lto = lto;
+
+    const c_module_options: std.Build.Module.CreateOptions = .{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+        .strip = optimize != .debug,
+        .unwind_tables = .none,
+        .code_model = .kernel,
+        .stack_protector = false,
+        .stack_check = false,
+        .sanitize_c = .off,
+        .pic = false,
+        .red_zone = false,
+        .omit_frame_pointer = false,
+    };
+
+    const kernel_c_obj = b.addObject(.{
+        .name = "pside_kernel_c",
+        .use_llvm = true,
+        .use_lld = true,
+        .root_module = b.createModule(c_module_options),
+    });
+    kernel_c_obj.bundle_compiler_rt = false;
+    kernel_c_obj.lto = lto;
+    try headers.addCSourceFile(b, kernel_c_obj.root_module, b.path("src/kernelspace/bindings/kernel.c"), "kernel");
+
+    const prelink_obj = b.addObject(.{
+        .name = "pside_prelink",
+        .use_llvm = true,
+        .use_lld = true,
+        .root_module = b.createModule(c_module_options),
+    });
+    prelink_obj.bundle_compiler_rt = false;
+    prelink_obj.root_module.addObjectFile(kernel_c_obj.getEmittedBin());
+    prelink_obj.root_module.addObjectFile(zig_kernel_obj.getEmittedBin());
+
+    const modpost_exe = b.addExecutable(.{
+        .name = "modpost",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/modpost.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_modpost = b.addRunArtifact(modpost_exe);
+    run_modpost.addFileArg(prelink_obj.getEmittedBin());
+    run_modpost.addFileArg(headers.build_dir.path(b, "Module.symvers"));
+    const mod_c = run_modpost.addOutputFileArg2("pside.mod.c", .{});
+
+    const ko_obj = b.addObject(.{
+        .name = "pside",
+        .use_llvm = true,
+        .use_lld = true,
+        .root_module = b.createModule(c_module_options),
+    });
+    ko_obj.bundle_compiler_rt = false;
+    ko_obj.setLinkerScript(headers.build_dir.path(b, "scripts/module.lds"));
+    ko_obj.root_module.addObjectFile(prelink_obj.getEmittedBin());
+    try headers.addCSourceFile(b, ko_obj.root_module, mod_c, "pside.mod");
+
+    const install_ko = b.addInstallFile(ko_obj.getEmittedBin(), b.fmt("lib/modules/{s}/extra/pside.ko", .{headers.release}));
+    b.getInstallStep().dependOn(&install_ko.step);
 }

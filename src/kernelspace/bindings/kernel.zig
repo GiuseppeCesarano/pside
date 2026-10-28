@@ -5,7 +5,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const arch = @import("builtin").cpu.arch;
 
-const is_target_kernel = @import("builtin").target.os.tag == .freestanding;
+const is_target_kernel = @import("builtin").code_model == .kernel;
 //TODO: keep an eye on the std lib; they may implement that.
 pub const PtRegs = switch (arch) {
     .x86_64 => extern struct {

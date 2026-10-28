@@ -1,3 +1,4 @@
+#include "kconfig_overrides.h"
 #include <linux/cdev.h>
 #include <linux/completion.h>
 #include <linux/dcache.h>
