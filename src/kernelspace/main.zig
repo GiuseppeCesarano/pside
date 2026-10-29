@@ -7,10 +7,6 @@ const kernel = @import("kernel");
 const Engine = @import("causal/Engine.zig");
 const VmaRanges = @import("process/VmaRanges.zig");
 
-comptime {
-    _ = @import("soft_float.zig");
-}
-
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL v2".*;
 

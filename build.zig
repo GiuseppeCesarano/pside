@@ -13,19 +13,7 @@ pub fn build(b: *std.Build) !void {
         }},
     });
     const kernel_headers = try KernelHeaders.detect(b);
-    const kernel_target = b.resolveTargetQuery(switch (target.result.cpu.arch) {
-        .x86_64 => .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .none,
-            .cpu_features_add = switch (kernel_headers) {
-                .usable => |headers| headers.zigFeatures(),
-                .unusable => KernelHeaders.base_features,
-            },
-            .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .avx, .avx2 }),
-        },
-        else => @panic("Correct feature flags unimplemented for target arch..."),
-    });
+    const kernel_target = kernelTarget(b, target, kernel_headers);
 
     const communications_mod = b.addModule("communications", .{
         .root_source_file = b.path("src/common/communications.zig"),
@@ -167,15 +155,7 @@ pub fn build(b: *std.Build) !void {
     const check_exe = b.addExecutable(executable_options);
     check.dependOn(&check_exe.step);
 
-    const uplot = b.dependency("uplot", .{});
-    const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
-    const web_files = [_]struct { source: std.Build.LazyPath, dest: []const u8 }{
-        .{ .source = b.path("src/userspace/report/web/index.html"), .dest = "index.html" },
-        .{ .source = uplot.path("dist/uPlot.iife.min.js"), .dest = "uplot.min.js" },
-        .{ .source = uplot.path("dist/uPlot.min.css"), .dest = "uplot.min.css" },
-    };
-    for (web_files) |file|
-        b.getInstallStep().dependOn(&b.addInstallFileWithDir(file.source, web_dir, file.dest).step);
+    installWebAssets(b);
 
     const test_step = b.step("test", "Run tests");
     for ([_]*std.Build.Module{ cli_mod, bindings_mod, report_mod, record_mod, driver_mod }) |module|
@@ -190,10 +170,13 @@ pub fn build(b: *std.Build) !void {
     }{
         .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
         .{ .name = "concurrent_bitsearch", .path = "src/kernelspace/concurrent/BitSearch.zig", .sanitize_thread = true },
-        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{ .{ .name = "RefGate", .module = ref_gate_mod }, .{ .name = "BitSearch", .module = bit_search_mod }, .{ .name = "safety", .module = safety_mod } } },
+        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{
+            .{ .name = "RefGate", .module = ref_gate_mod },
+            .{ .name = "BitSearch", .module = bit_search_mod },
+            .{ .name = "safety", .module = safety_mod },
+        } },
         .{ .name = "common_safety", .path = "src/common/safety.zig", .sanitize_thread = true },
         .{ .name = "common_serialization", .path = "src/common/serialization.zig" },
-        .{ .name = "kernelspace_soft_float", .path = "src/kernelspace/soft_float.zig" },
         .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
     };
@@ -212,28 +195,39 @@ pub fn build(b: *std.Build) !void {
     }
 }
 
+fn kernelTarget(b: *std.Build, target: std.Build.ResolvedTarget, kernel_headers: KernelHeaders.Detection) std.Build.ResolvedTarget {
+    return b.resolveTargetQuery(switch (target.result.cpu.arch) {
+        .x86_64 => .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+            .cpu_features_add = switch (kernel_headers) {
+                .usable => |headers| headers.zigFeatures(),
+                .unusable => KernelHeaders.base_features,
+            },
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .avx, .avx2 }),
+        },
+        else => @panic("Correct feature flags unimplemented for target arch..."),
+    });
+}
+
+fn installWebAssets(b: *std.Build) void {
+    const uplot = b.dependency("uplot", .{});
+    const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
+    const web_files = [_]struct { source: std.Build.LazyPath, dest: []const u8 }{
+        .{ .source = b.path("src/userspace/report/web/index.html"), .dest = "index.html" },
+        .{ .source = uplot.path("dist/uPlot.iife.min.js"), .dest = "uplot.min.js" },
+        .{ .source = uplot.path("dist/uPlot.min.css"), .dest = "uplot.min.css" },
+    };
+    for (web_files) |file|
+        b.getInstallStep().dependOn(&b.addInstallFileWithDir(file.source, web_dir, file.dest).step);
+}
+
 fn installKernelModule(b: *std.Build, headers: KernelHeaders, zig_obj_options: std.Build.ObjectOptions) !void {
-    const target = zig_obj_options.root_module.resolved_target.?;
     const optimize = zig_obj_options.root_module.optimize.?;
     const lto: std.zig.LtoMode = if (optimize == .debug) .none else .full;
-
-    const zig_kernel_obj = b.addObject(zig_obj_options);
-    for ([_][]const u8{
-        "init_module",
-        "cleanup_module",
-        "description",
-        "license",
-        "pside_engine_release",
-    }) |symbol|
-        try zig_kernel_obj.force_undefined_symbols.put(b.allocator, symbol, {});
-
-    zig_kernel_obj.bundle_compiler_rt = false;
-    zig_kernel_obj.link_function_sections = true;
-    zig_kernel_obj.link_gc_sections = true;
-    zig_kernel_obj.lto = lto;
-
-    const c_module_options: std.Build.Module.CreateOptions = .{
-        .target = target,
+    const link_options: std.Build.Module.CreateOptions = .{
+        .target = zig_obj_options.root_module.resolved_target.?,
         .optimize = optimize,
         .link_libc = false,
         .strip = optimize != .debug,
@@ -247,49 +241,95 @@ fn installKernelModule(b: *std.Build, headers: KernelHeaders, zig_obj_options: s
         .omit_frame_pointer = false,
     };
 
-    const kernel_c_obj = b.addObject(.{
-        .name = "pside_kernel_c",
-        .use_llvm = true,
-        .use_lld = true,
-        .root_module = b.createModule(c_module_options),
-    });
-    kernel_c_obj.bundle_compiler_rt = false;
-    kernel_c_obj.lto = lto;
-    try headers.addCSourceFile(b, kernel_c_obj.root_module, b.path("src/kernelspace/bindings/kernel.c"), "kernel");
+    const zig_obj = try addZigObject(b, zig_obj_options, lto);
+    const bindings_obj = try addBindingsObject(b, headers, link_options, lto);
+    const compiler_rt_obj = try addCompilerRtObject(b, link_options);
 
-    const prelink_obj = b.addObject(.{
-        .name = "pside_prelink",
-        .use_llvm = true,
-        .use_lld = true,
-        .root_module = b.createModule(c_module_options),
-    });
-    prelink_obj.bundle_compiler_rt = false;
-    prelink_obj.root_module.addObjectFile(kernel_c_obj.getEmittedBin());
-    prelink_obj.root_module.addObjectFile(zig_kernel_obj.getEmittedBin());
+    const prelink_obj = addKernelObject(b, "pside_prelink", link_options);
+    for ([_]std.Build.LazyPath{ bindings_obj, zig_obj, compiler_rt_obj }) |object|
+        prelink_obj.root_module.addObjectFile(object);
 
-    const modpost_exe = b.addExecutable(.{
-        .name = "modpost",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("build/modpost.zig"),
-            .target = b.graph.host,
-        }),
-    });
-    const run_modpost = b.addRunArtifact(modpost_exe);
-    run_modpost.addFileArg(prelink_obj.getEmittedBin());
-    run_modpost.addFileArg(headers.build_dir.path(b, "Module.symvers"));
-    const mod_c = run_modpost.addOutputFileArg2("pside.mod.c", .{});
+    const mod_c = generateModC(b, headers, prelink_obj.getEmittedBin());
 
-    const ko_obj = b.addObject(.{
-        .name = "pside",
-        .use_llvm = true,
-        .use_lld = true,
-        .root_module = b.createModule(c_module_options),
-    });
-    ko_obj.bundle_compiler_rt = false;
+    const ko_obj = addKernelObject(b, "pside", link_options);
+    ko_obj.compress_debug_sections = .zlib;
     ko_obj.setLinkerScript(headers.build_dir.path(b, "scripts/module.lds"));
     ko_obj.root_module.addObjectFile(prelink_obj.getEmittedBin());
     try headers.addCSourceFile(b, ko_obj.root_module, mod_c, "pside.mod");
 
     const install_ko = b.addInstallFile(ko_obj.getEmittedBin(), b.fmt("lib/modules/{s}/extra/pside.ko", .{headers.release}));
     b.getInstallStep().dependOn(&install_ko.step);
+}
+
+fn addZigObject(b: *std.Build, options: std.Build.ObjectOptions, lto: std.zig.LtoMode) !std.Build.LazyPath {
+    const object = b.addObject(options);
+    object.bundle_compiler_rt = false;
+    object.link_function_sections = true;
+    object.link_gc_sections = true;
+    object.lto = lto;
+    try keepSymbols(b, object, &.{ "init_module", "cleanup_module", "description", "license", "pside_engine_release" });
+
+    return object.getEmittedBin();
+}
+
+fn addBindingsObject(b: *std.Build, headers: KernelHeaders, options: std.Build.Module.CreateOptions, lto: std.zig.LtoMode) !std.Build.LazyPath {
+    const object = addKernelObject(b, "pside_kernel_c", options);
+    object.lto = lto;
+    try headers.addCSourceFile(b, object.root_module, b.path("src/kernelspace/bindings/kernel.c"), "kernel");
+
+    return object.getEmittedBin();
+}
+
+fn addCompilerRtObject(b: *std.Build, options: std.Build.Module.CreateOptions) !std.Build.LazyPath {
+    var compiler_rt_options = options;
+    compiler_rt_options.root_source_file = .{ .relative = .{ .base = .zig_lib, .sub_path = "compiler_rt.zig" } };
+    compiler_rt_options.optimize = .fast;
+    compiler_rt_options.strip = true;
+
+    const compiler_rt = b.addObject(.{
+        .name = "compiler_rt",
+        .use_llvm = true,
+        .root_module = b.createModule(compiler_rt_options),
+    });
+    compiler_rt.bundle_compiler_rt = false;
+    compiler_rt.link_function_sections = true;
+
+    const used_compiler_rt = addKernelObject(b, "compiler_rt_gc", options);
+    used_compiler_rt.link_gc_sections = true;
+    used_compiler_rt.root_module.addObjectFile(compiler_rt.getEmittedBin());
+    try keepSymbols(b, used_compiler_rt, &.{ "__divsf3", "__floatundisf" });
+
+    return used_compiler_rt.getEmittedBin();
+}
+
+fn generateModC(b: *std.Build, headers: KernelHeaders, prelink_obj: std.Build.LazyPath) std.Build.LazyPath {
+    const modpost = b.addExecutable(.{
+        .name = "modpost",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("build/modpost.zig"),
+            .target = b.graph.host,
+        }),
+    });
+
+    const run_modpost = b.addRunArtifact(modpost);
+    run_modpost.addFileArg(prelink_obj);
+    run_modpost.addFileArg(headers.build_dir.path(b, "Module.symvers"));
+
+    return run_modpost.addOutputFileArg2("pside.mod.c", .{});
+}
+
+fn addKernelObject(b: *std.Build, name: []const u8, options: std.Build.Module.CreateOptions) *std.Build.Step.Compile {
+    const object = b.addObject(.{
+        .name = name,
+        .use_llvm = true,
+        .use_lld = true,
+        .root_module = b.createModule(options),
+    });
+    object.bundle_compiler_rt = false;
+
+    return object;
+}
+
+fn keepSymbols(b: *std.Build, object: *std.Build.Step.Compile, symbols: []const []const u8) !void {
+    for (symbols) |symbol| try object.force_undefined_symbols.put(b.allocator, symbol, {});
 }
