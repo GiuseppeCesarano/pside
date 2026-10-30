@@ -100,6 +100,8 @@ const Parser = struct {
     const Levels = [speedup_levels_len]std.ArrayList(f32);
     const Sites = std.array_hash_map.String(Levels);
 
+    const min_progress = 5;
+
     fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) Parser {
         return .{
             .gpa = gpa,
@@ -149,6 +151,10 @@ const Parser = struct {
         while (samples.next()) |sample| {
             const speedup = sample.speedup_percent;
             if (speedup > 100 or speedup % speedup_step_per_level != 0) return Error.BadSpeedupPercent;
+            if (sample.progress_delta < min_progress or sample.injected_us >= sample.time_delta_us) continue;
+
+            const virtual_time: f32 = @floatFromInt(sample.time_delta_us - sample.injected_us);
+            const throughput = @as(f32, @floatFromInt(sample.progress_delta)) / virtual_time;
 
             const location = try this.symbolizer.locate(this.gpa, sample.relative_ip);
 
@@ -159,7 +165,7 @@ const Parser = struct {
             }
 
             const level = &site.value_ptr[@divExact(speedup, speedup_step_per_level)];
-            try level.append(allocator, sample.throughput);
+            try level.append(allocator, throughput);
         }
     }
 

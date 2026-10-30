@@ -1,49 +1,88 @@
 const std = @import("std");
 
-const payload = @import("serialization").payload;
-
-const DiskWriter = @import("../io/DiskWriter.zig");
+const safety = @import("safety");
+const serialization = @import("serialization");
+const payload = serialization.payload;
+const Throughput = payload.records.Throughput;
 
 const ExperimentRecorder = @This();
 
-disk_writer: DiskWriter,
+file_writer: std.Io.File.Writer,
+queue: std.Io.Queue(Throughput),
+queue_buffer: [records_per_frame]Throughput,
+batch: [records_per_frame]Throughput,
+writer: ?std.Io.Future(WriteError!void),
+pin: safety.Pinned,
 
-pub const Error = error{ Full, DelayExceedsWindow };
+pub const StartError = std.Io.File.LengthError || std.Io.File.SeekError || std.Io.ConcurrentError;
+pub const Error = std.Io.QueueClosedError || std.Io.Cancelable;
+const WriteError = std.Io.Writer.Error;
 
-pub const Reading = struct {
-    progress: usize,
-    vclock: u64,
-    time_us: u64,
+const records_per_frame = 64;
+const records_header: payload.records.Header = .{
+    .kind = .throughput,
+    .record_size = @sizeOf(Throughput),
+    .vma_id = payload.default_vma_id,
 };
 
-pub const empty: ExperimentRecorder = .{ .disk_writer = .empty };
+pub const empty: ExperimentRecorder = .{
+    .file_writer = undefined,
+    .queue = undefined,
+    .queue_buffer = undefined,
+    .batch = undefined,
+    .writer = null,
+    .pin = .unbound,
+};
 
-pub fn deinit(this: *ExperimentRecorder) void {
-    this.disk_writer.deinit();
+pub fn deinit(this: *ExperimentRecorder, io: std.Io) void {
+    this.stop(io);
+    this.* = undefined;
 }
 
-pub fn start(this: *ExperimentRecorder, fd: std.os.linux.fd_t) !void {
-    try this.disk_writer.start(fd, .throughput, @sizeOf(payload.records.Throughput), payload.default_vma_id);
+pub fn stop(this: *ExperimentRecorder, io: std.Io) void {
+    const writer = if (this.writer) |*w| w else return;
+
+    this.pin.assertCurrent();
+    this.queue.close(io);
+    writer.await(io) catch |err| std.log.err("Writing records failed: {s}", .{@errorName(err)});
+
+    this.writer = null;
+}
+
+pub fn start(this: *ExperimentRecorder, io: std.Io, fd: std.os.linux.fd_t) StartError!void {
+    std.debug.assert(this.writer == null);
+    this.pin.bind();
+
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    this.file_writer = .init(file, io, &.{});
+    try this.file_writer.seekToUnbuffered(try file.length(io));
+
+    this.queue = .init(&this.queue_buffer);
+    this.writer = try io.concurrent(writeLoop, .{ this, io });
 }
 
 pub fn recordThroughput(
     this: *ExperimentRecorder,
-    base: Reading,
-    end: Reading,
-    delay_per_tick: u16,
+    io: std.Io,
     relative_ip: usize,
-    speedup_percent: u16,
+    progress_delta: u64,
+    time_delta: std.Io.Duration,
+    injected_us: u32,
+    speedup_percent: u8,
 ) Error!void {
-    const wall = end.time_us - base.time_us;
-    const injected_delay = (end.vclock - base.vclock) * delay_per_tick;
-    if (injected_delay >= wall) return Error.DelayExceedsWindow;
+    this.pin.assertCurrent();
 
-    const progress_delta: f32 = @floatFromInt(end.progress -% base.progress);
-    const virtual_time: f32 = @floatFromInt(wall - injected_delay);
-
-    try this.disk_writer.push(payload.records.Throughput{
+    try this.queue.putOne(io, .{
         .relative_ip = relative_ip,
-        .throughput = progress_delta / virtual_time,
-        .speedup_percent = @truncate(speedup_percent),
+        .progress_delta = progress_delta,
+        .time_delta_us = @intCast(time_delta.toMicroseconds()),
+        .injected_us = injected_us,
+        .speedup_percent = speedup_percent,
     });
+}
+
+fn writeLoop(this: *ExperimentRecorder, io: std.Io) WriteError!void {
+    while (this.queue.getUncancelable(io, &this.batch, this.batch.len)) |len| {
+        try serialization.writeBatch(&this.file_writer.interface, records_header, std.mem.sliceAsBytes(this.batch[0..len]));
+    } else |_| {}
 }

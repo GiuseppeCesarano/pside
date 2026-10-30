@@ -59,9 +59,11 @@
 //   skip the remaining (record_size - sizeof(your_struct)) bytes of each record.
 //   A reader that does not understand `kind` skips the whole frame via `len`.
 //
-// #### kind = 0  throughput record (payload.records.Throughput, record_size = 16)
+// #### kind = 0  throughput record (payload.records.Throughput, record_size = 32)
 //     relative_ip      u64    sample instruction pointer minus the vma base
-//     throughput       f32    progress / virtual-time for this experiment
+//     progress_delta   u64    progress points counted during the experiment
+//     time_delta_us    u64    wall-clock length of the experiment
+//     injected_us      u32    delay injected during it, virtual time = time_delta_us - injected_us
 //     speedup_percent  u8     virtual speedup applied (0..100, step 5)
 //     _                [3]u8  padding, zero
 //
@@ -99,11 +101,9 @@ pub const Header = extern struct {
     };
 
     pub const Hash = [32]u8;
-
     pub const ReadError = error{NotAPsideFile};
-
     pub const magic_value: [8]u8 = "pside\x00\x00\x00".*;
-    pub const current_version: Version = .{ .major = 0, .minor = 2 };
+    pub const current_version: Version = .{ .major = 1, .minor = 0 };
 
     pub fn init(binary_hash: Hash) Header {
         return .{
@@ -223,7 +223,9 @@ pub const payload = struct {
 
         pub const Throughput = extern struct {
             relative_ip: u64,
-            throughput: f32,
+            progress_delta: u64,
+            time_delta_us: u64,
+            injected_us: u32,
             speedup_percent: u8,
             _: [3]u8 = @splat(0),
         };
@@ -272,7 +274,7 @@ pub const payload = struct {
     }
 };
 
-fn writeBatch(w: *std.Io.Writer, header: payload.records.Header, body: []const u8) std.Io.Writer.Error!void {
+pub fn writeBatch(w: *std.Io.Writer, header: payload.records.Header, body: []const u8) std.Io.Writer.Error!void {
     const frame_header: payload.Header = .{
         .tag = .records,
         .len = @intCast(@sizeOf(payload.records.Header) + body.len),
@@ -382,8 +384,8 @@ test "an odd length body is padded with zeros and the walk steps over them" {
 
 test "a throughput batch round trips with its kind and vma" {
     const samples = [_]payload.records.Throughput{
-        .{ .relative_ip = 0x6b8, .throughput = 0.5, .speedup_percent = 0 },
-        .{ .relative_ip = 0x6b4, .throughput = 0.25, .speedup_percent = 45 },
+        .{ .relative_ip = 0x6b8, .progress_delta = 50, .time_delta_us = 100, .injected_us = 0, .speedup_percent = 0 },
+        .{ .relative_ip = 0x6b4, .progress_delta = 25, .time_delta_us = 100, .injected_us = 45, .speedup_percent = 45 },
     };
 
     var buffer: [512]u8 = undefined;
@@ -405,7 +407,7 @@ test "a throughput batch round trips with its kind and vma" {
         const actual = read_samples.next().?;
 
         try std.testing.expectEqual(expected.relative_ip, actual.relative_ip);
-        try std.testing.expectEqual(expected.throughput, actual.throughput);
+        try std.testing.expectEqual(expected.progress_delta, actual.progress_delta);
         try std.testing.expectEqual(expected.speedup_percent, actual.speedup_percent);
     }
 
@@ -420,8 +422,8 @@ test "a record grown by a later writer is still readable, a shrunk one is refuse
     };
 
     const wide = [_]Wide{
-        .{ .base = .{ .relative_ip = 0x10, .throughput = 1.0, .speedup_percent = 5 }, .added = 0xfeed },
-        .{ .base = .{ .relative_ip = 0x20, .throughput = 2.0, .speedup_percent = 10 }, .added = 0xbeef },
+        .{ .base = .{ .relative_ip = 0x10, .progress_delta = 10, .time_delta_us = 10, .injected_us = 0, .speedup_percent = 5 }, .added = 0xfeed },
+        .{ .base = .{ .relative_ip = 0x20, .progress_delta = 20, .time_delta_us = 10, .injected_us = 1, .speedup_percent = 10 }, .added = 0xbeef },
     };
 
     var buffer: [512]u8 = undefined;

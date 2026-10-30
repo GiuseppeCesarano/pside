@@ -1,19 +1,15 @@
 const std = @import("std");
 
 const kernel = @import("kernel");
-const allocator = kernel.heap.allocator;
+pub const Range = kernel.VmaRange;
 
 const VmaRanges = @This();
-
-pub const Range = kernel.vma.Range;
-
 entries: []Range,
 
 pub const empty: VmaRanges = .{ .entries = &.{} };
-
 pub const SnapshotError = error{NoMatchingVma} || std.mem.Allocator.Error;
 
-pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) SnapshotError!VmaRanges {
+pub fn snapshot(allocator: std.mem.Allocator, task: *kernel.Task, filter: [:0]const u8) SnapshotError!VmaRanges {
     const filter_z: ?[*:0]const u8 = if (filter.len > 0) filter.ptr else null;
 
     var capacity: usize = 32;
@@ -35,7 +31,7 @@ pub fn snapshot(task: *kernel.Task, filter: [:0]const u8) SnapshotError!VmaRange
     }
 }
 
-pub fn deinit(this: VmaRanges) void {
+pub fn deinit(this: VmaRanges, allocator: std.mem.Allocator) void {
     if (this.entries.len != 0)
         allocator.free(this.entries);
 }

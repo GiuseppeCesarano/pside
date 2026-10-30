@@ -3,7 +3,6 @@
 const std = @import("std");
 const linux = std.os.linux;
 
-const kernel = @import("kernel");
 const safety = @import("safety");
 
 const ExperimentPlanner = @import("ExperimentPlanner.zig");
@@ -18,44 +17,44 @@ planner: ExperimentPlanner,
 recorder: ExperimentRecorder,
 runner: ExperimentRunner,
 
-profiler_thread: ?*kernel.Thread,
+profiler: ?std.Io.Future(LoopError!void),
 state: safety.State(Session),
 pin: safety.Pinned,
 
 const Session = enum { idle, attached, profiling };
+const LoopError = std.Io.Cancelable || ExperimentRunner.Error || ExperimentRecorder.Error;
+const clock: std.Io.Clock = .boot;
 
-const progress_grow_threshold = 5;
-const progress_decay_threshold = progress_grow_threshold * 4;
-
-pub fn init(progress_ptr: *std.atomic.Value(usize)) !Engine {
+pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, progress_ptr: *std.atomic.Value(usize)) !Engine {
     return .{
         .progress = progress_ptr,
 
         .planner = .init(0),
         .recorder = .empty,
-        .runner = try .init(),
+        .runner = try .init(allocator, atomic_allocator),
 
-        .profiler_thread = null,
+        .profiler = null,
         .state = .init(.idle),
         .pin = .unbound,
     };
 }
 
-pub fn deinit(this: *Engine) void {
+pub fn deinit(this: *Engine, io: std.Io) void {
     this.pin.assertCurrentIfBound();
-    if (this.profiler_thread) |t| _ = t.stop();
+    if (this.profiler) |*profiler| profiler.cancel(io) catch {};
     this.runner.deinit();
-    this.recorder.deinit();
+    this.recorder.deinit(io);
 
     this.* = undefined;
 }
 
 pub fn isProfiling(this: *const Engine) bool {
-    return this.profiler_thread != null;
+    return this.profiler != null;
 }
 
 pub fn attach(
     this: *Engine,
+    io: std.Io,
     pid: linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
@@ -63,82 +62,46 @@ pub fn attach(
     this.state.assertEql(.idle);
 
     this.planner = .init(@intCast(pid));
-    try this.runner.profilePid(pid, vma_name, attribute_kernel_samples);
+    try this.runner.profilePid(io, pid, vma_name, attribute_kernel_samples);
 
     this.state.transition(.attached);
 }
 
-pub fn start(this: *Engine, fd: linux.fd_t) !void {
+pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
     this.state.assertEql(.attached);
 
-    try this.recorder.start(fd);
+    try this.recorder.start(io, fd);
+    errdefer this.recorder.stop(io);
+
     this.pin.bind();
-    this.profiler_thread = try kernel.Thread.run(profilingLoop, this, "pside_loop");
+    this.profiler = try io.concurrent(profilingLoop, .{ this, io });
 
     this.state.transition(.profiling);
 }
 
-fn profilingLoop(ctx: ?*anyopaque) callconv(.c) c_int {
-    const this: *Engine = @ptrCast(@alignCast(ctx));
+fn profilingLoop(this: *Engine, io: std.Io) LoopError!void {
+    while (io.checkCancel()) {
+        const experiment = this.planner.nextExperiment();
 
-    while (!kernel.Thread.shouldStop() and !this.runner.hasErrored()) {
-        const experiment = this.planner.nextExperiment(ExperimentRunner.sampler_frequency);
-        this.runner.beginExperiment(experiment.delay_per_tick);
+        const base_progress = this.progress.load(.monotonic);
+        const base_time: std.Io.Timestamp = .now(io, clock);
+        this.runner.beginExperiment(experiment.speedup_percent);
 
-        const base = this.takeReading();
-        const enough_progress = this.runExperimentWindow(experiment.duration, base.progress);
+        const slept = io.sleep(experiment.duration, clock);
+        const outcome = try this.runner.endExperiment();
+        try slept;
 
-        const relative_ip = this.runner.capturedRelativeIp();
-        const should_stop = kernel.Thread.shouldStop() or this.runner.hasErrored();
+        const progress_delta = this.progress.load(.monotonic) -% base_progress;
+        const time_delta = base_time.untilNow(io, clock);
+        this.planner.adjustDuration(progress_delta);
 
-        if (enough_progress and !should_stop and relative_ip != null) {
-            this.runner.delayEveryoneLagging();
-            this.record(base, relative_ip.?, experiment);
-        }
-
-        this.runner.endExperiment();
-    }
-
-    return 0;
-}
-
-fn runExperimentWindow(this: *Engine, experiment_duration: usize, baseline_progress: usize) bool {
-    var progress_delta: usize = 0;
-    var duration = experiment_duration;
-    var extension: usize = 0;
-    while (extension < 8) : (extension += 1) {
-        kernel.time.sleep.us(duration);
-        progress_delta = this.progress.load(.monotonic) -% baseline_progress;
-
-        if (progress_delta >= progress_grow_threshold or kernel.Thread.shouldStop()) break;
-        duration = this.planner.extendExperimentDuration();
-    } else return false;
-
-    if (progress_delta > progress_decay_threshold)
-        this.planner.reduceExperimentDuration();
-
-    return true;
-}
-
-fn record(this: *Engine, base: ExperimentRecorder.Reading, relative_ip: usize, experiment: ExperimentPlanner.Experiment) void {
-    const end = this.takeReading();
-
-    this.recorder.recordThroughput(
-        base,
-        end,
-        experiment.delay_per_tick,
-        relative_ip,
-        experiment.speedup_percent,
-    ) catch |err| switch (err) {
-        ExperimentRecorder.Error.Full => std.log.warn("Writer buffer full, dropping sample", .{}),
-        ExperimentRecorder.Error.DelayExceedsWindow => std.log.warn("Injected delay outran the window, dropping experiment", .{}),
-    };
-}
-
-fn takeReading(this: *const Engine) ExperimentRecorder.Reading {
-    return .{
-        .progress = this.progress.load(.monotonic),
-        .vclock = this.runner.getMasterClock(),
-        .time_us = kernel.time.now.us(),
-    };
+        if (outcome) |o| try this.recorder.recordThroughput(
+            io,
+            o.relative_ip,
+            progress_delta,
+            time_delta,
+            o.injected_us,
+            experiment.speedup_percent,
+        );
+    } else |_| return std.Io.Cancelable.Canceled;
 }

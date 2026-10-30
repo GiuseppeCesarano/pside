@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const cli = @import("cli");
-const record = @import("record").record;
 const driver = @import("driver").driver;
+const record = @import("record").record;
 const report = @import("report").report;
 
 pub fn main(init: std.process.Init) !void {

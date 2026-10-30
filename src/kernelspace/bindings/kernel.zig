@@ -5,6 +5,9 @@ const std = @import("std");
 const linux = std.os.linux;
 const arch = @import("builtin").cpu.arch;
 
+pub const Io = @import("Io.zig");
+pub const io = Io.debug_io;
+
 const is_target_kernel = @import("builtin").code_model == .kernel;
 //TODO: keep an eye on the std lib; they may implement that.
 pub const PtRegs = switch (arch) {
@@ -68,25 +71,19 @@ pub const PtRegs = switch (arch) {
     else => @compileError("Unsupported arch"),
 };
 
-pub const mem = struct {
-    extern fn c_copy_to_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyBytesToUser(to: *anyopaque, from: []const u8) usize {
-        return c_copy_to_user(to, from.ptr, from.len);
-    }
-
-    extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
-    pub fn copyBytesFromUser(to: []u8, from: []const u8) []const u8 {
-        const len = @min(to.len, from.len);
-        return to[0 .. len - c_copy_from_user(to.ptr, from.ptr, len)];
-    }
-};
+extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
+pub fn copyFromUser(to: []u8, from: []const u8) []const u8 {
+    const len = @min(to.len, from.len);
+    return to[0 .. len - c_copy_from_user(to.ptr, from.ptr, len)];
+}
 
 pub const heap = struct {
-    pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque) type {
-        return struct {
-            extern fn c_kfree(*anyopaque) void;
-            const cfree = if (is_target_kernel) c_kfree else std.c.free;
+    const Context = enum { sleepable, atomic, any };
 
+    pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque, allocation_context: Context) type {
+        return struct {
+            extern fn kfree(*anyopaque) void;
+            const cfree = if (is_target_kernel) kfree else std.c.free;
             const Metadata = u16;
 
             const vtable: std.mem.Allocator.VTable = .{
@@ -97,6 +94,7 @@ pub const heap = struct {
             };
 
             fn alloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
+                assertContext();
                 std.debug.assert(len > 0);
                 const alignment_bytes = alignment.toByteUnits();
                 std.debug.assert(alignment_bytes < std.math.maxInt(Metadata));
@@ -141,24 +139,49 @@ pub const heap = struct {
 
                 cfree(@ptrCast(buf_ptr - skipped_bytes));
             }
+
+            fn assertContext() void {
+                if (!is_target_kernel) return;
+
+                switch (allocation_context) {
+                    .sleepable => assertSleepable(),
+                    .atomic => std.debug.assert(!preemptible()),
+                    .any => {},
+                }
+            }
         };
     }
 
-    extern fn c_kmalloc(c_ulong) ?*anyopaque;
+    extern const c_gfp_kernel: c_uint;
+    extern const c_gfp_atomic: c_uint;
+    extern fn c_kmalloc(c_ulong, c_uint) ?*anyopaque;
+
+    fn kmallocGfpKernel(size: c_ulong) callconv(.c) ?*anyopaque {
+        return c_kmalloc(size, c_gfp_kernel);
+    }
+
+    fn kmallocGfpAtomic(size: c_ulong) callconv(.c) ?*anyopaque {
+        return c_kmalloc(size, c_gfp_atomic);
+    }
+
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(if (is_target_kernel) c_kmalloc else std.c.malloc).vtable,
+        .vtable = &KAllocator(if (is_target_kernel) kmallocGfpKernel else std.c.malloc, .sleepable).vtable,
     };
 
-    extern fn c_kmalloc_atomic(c_ulong) ?*anyopaque;
     pub const atomic_allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(c_kmalloc_atomic).vtable,
+        .vtable = &KAllocator(kmallocGfpAtomic, .atomic).vtable,
+    };
+
+    const any_context_allocator: std.mem.Allocator = .{
+        .ptr = undefined,
+        .vtable = &KAllocator(kmallocGfpAtomic, .any).vtable,
     };
 };
 
 //TODO: redo
-pub const PrintkWriter = struct {
+const PrintkWriter = struct {
     pub const line_capacity = 1024;
 
     level: std.log.Level,
@@ -214,13 +237,10 @@ pub fn logWithName(comptime module_name: []const u8) fn (comptime std.log.Level,
     }.log;
 }
 
-pub const Io = @import("Io.zig");
-pub const io = Io.io;
-
 // TODO REDO
 pub const debug = struct {
     pub fn getDebugInfoAllocator() std.mem.Allocator {
-        return heap.atomic_allocator;
+        return heap.any_context_allocator;
     }
 
     pub const PrintLineError = error{SourceUnavailable};
@@ -240,8 +260,8 @@ pub const debug = struct {
         pub const can_unwind = true;
 
         extern fn c_ksym_symbol_len() usize;
-        extern fn c_sprint_symbol([*]u8, usize) usize;
-        extern fn c_stack_trace_save([*]usize, c_uint, c_uint) c_uint;
+        extern fn sprint_symbol([*]u8, c_ulong) c_int;
+        extern fn stack_trace_save([*]usize, c_uint, c_uint) c_uint;
 
         pub const UnwindContext = struct {
             pc: usize,
@@ -253,7 +273,7 @@ pub const debug = struct {
 
             pub fn init(_: *const std.debug.cpu_context.Native) UnwindContext {
                 var context: UnwindContext = .{ .pc = 0, .addresses = undefined, .len = 0, .next = 0 };
-                context.len = c_stack_trace_save(&context.addresses, max_frames, 0);
+                context.len = stack_trace_save(&context.addresses, max_frames, 0);
                 return context;
             }
 
@@ -284,7 +304,7 @@ pub const debug = struct {
             symbols: *std.ArrayList(std.debug.Symbol),
         ) std.debug.SelfInfoError!void {
             const buffer = try text_arena.alloc(u8, c_ksym_symbol_len());
-            const text = buffer[0..c_sprint_symbol(buffer.ptr, address)];
+            const text = buffer[0..@intCast(sprint_symbol(buffer.ptr, address))];
 
             const name, const module = if (std.mem.lastIndexOf(u8, text, " [")) |bracket|
                 .{ text[0..bracket], std.mem.trimEnd(u8, text[bracket + 2 ..], "]") }
@@ -308,92 +328,41 @@ pub const debug = struct {
     };
 };
 
-pub const time = struct {
-    pub const delay = struct {
-        extern fn c_ndelay(c_ulong) void;
-        pub fn ns(nsec: usize) void {
-            if (nsec == 0) return;
-
-            c_ndelay(@intCast(@mod(nsec, 1000)));
-            us(@divFloor(nsec, 1000));
-        }
-
-        extern fn c_udelay(c_ulong) void;
-        pub fn us(usec: usize) void {
-            if (usec == 0) return;
-
-            c_udelay(@intCast(@mod(usec, 1000)));
-            ms(@divFloor(usec, 1000));
-        }
-
-        extern fn c_mdelay(c_ulong) void;
-        pub fn ms(msec: usize) void {
-            if (msec != 0) c_mdelay(@intCast(msec));
-        }
-    };
-
-    pub const now = struct {
-        extern fn c_ktime_get_ns() u64;
-        pub fn ns() u64 {
-            return c_ktime_get_ns();
-        }
-
-        pub fn us() u64 {
-            return @divTrunc(ns(), 1000);
-        }
-
-        pub fn ms() u64 {
-            return @divTrunc(us(), 1000);
-        }
-
-        pub fn s() u64 {
-            return @divTrunc(ms(), 1000);
-        }
-    };
-
-    pub const sleep = struct {
-        extern fn c_sleep(usize) void;
-        pub inline fn us(usec: usize) void {
-            if (usec > 5)
-                c_sleep(usec)
-            else
-                delay.us(usec);
-        }
-    };
-};
-
 fn cErrno(rc: c_int) linux.E {
     return linux.errno(@as(usize, @bitCast(@as(isize, rc))));
 }
 
 pub const Task = opaque {
-    extern fn c_current_task() *Task;
+    const Pid = opaque {};
+    const PidType = enum(c_int) { pid, tgid, pgid, sid };
+
+    extern fn c_get_current() *Task;
     pub fn current() *Task {
-        return c_current_task();
+        return c_get_current();
     }
 
-    extern fn c_get_task_from_tid(linux.pid_t) ?*Task;
+    extern fn wake_up_process(*Task) c_int;
+    pub fn wakeUp(this: *Task) c_int {
+        return wake_up_process(this);
+    }
+
+    extern fn find_get_pid(linux.pid_t) ?*Pid;
+    extern fn get_pid_task(*Pid, PidType) ?*Task;
+    extern fn put_pid(*Pid) void;
     pub fn fromTid(t: linux.pid_t) ?*Task {
-        return c_get_task_from_tid(t);
+        const pid_struct = find_get_pid(t) orelse return null;
+        defer put_pid(pid_struct);
+        return get_pid_task(pid_struct, .pid);
     }
 
-    extern fn c_task_work_resolve() c_int;
-    pub fn resolveAddWork() WorkAddError!void {
-        return switch (cErrno(c_task_work_resolve())) {
-            .SUCCESS => {},
-            .NOSYS => WorkAddError.KprobeLeakFailed,
-            else => WorkAddError.Unknown,
-        };
+    extern fn c_task_tgid_nr(*Task) linux.pid_t;
+    pub fn tgidNr(this: *Task) linux.pid_t {
+        return c_task_tgid_nr(this);
     }
 
-    extern fn c_pid(*Task) linux.pid_t;
-    pub fn pid(this: *Task) linux.pid_t {
-        return c_pid(this);
-    }
-
-    extern fn c_task_thread_count(*Task) c_int;
-    pub fn threadCount(this: *Task) usize {
-        return @intCast(c_task_thread_count(this));
+    extern fn c_get_nr_threads(*Task) c_int;
+    pub fn nrThreads(this: *Task) c_int {
+        return c_get_nr_threads(this);
     }
 
     extern fn c_task_is_running(*Task) c_int;
@@ -406,14 +375,7 @@ pub const Task = opaque {
         return c_task_is_dead(this) != 0;
     }
 
-    pub const Work = extern struct {
-        next: ?*Work align(@alignOf(usize)),
-        func: Callback,
-
-        pub const Callback = *const fn (*Work) callconv(.c) void;
-    };
-
-    pub const NotifyMode = enum(c_int) {
+    pub const WorkNotifyMode = enum(c_int) {
         none = 0,
         @"resume",
         signal,
@@ -428,9 +390,18 @@ pub const Task = opaque {
         Unknown,
     };
 
-    extern fn c_task_work_add(*Task, *Work, NotifyMode) c_int;
-    pub fn addWork(this: *Task, work: *Work, notify_mode: NotifyMode) WorkAddError!void {
-        return switch (cErrno(c_task_work_add(this, work, notify_mode))) {
+    extern fn c_task_work_resolve() c_int;
+    pub fn resolveWorkAdd() WorkAddError!void {
+        return switch (cErrno(c_task_work_resolve())) {
+            .SUCCESS => {},
+            .NOSYS => WorkAddError.KprobeLeakFailed,
+            else => WorkAddError.Unknown,
+        };
+    }
+
+    extern fn c_task_work_add(*Task, *CallbackHead, WorkNotifyMode) c_int;
+    pub fn workAdd(this: *Task, work: *CallbackHead, notify: WorkNotifyMode) WorkAddError!void {
+        return switch (cErrno(c_task_work_add(this, work, notify))) {
             .SUCCESS => {},
             .NOSYS => WorkAddError.KprobeLeakFailed,
             .INVAL => WorkAddError.BadConfig,
@@ -439,50 +410,41 @@ pub const Task = opaque {
         };
     }
 
-    extern fn c_snapshot_executable_vmas(*Task, ?[*:0]const u8, [*]vma.Range, c_int) c_int;
-    pub fn snapshotExecutableVmas(this: *Task, filter: ?[*:0]const u8, buffer: []vma.Range) usize {
+    extern fn c_snapshot_executable_vmas(*Task, ?[*:0]const u8, [*]VmaRange, c_int) c_int;
+    pub fn snapshotExecutableVmas(this: *Task, filter: ?[*:0]const u8, buffer: []VmaRange) usize {
         return @intCast(c_snapshot_executable_vmas(this, filter, buffer.ptr, @intCast(buffer.len)));
     }
 
     extern fn c_get_task_struct(*Task) void;
-    pub fn incrementReferences(this: *Task) void {
+    pub fn get(this: *Task) void {
         c_get_task_struct(this);
     }
 
     extern fn c_put_task_struct(*Task) void;
-    pub fn decrementReferences(this: *Task) void {
+    pub fn put(this: *Task) void {
         c_put_task_struct(this);
     }
 };
 
-pub const rcu = struct {
-    pub const read = struct {
-        extern fn c_rcu_read_lock() void;
-        pub fn lock() void {
-            c_rcu_read_lock();
-        }
+pub const CallbackHead = extern struct {
+    next: ?*CallbackHead align(@alignOf(usize)),
+    func: Func,
 
-        extern fn c_rcu_read_unlock() void;
-        pub fn unlock() void {
-            c_rcu_read_unlock();
-        }
-    };
+    pub const Func = *const fn (*CallbackHead) callconv(.c) void;
 };
 
-pub const vma = struct {
-    pub const Range = extern struct {
-        begin: usize,
-        end: usize,
+pub const VmaRange = extern struct {
+    begin: usize,
+    end: usize,
 
-        pub fn contains(this: Range, ip: usize) bool {
-            return ip -% this.begin < this.end - this.begin;
-        }
-    };
+    pub fn contains(this: VmaRange, ip: usize) bool {
+        return ip -% this.begin < this.end - this.begin;
+    }
 };
 
-pub const CharDevice = extern struct {
-    _: [512]u8 = undefined,
-    pub const IoctlHandler = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
+pub const Chardev = extern struct {
+    _: [512]u8 align(8) = undefined,
+    pub const IoctlFn = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
 
     pub const RegisterError = error{
         OutOfMemory,
@@ -490,9 +452,9 @@ pub const CharDevice = extern struct {
         Unexpected,
     };
 
-    extern fn c_chardev_register(*CharDevice, [*:0]const u8, IoctlHandler) c_int;
-    pub fn create(this: *CharDevice, file_name: [:0]const u8, handler: IoctlHandler) RegisterError!void {
-        return switch (cErrno(c_chardev_register(this, file_name.ptr, handler))) {
+    extern fn c_chardev_register(*Chardev, [*:0]const u8, IoctlFn) c_int;
+    pub fn register(this: *Chardev, name: [:0]const u8, ioctl: IoctlFn) RegisterError!void {
+        return switch (cErrno(c_chardev_register(this, name.ptr, ioctl))) {
             .SUCCESS => {},
             .NOMEM => RegisterError.OutOfMemory,
             .BUSY => RegisterError.Busy,
@@ -500,16 +462,63 @@ pub const CharDevice = extern struct {
         };
     }
 
-    extern fn c_chardev_unregister(*CharDevice) void;
-    pub fn remove(this: *CharDevice) void {
+    extern fn c_chardev_unregister(*Chardev) void;
+    pub fn unregister(this: *Chardev) void {
         c_chardev_unregister(this);
     }
 };
 
-pub const PerfEvent = opaque {
-    const PerfOverflowHandler = *const fn (*PerfEvent, *anyopaque, *PtRegs) callconv(.c) void;
+pub const File = opaque {
+    extern fn c_session_progress_page(*File) *anyopaque;
+    pub fn sessionProgressPage(this: *File) *std.atomic.Value(usize) {
+        return @ptrCast(@alignCast(c_session_progress_page(this)));
+    }
 
-    pub const InitError = error{
+    extern fn c_session_get_engine(*File) ?*anyopaque;
+    pub fn sessionGetEngine(this: *File) ?*anyopaque {
+        return c_session_get_engine(this);
+    }
+
+    extern fn c_session_set_engine(*File, ?*anyopaque) void;
+    pub fn sessionSetEngine(this: *File, engine: ?*anyopaque) void {
+        c_session_set_engine(this, engine);
+    }
+
+    extern fn c_session_lock(*File) void;
+    pub fn sessionLock(this: *File) void {
+        c_session_lock(this);
+    }
+
+    extern fn c_session_unlock(*File) void;
+    pub fn sessionUnlock(this: *File) void {
+        c_session_unlock(this);
+    }
+};
+
+pub const PerfOverflowHandler = *const fn (*PerfEvent, *anyopaque, *PtRegs) callconv(.c) void;
+
+pub const PerfEvent = opaque {
+    extern fn perf_event_release_kernel(*PerfEvent) c_int;
+    pub fn releaseKernel(this: *PerfEvent) c_int {
+        return perf_event_release_kernel(this);
+    }
+
+    extern fn perf_event_enable(*PerfEvent) void;
+    pub fn enable(this: *PerfEvent) void {
+        perf_event_enable(this);
+    }
+
+    extern fn perf_event_disable(*PerfEvent) void;
+    pub fn disable(this: *PerfEvent) void {
+        perf_event_disable(this);
+    }
+
+    extern fn c_perf_event_overflow_handler_context(*PerfEvent) ?*anyopaque;
+    pub fn overflowHandlerContext(this: *PerfEvent) ?*anyopaque {
+        return c_perf_event_overflow_handler_context(this);
+    }
+
+    pub const CreateKernelCounterError = error{
         InvalidConfiguration,
         TaskNotFound,
         CpuOffline,
@@ -521,188 +530,143 @@ pub const PerfEvent = opaque {
         Unexpected,
     };
 
-    extern fn c_perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, linux.pid_t, PerfOverflowHandler, ?*anyopaque) usize;
-    pub fn init(attr: *linux.perf_event_attr, cpu: c_int, pid: linux.pid_t, callback: PerfOverflowHandler, cntxt: ?*anyopaque) InitError!*PerfEvent {
-        const rc = c_perf_event_create_kernel_counter(attr, cpu, pid, callback, cntxt);
+    extern fn perf_event_create_kernel_counter(*linux.perf_event_attr, c_int, ?*Task, PerfOverflowHandler, ?*anyopaque) usize;
+    pub fn createKernelCounter(
+        attr: *linux.perf_event_attr,
+        cpu: c_int,
+        task: ?*Task,
+        overflow_handler: PerfOverflowHandler,
+        context: ?*anyopaque,
+    ) CreateKernelCounterError!*PerfEvent {
+        const rc = perf_event_create_kernel_counter(attr, cpu, task, overflow_handler, context);
         return switch (linux.errno(rc)) {
             .SUCCESS => @ptrFromInt(rc),
-            .INVAL => InitError.InvalidConfiguration,
-            .SRCH => InitError.TaskNotFound,
-            .NODEV => InitError.CpuOffline,
-            .BUSY => InitError.HardwareBusy,
-            .OPNOTSUPP => InitError.NotSupported,
-            .NOMEM => InitError.OutOfMemory,
-            .NOENT => InitError.HardwareNotFound,
-            .@"2BIG" => InitError.InvalidAttributeSize,
-            else => InitError.Unexpected,
+            .INVAL => CreateKernelCounterError.InvalidConfiguration,
+            .SRCH => CreateKernelCounterError.TaskNotFound,
+            .NODEV => CreateKernelCounterError.CpuOffline,
+            .BUSY => CreateKernelCounterError.HardwareBusy,
+            .OPNOTSUPP => CreateKernelCounterError.NotSupported,
+            .NOMEM => CreateKernelCounterError.OutOfMemory,
+            .NOENT => CreateKernelCounterError.HardwareNotFound,
+            .@"2BIG" => CreateKernelCounterError.InvalidAttributeSize,
+            else => CreateKernelCounterError.Unexpected,
         };
-    }
-
-    extern fn c_perf_event_release_kernel(*PerfEvent) c_int;
-    pub fn deinit(this: ?*PerfEvent) void {
-        if (this) |t| _ = c_perf_event_release_kernel(t);
-    }
-
-    extern fn c_perf_event_enable(*PerfEvent) void;
-    pub fn enable(this: *PerfEvent) void {
-        c_perf_event_enable(this);
-    }
-
-    extern fn c_perf_event_disable(*PerfEvent) void;
-    pub fn disable(this: *PerfEvent) void {
-        c_perf_event_disable(this);
-    }
-
-    extern fn c_perf_event_context(*PerfEvent) ?*anyopaque;
-    pub fn context(this: *PerfEvent) ?*anyopaque {
-        return c_perf_event_context(this);
-    }
-};
-
-pub const Thread = opaque {
-    pub const Handler = *const fn (?*anyopaque) callconv(.c) c_int;
-
-    pub const SpawnError = error{
-        OutOfMemory,
-        Interrupted,
-        Unexpected,
-    };
-
-    extern fn c_kthread_run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) usize;
-    pub fn run(thread_handler: Handler, data: ?*anyopaque, name: [*:0]const u8) SpawnError!*Thread {
-        const rc = c_kthread_run(thread_handler, data, name);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => @ptrFromInt(rc),
-            .NOMEM => SpawnError.OutOfMemory,
-            .INTR => SpawnError.Interrupted,
-            else => SpawnError.Unexpected,
-        };
-    }
-
-    extern fn c_kthread_stop(*Thread) c_int;
-    pub fn stop(this: *Thread) c_int {
-        return c_kthread_stop(this);
-    }
-
-    extern fn c_kthread_should_stop() bool;
-    pub fn shouldStop() bool {
-        return c_kthread_should_stop();
     }
 };
 
 pub const tracepoint = struct {
     extern fn c_tracepoint_init() void;
-    extern fn c_tracepoint_sync() void;
-
     pub fn init() void {
         c_tracepoint_init();
     }
 
-    pub fn sync() void {
-        c_tracepoint_sync();
-    }
-
-    pub const RegistrationError = error{
-        Failed,
-    };
-
-    pub const sched = struct {
-        pub const waking = struct {
-            pub const Callback = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
-
-            extern fn c_register_sched_waking(probe: Callback, data: ?*anyopaque) c_int;
-            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
-                if (c_register_sched_waking(trace, data) != 0) return RegistrationError.Failed;
-            }
-
-            extern fn c_unregister_sched_waking(probe: Callback, data: ?*anyopaque) void;
-            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-                c_unregister_sched_waking(trace, data);
-            }
-        };
-
-        pub const @"switch" = struct {
-            pub const Callback = *const fn (data: ?*anyopaque, preempt: bool, prev: *Task, next: *Task) callconv(.c) void;
-
-            extern fn c_register_sched_switch(probe: Callback, data: ?*anyopaque) c_int;
-            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
-                if (c_register_sched_switch(trace, data) != 0) return RegistrationError.Failed;
-            }
-
-            extern fn c_unregister_sched_switch(probe: Callback, data: ?*anyopaque) void;
-            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-                c_unregister_sched_switch(trace, data);
-            }
-        };
-
-        pub const process_exit = struct {
-            pub const Callback = *const fn (data: ?*anyopaque, task: *Task, group_dead: bool) callconv(.c) void;
-
-            extern fn c_register_sched_process_exit(probe: Callback, data: ?*anyopaque) c_int;
-            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
-                if (c_register_sched_process_exit(trace, data) != 0) return RegistrationError.Failed;
-            }
-
-            extern fn c_unregister_sched_process_exit(probe: Callback, data: ?*anyopaque) void;
-            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-                c_unregister_sched_process_exit(trace, data);
-            }
-        };
-    };
-
-    pub const task = struct {
-        pub const newtask = struct {
-            pub const Callback = *const fn (data: ?*anyopaque, task: *Task, clone_flags: c_ulong) callconv(.c) void;
-
-            extern fn c_register_task_newtask(probe: Callback, data: ?*anyopaque) c_int;
-            pub fn register(trace: Callback, data: ?*anyopaque) RegistrationError!void {
-                if (c_register_task_newtask(trace, data) != 0) return RegistrationError.Failed;
-            }
-
-            extern fn c_unregister_task_newtask(probe: Callback, data: ?*anyopaque) void;
-            pub fn unregister(trace: Callback, data: ?*anyopaque) void {
-                c_unregister_task_newtask(trace, data);
-            }
-        };
-    };
-};
-
-pub const execution = struct {
-    extern fn c_in_task() c_int;
-
-    /// True when running in process context (not hardirq/softirq/NMI).
-    pub fn inTask() bool {
-        return c_in_task() != 0;
-    }
-
-    extern fn c_can_sleep() c_int;
-
-    pub fn canSleep() bool {
-        return c_can_sleep() != 0;
-    }
-
-    extern fn c_current_user_ip() usize;
-    extern fn c_regs_in_kernel(*PtRegs) c_int;
-    extern fn c_copy_from_user_nofault(*anyopaque, usize, usize) c_long;
-    pub fn currentUserSpaceIp(sample_regs: *PtRegs) usize {
-        const syscall_instruction = switch (@import("builtin").cpu.arch) {
-            .x86_64 => [_]u8{ 0x0f, 0x05 },
-            else => @compileError("TODO: support other archs"),
-        };
-
-        if (c_regs_in_kernel(sample_regs) == 0) return sample_regs.ip;
-
-        const ip = c_current_user_ip();
-        const call_site = ip -% syscall_instruction.len;
-        var opcode: [syscall_instruction.len]u8 = undefined;
-
-        return if (c_copy_from_user_nofault(&opcode, call_site, opcode.len) != 0 or
-            !std.mem.eql(u8, &opcode, &syscall_instruction))
-            ip
-        else
-            call_site;
+    extern fn c_tracepoint_synchronize_unregister() void;
+    pub fn synchronizeUnregister() void {
+        c_tracepoint_synchronize_unregister();
     }
 };
+
+pub const RegisterTraceError = error{Failed};
+pub const SchedWakingProbe = *const fn (data: ?*anyopaque, task: *Task) callconv(.c) void;
+pub const SchedSwitchProbe = *const fn (data: ?*anyopaque, preempt: bool, prev: *Task, next: *Task) callconv(.c) void;
+pub const SchedProcessExitProbe = *const fn (data: ?*anyopaque, task: *Task, group_dead: bool) callconv(.c) void;
+pub const TaskNewtaskProbe = *const fn (data: ?*anyopaque, task: *Task, clone_flags: c_ulong) callconv(.c) void;
+
+extern fn c_register_trace_sched_waking(SchedWakingProbe, ?*anyopaque) c_int;
+pub fn registerTraceSchedWaking(probe: SchedWakingProbe, data: ?*anyopaque) RegisterTraceError!void {
+    if (c_register_trace_sched_waking(probe, data) != 0) return RegisterTraceError.Failed;
+}
+
+extern fn c_unregister_trace_sched_waking(SchedWakingProbe, ?*anyopaque) void;
+pub fn unregisterTraceSchedWaking(probe: SchedWakingProbe, data: ?*anyopaque) void {
+    c_unregister_trace_sched_waking(probe, data);
+}
+
+extern fn c_register_trace_sched_switch(SchedSwitchProbe, ?*anyopaque) c_int;
+pub fn registerTraceSchedSwitch(probe: SchedSwitchProbe, data: ?*anyopaque) RegisterTraceError!void {
+    if (c_register_trace_sched_switch(probe, data) != 0) return RegisterTraceError.Failed;
+}
+
+extern fn c_unregister_trace_sched_switch(SchedSwitchProbe, ?*anyopaque) void;
+pub fn unregisterTraceSchedSwitch(probe: SchedSwitchProbe, data: ?*anyopaque) void {
+    c_unregister_trace_sched_switch(probe, data);
+}
+
+extern fn c_register_trace_sched_process_exit(SchedProcessExitProbe, ?*anyopaque) c_int;
+pub fn registerTraceSchedProcessExit(probe: SchedProcessExitProbe, data: ?*anyopaque) RegisterTraceError!void {
+    if (c_register_trace_sched_process_exit(probe, data) != 0) return RegisterTraceError.Failed;
+}
+
+extern fn c_unregister_trace_sched_process_exit(SchedProcessExitProbe, ?*anyopaque) void;
+pub fn unregisterTraceSchedProcessExit(probe: SchedProcessExitProbe, data: ?*anyopaque) void {
+    c_unregister_trace_sched_process_exit(probe, data);
+}
+
+extern fn c_register_trace_task_newtask(TaskNewtaskProbe, ?*anyopaque) c_int;
+pub fn registerTraceTaskNewtask(probe: TaskNewtaskProbe, data: ?*anyopaque) RegisterTraceError!void {
+    if (c_register_trace_task_newtask(probe, data) != 0) return RegisterTraceError.Failed;
+}
+
+extern fn c_unregister_trace_task_newtask(TaskNewtaskProbe, ?*anyopaque) void;
+pub fn unregisterTraceTaskNewtask(probe: TaskNewtaskProbe, data: ?*anyopaque) void {
+    c_unregister_trace_task_newtask(probe, data);
+}
+
+extern fn c_in_task() c_int;
+
+/// True when running in process context (not hardirq/softirq/NMI).
+pub fn inTask() bool {
+    return c_in_task() != 0;
+}
+
+extern fn c_preemptible() c_int;
+pub fn preemptible() bool {
+    return c_preemptible() != 0;
+}
+
+extern fn c_in_atomic() c_int;
+fn inAtomic() bool {
+    return c_in_atomic() != 0;
+}
+
+extern fn c_irqs_disabled() c_int;
+fn irqsDisabled() bool {
+    return c_irqs_disabled() != 0;
+}
+
+pub fn assertSleepable() void {
+    std.debug.assert(!inAtomic() and !irqsDisabled());
+}
+
+extern fn c_user_mode(*PtRegs) c_int;
+fn userMode(regs: *PtRegs) bool {
+    return c_user_mode(regs) != 0;
+}
+
+extern fn copy_from_user_nofault(*anyopaque, usize, usize) c_long;
+fn copyFromUserNofault(dst: []u8, src: usize) c_long {
+    return copy_from_user_nofault(dst.ptr, src, dst.len);
+}
+
+extern fn c_current_user_ip() usize;
+pub fn currentUserSpaceIp(sample_regs: *PtRegs) usize {
+    const syscall_instruction = switch (@import("builtin").cpu.arch) {
+        .x86_64 => [_]u8{ 0x0f, 0x05 },
+        else => @compileError("TODO: support other archs"),
+    };
+
+    if (userMode(sample_regs)) return sample_regs.ip;
+
+    const ip = c_current_user_ip();
+    const call_site = ip -% syscall_instruction.len;
+    var opcode: [syscall_instruction.len]u8 = undefined;
+
+    return if (copyFromUserNofault(&opcode, call_site) != 0 or
+        !std.mem.eql(u8, &opcode, &syscall_instruction))
+        ip
+    else
+        call_site;
+}
 
 pub const preempt = struct {
     extern fn c_preempt_disable() void;
@@ -714,95 +678,6 @@ pub const preempt = struct {
 
     pub inline fn enable() void {
         c_preempt_enable();
-    }
-};
-
-pub const Completion = extern struct {
-    _: [64]u8 = undefined,
-
-    extern fn c_init_completion(*Completion) void;
-    pub fn init(this: *Completion) void {
-        c_init_completion(this);
-    }
-
-    extern fn c_wait_for_completion(*Completion) void;
-    pub fn wait(this: *Completion) void {
-        c_wait_for_completion(this);
-    }
-
-    extern fn c_wait_for_completion_timeout(*Completion, c_ulong) c_ulong;
-    pub fn timedWait(this: *Completion, timeout_ms: c_ulong) bool {
-        return c_wait_for_completion_timeout(this, timeout_ms) != 0;
-    }
-
-    extern fn c_complete(*Completion) void;
-    pub fn signal(this: *Completion) void {
-        c_complete(this);
-    }
-
-    extern fn c_reinit_completion(*Completion) void;
-    pub fn reinit(this: *Completion) void {
-        c_reinit_completion(this);
-    }
-};
-
-pub const File = opaque {
-    pub const WriteError = error{WriteFailed};
-
-    extern fn c_fget(linux.fd_t) ?*File;
-    pub fn get(fd: linux.fd_t) ?*File {
-        return c_fget(fd);
-    }
-
-    extern fn c_fput(*File) void;
-    pub fn put(this: *File) void {
-        c_fput(this);
-    }
-
-    extern fn c_kernel_write(*File, [*]const u8, usize, *i64) isize;
-    pub fn write(this: *File, buf: []const u8, offset: *i64) WriteError!usize {
-        const rc = c_kernel_write(this, buf.ptr, buf.len, offset);
-        if (rc < 0) return WriteError.WriteFailed;
-        return @intCast(rc);
-    }
-
-    pub fn writeAll(this: *File, bytes: []const u8, offset: *i64) WriteError!void {
-        var written: usize = 0;
-        while (written < bytes.len) {
-            const n = try this.write(bytes[written..], offset);
-            if (n == 0) return WriteError.WriteFailed;
-            written += n;
-        }
-    }
-
-    extern fn c_file_size(*File) isize;
-    pub fn size(this: *File) isize {
-        return c_file_size(this);
-    }
-
-    extern fn c_session_progress_page(*File) *anyopaque;
-    pub fn progressPage(this: *File) *std.atomic.Value(usize) {
-        return @ptrCast(@alignCast(c_session_progress_page(this)));
-    }
-
-    extern fn c_session_get_engine(*File) ?*anyopaque;
-    pub fn getEngine(this: *File) ?*anyopaque {
-        return c_session_get_engine(this);
-    }
-
-    extern fn c_session_set_engine(*File, ?*anyopaque) void;
-    pub fn setEngine(this: *File, engine: ?*anyopaque) void {
-        c_session_set_engine(this, engine);
-    }
-
-    extern fn c_session_lock(*File) void;
-    pub fn lock(this: *File) void {
-        c_session_lock(this);
-    }
-
-    extern fn c_session_unlock(*File) void;
-    pub fn unlock(this: *File) void {
-        c_session_unlock(this);
     }
 };
 

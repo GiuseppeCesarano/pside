@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{
         .whitelist = &.{.{
             .os_tag = .linux,
-            .cpu_arch = .x86_64, // kernel.c, waiting for translate-c to support kernel modules for arm/riscv
+            .cpu_arch = .x86_64, // bindings.c, waiting for translate-c to support kernel modules for arm/riscv
         }},
     });
     const kernel_headers = try KernelHeaders.detect(b);
@@ -275,7 +275,7 @@ fn addZigObject(b: *std.Build, options: std.Build.ObjectOptions, lto: std.zig.Lt
 fn addBindingsObject(b: *std.Build, headers: KernelHeaders, options: std.Build.Module.CreateOptions, lto: std.zig.LtoMode) !std.Build.LazyPath {
     const object = addKernelObject(b, "pside_kernel_c", options);
     object.lto = lto;
-    try headers.addCSourceFile(b, object.root_module, b.path("src/kernelspace/bindings/kernel.c"), "kernel");
+    try headers.addCSourceFile(b, object.root_module, b.path("src/kernelspace/bindings/bindings.c"), "kernel");
 
     return object.getEmittedBin();
 }
@@ -297,7 +297,7 @@ fn addCompilerRtObject(b: *std.Build, options: std.Build.Module.CreateOptions) !
     const used_compiler_rt = addKernelObject(b, "compiler_rt_gc", options);
     used_compiler_rt.link_gc_sections = true;
     used_compiler_rt.root_module.addObjectFile(compiler_rt.getEmittedBin());
-    try keepSymbols(b, used_compiler_rt, &.{ "__divsf3", "__floatundisf" });
+    try keepSymbols(b, used_compiler_rt, &.{"__divti3"});
 
     return used_compiler_rt.getEmittedBin();
 }

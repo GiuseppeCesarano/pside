@@ -2,9 +2,8 @@ const std = @import("std");
 const linux = std.os.linux;
 
 const communications = @import("communications");
-const UserIds = @import("UserIds");
-
 const name = communications.name;
+const UserIds = @import("UserIds");
 
 pub const LoadError = FInitModuleError || error{
     ModuleFileUnreadable,

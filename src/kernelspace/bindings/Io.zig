@@ -1,119 +1,495 @@
 const std = @import("std");
+const Io = std.Io;
+const net = std.Io.net;
+const File = std.Io.File;
+const Dir = std.Io.Dir;
+const HostName = net.HostName;
+const IpAddress = net.IpAddress;
+const process = std.process;
+const Allocator = std.mem.Allocator;
+const Alignment = std.mem.Alignment;
+const assert = std.debug.assert;
 
+const bindings = @import("bindings.zig");
 const kernel = @import("kernel.zig");
 
-pub const io: std.Io = .{ .userdata = null, .vtable = &vtable };
+const KernelIo = @This();
 
-const vtable: std.Io.VTable = vtable: {
-    var v = std.Io.failing.vtable.*;
+allocator: Allocator,
+atomic_allocator: Allocator,
+
+lock: bindings.Spinlock,
+
+jobs: std.DoublyLinkedList,
+
+idle_workers: std.SinglyLinkedList,
+workers_count: std.atomic.Value(u32),
+stop_workers: std.atomic.Value(bool),
+stopped_workers: bindings.Completion,
+
+pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
+
+pub fn init(
+    this: *KernelIo,
+    allocator: Allocator,
+    atomic_allocator: Allocator,
+    workers_count: u32,
+) !void {
+    errdefer this.* = undefined;
+
+    this.allocator = allocator;
+    this.atomic_allocator = atomic_allocator;
+
+    this.lock.init();
+
+    this.jobs = .{};
+
+    this.idle_workers = .{};
+    this.workers_count = .init(0);
+    this.stop_workers = .init(false);
+    this.stopped_workers.init();
+
+    try this.startWorkers(workers_count);
+}
+
+fn startWorkers(this: *KernelIo, workers_count: u32) !void {
+    errdefer this.stopWorkers();
+
+    for (0..workers_count) |_| {
+        const worker = try this.allocator.create(Worker);
+        errdefer this.allocator.destroy(worker);
+
+        try worker.spawn(this, null);
+    }
+}
+
+pub fn deinit(this: *KernelIo) void {
+    this.stopWorkers();
+
+    while (this.jobs.popFirst()) |node| {
+        const future: *Future = @fieldParentPtr("node", node);
+        future.destroy(if (future.atomically_allocated) this.atomic_allocator else this.allocator);
+    }
+}
+
+fn stopWorkers(this: *KernelIo) void {
+    const flags = this.lock.lockIrqsave();
+    this.stop_workers.store(true, .monotonic);
+    while (this.idle_workers.popFirst()) |node| {
+        const worker: *Worker = @fieldParentPtr("node", node);
+        worker.waker.complete();
+    }
+    this.lock.unlockIrqrestore(flags);
+
+    for (0..this.workers_count.load(.monotonic)) |_| this.stopped_workers.wait();
+}
+
+pub fn io(this: *KernelIo) Io {
+    return .{ .userdata = this, .vtable = &vtable };
+}
+
+const vtable: Io.VTable = vtable: {
+    var v = Io.failing.vtable.*;
+    v.async = async;
+    v.concurrent = concurrent;
+    v.await = await;
+    v.cancel = cancel;
+    v.recancel = recancel;
     v.swapCancelProtection = swapCancelProtection;
-    v.lockStderr = lockStderr;
-    v.tryLockStderr = tryLockStderr;
-    v.unlockStderr = unlockStderr;
-    v.operate = operate;
+    v.checkCancel = checkCancel;
+    v.futexWait = futexWait;
     v.futexWaitUncancelable = futexWaitUncancelable;
     v.futexWake = futexWake;
+    v.now = now;
+    v.clockResolution = clockResolution;
+    v.sleep = sleep;
+    v.fileLength = fileLength;
     break :vtable v;
 };
 
-fn swapCancelProtection(_: ?*anyopaque, _: std.Io.CancelProtection) std.Io.CancelProtection {
-    return .blocked;
+fn async(
+    userdata: ?*anyopaque,
+    result: []u8,
+    result_alignment: Alignment,
+    context: []const u8,
+    context_alignment: Alignment,
+    func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) ?*Io.AnyFuture {
+    assert(!bindings.inNmi());
+    const kernel_io: *KernelIo = @ptrCast(@alignCast(userdata.?));
+
+    const atomic = !kernel.preemptible();
+    const future = Future.create(
+        if (atomic) kernel_io.atomic_allocator else kernel_io.allocator,
+        atomic,
+        result.len,
+        result_alignment,
+        context,
+        context_alignment,
+        func,
+    ) catch {
+        func(context.ptr, result.ptr);
+        return null;
+    };
+
+    const flags = kernel_io.lock.lockIrqsave();
+    defer kernel_io.lock.unlockIrqrestore(flags);
+
+    if (kernel_io.idle_workers.popFirst()) |worker_node| {
+        const worker: *Worker = @fieldParentPtr("node", worker_node);
+        future.status = .running;
+        worker.job = future;
+        worker.waker.complete();
+    } else kernel_io.jobs.append(&future.node);
+
+    return @ptrCast(future);
 }
 
-const spins_before_backoff = 8;
-const backoff_sleep_us = 10;
+fn concurrent(
+    userdata: ?*anyopaque,
+    result_len: usize,
+    result_alignment: Alignment,
+    context: []const u8,
+    context_alignment: Alignment,
+    func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+) Io.ConcurrentError!*Io.AnyFuture {
+    assert(!bindings.inNmi());
+    const kernel_io: *KernelIo = @ptrCast(@alignCast(userdata.?));
+
+    const atomic = !kernel.preemptible();
+    const allocator = if (atomic) kernel_io.atomic_allocator else kernel_io.allocator;
+
+    const future = Future.create(
+        allocator,
+        atomic,
+        result_len,
+        result_alignment,
+        context,
+        context_alignment,
+        func,
+    ) catch return Io.ConcurrentError.ConcurrencyUnavailable;
+    errdefer future.destroy(allocator);
+    future.status = .running;
+
+    const flags = kernel_io.lock.lockIrqsave();
+
+    if (kernel_io.idle_workers.popFirst()) |worker_node| {
+        const worker: *Worker = @fieldParentPtr("node", worker_node);
+        worker.job = future;
+        worker.waker.complete();
+        kernel_io.lock.unlockIrqrestore(flags);
+    } else {
+        kernel_io.lock.unlockIrqrestore(flags);
+        if (atomic) return Io.ConcurrentError.ConcurrencyUnavailable;
+        const worker = kernel_io.allocator.create(Worker) catch return Io.ConcurrentError.ConcurrencyUnavailable;
+        errdefer kernel_io.allocator.destroy(worker);
+        worker.spawn(kernel_io, future) catch return Io.ConcurrentError.ConcurrencyUnavailable;
+    }
+
+    return @ptrCast(future);
+}
+
+fn await(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, _: Alignment) void {
+    kernel.assertSleepable();
+    const kernel_io: *KernelIo = @ptrCast(@alignCast(userdata.?));
+    const future: *Future = @ptrCast(@alignCast(any_future));
+
+    const flags = kernel_io.lock.lockIrqsave();
+    const not_ran = future.status == .pending;
+    if (not_ran) {
+        kernel_io.jobs.remove(&future.node);
+        future.status = .running;
+    }
+    kernel_io.lock.unlockIrqrestore(flags);
+
+    if (not_ran) {
+        const worker = Worker.current();
+        const previous = if (worker) |w| w.job else null;
+        if (worker) |w| w.job = future;
+        future.start();
+        if (worker) |w| w.job = previous;
+    }
+    _ = future.done.waitState(.idle);
+
+    @memcpy(result, future.resultPointer());
+    const allocator = if (future.atomically_allocated) kernel_io.atomic_allocator else kernel_io.allocator;
+    future.destroy(allocator);
+}
+
+fn cancel(userdata: ?*anyopaque, any_future: *Io.AnyFuture, result: []u8, result_alignment: Alignment) void {
+    const future: *Future = @ptrCast(@alignCast(any_future));
+
+    _ = future.cancel.fetchOr(.{ .requested = true }, .seq_cst);
+    if (future.runner.load(.seq_cst)) |runner| _ = runner.wakeUp();
+
+    await(userdata, any_future, result, result_alignment);
+}
+
+fn recancel(_: ?*anyopaque) void {
+    const job = Worker.current().?.job.?;
+    const previous = job.cancel.fetchXor(.{ .requested = true, .acknowledged = true }, .monotonic);
+    assert(previous.acknowledged and !previous.requested);
+}
+
+fn swapCancelProtection(_: ?*anyopaque, new: Io.CancelProtection) Io.CancelProtection {
+    const worker = Worker.current() orelse return .blocked;
+    const job = worker.job orelse return .blocked;
+    const old = job.cancel.load(.monotonic).protection;
+    if (old != new) _ = job.cancel.fetchXor(.{ .protection = .blocked }, .monotonic);
+    return old;
+}
+
+fn checkCancel(_: ?*anyopaque) Io.Cancelable!void {
+    const worker = Worker.current() orelse return;
+    const job = worker.job orelse return;
+    if (job.cancel.cmpxchgStrong(.{ .requested = true }, .{ .acknowledged = true }, .monotonic, .monotonic) == null)
+        return error.Canceled;
+}
+
+fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
+    kernel.assertSleepable();
+    const word: *const std.atomic.Value(u32) = @ptrCast(ptr);
+    const deadline = timeout.toTimestamp(.{ .userdata = userdata, .vtable = &vtable });
+
+    const clock: std.os.linux.clockid_t = if (deadline) |d| toLinuxClock(d.clock) else .MONOTONIC;
+    const deadline_ns: ?i64 = if (deadline) |d| @intCast(d.raw.nanoseconds) else null;
+
+    var entry: bindings.WaitBitQueueEntry = .{};
+    entry.initWaitVar(ptr, 0);
+    const wq_head = bindings.varWaitqueue(ptr);
+    defer wq_head.finishWait(&entry);
+
+    var timed_out = false;
+    _ = wq_head.prepareToWaitEvent(&entry, .idle);
+    while (!timed_out and word.load(.monotonic) == expected) : (_ = wq_head.prepareToWaitEvent(&entry, .idle)) {
+        try checkCancel(userdata);
+        timed_out = scheduleUntil(clock, deadline_ns);
+    }
+}
 
 fn futexWaitUncancelable(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
+    kernel.assertSleepable();
     const word: *const std.atomic.Value(u32) = @ptrCast(ptr);
 
-    var spins: u8 = 0;
-    while (word.load(.monotonic) == expected) : (spins += 1) {
-        if (spins != spins_before_backoff) {
-            std.atomic.spinLoopHint();
-            continue;
-        }
+    var entry: bindings.WaitBitQueueEntry = .{};
+    entry.initWaitVar(ptr, 0);
+    const wq_head = bindings.varWaitqueue(ptr);
+    defer wq_head.finishWait(&entry);
 
-        spins = 0;
-        if (kernel.execution.canSleep())
-            kernel.time.sleep.us(backoff_sleep_us)
-        else
-            std.atomic.spinLoopHint();
-    }
+    _ = wq_head.prepareToWaitEvent(&entry, .idle);
+    while (word.load(.monotonic) == expected) : (_ = wq_head.prepareToWaitEvent(&entry, .idle))
+        _ = scheduleUntil(.MONOTONIC, null);
 }
 
-fn futexWake(_: ?*anyopaque, _: *const u32, _: u32) void {}
-
-const stderr_file: std.Io.File = .{ .handle = 2, .flags = .{ .nonblocking = false } };
-
-var stderr_writer: std.Io.File.Writer = .initStreaming(stderr_file, io, &.{});
-var stderr_buffer: [kernel.PrintkWriter.line_capacity]u8 = undefined;
-var stderr_printk: kernel.PrintkWriter = .init(.err, &stderr_buffer);
-var stderr_owner: std.atomic.Value(?*kernel.Task) = .init(null);
-var stderr_depth: u32 = 0;
-
-fn lockStderr(_: ?*anyopaque, terminal_mode: ?std.Io.Terminal.Mode) std.Io.Cancelable!std.Io.LockedStderr {
-    kernel.preempt.disable();
-
-    const task = kernel.Task.current();
-    if (stderr_owner.load(.monotonic) != task) {
-        while (stderr_owner.load(.monotonic) != null or
-            stderr_owner.cmpxchgWeak(null, task, .acquire, .monotonic) != null)
-            std.atomic.spinLoopHint();
-    }
-
-    return lockedStderr(terminal_mode);
+fn futexWake(_: ?*anyopaque, ptr: *const u32, _: u32) void {
+    bindings.smpMb();
+    bindings.wakeUpVar(ptr);
 }
 
-fn tryLockStderr(_: ?*anyopaque, terminal_mode: ?std.Io.Terminal.Mode) std.Io.Cancelable!?std.Io.LockedStderr {
-    kernel.preempt.disable();
-
-    const task = kernel.Task.current();
-    if (stderr_owner.load(.monotonic) != task and
-        stderr_owner.cmpxchgStrong(null, task, .acquire, .monotonic) != null)
-    {
-        kernel.preempt.enable();
-        return null;
-    }
-
-    return lockedStderr(terminal_mode);
+fn now(_: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+    return .{ .nanoseconds = switch (clock) {
+        .real => bindings.ktime.getRealFastNs(),
+        .awake => bindings.ktime.getMonoFastNs(),
+        .boot => bindings.ktime.getBootFastNs(),
+        .cpu_process, .cpu_thread => return .zero,
+    } };
 }
 
-fn lockedStderr(terminal_mode: ?std.Io.Terminal.Mode) std.Io.LockedStderr {
-    stderr_depth += 1;
-
-    return .{
-        .file_writer = &stderr_writer,
-        .terminal_mode = terminal_mode orelse .no_color,
+fn clockResolution(_: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionError!Io.Duration {
+    return switch (clock) {
+        .real, .awake, .boot => .fromNanoseconds(bindings.hrtimerResolution()),
+        .cpu_process, .cpu_thread => Io.Clock.ResolutionError.ClockUnavailable,
     };
 }
 
-fn unlockStderr(_: ?*anyopaque) void {
-    stderr_writer.interface.flush() catch {};
-    stderr_writer.err = null;
-    stderr_writer.interface.end = 0;
-    stderr_writer.interface.buffer = &.{};
+fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
+    kernel.assertSleepable();
+    const deadline = timeout.toTimestamp(.{ .userdata = userdata, .vtable = &vtable });
 
-    stderr_depth -= 1;
-    if (stderr_depth == 0) {
-        stderr_printk.interface.flush() catch {};
-        stderr_owner.store(null, .release);
+    const clock: std.os.linux.clockid_t = if (deadline) |d| toLinuxClock(d.clock) else .MONOTONIC;
+    const deadline_ns: ?i64 = if (deadline) |d| @intCast(d.raw.nanoseconds) else null;
+
+    var timed_out = false;
+    while (!timed_out) {
+        bindings.setCurrentState(.idle);
+        errdefer bindings.setCurrentState(.running);
+
+        try checkCancel(userdata);
+        timed_out = scheduleUntil(clock, deadline_ns);
     }
-
-    kernel.preempt.enable();
 }
 
-fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-    switch (operation) {
-        .file_write_streaming => |w| if (w.file.handle == stderr_file.handle) {
-            const printk = &stderr_printk.interface;
-            printk.writeAll(w.header) catch {};
-            for (w.data[0 .. w.data.len - 1]) |bytes| printk.writeAll(bytes) catch {};
-            printk.splatBytesAll(w.data[w.data.len - 1], w.splat) catch {};
+fn scheduleUntil(clock: std.os.linux.clockid_t, deadline_ns: ?i64) bool {
+    var expires = deadline_ns;
+    return bindings.scheduleHrtimeoutRangeClock(if (expires) |*e| e else null, 0, .abs, clock) == 0;
+}
 
-            return .{ .file_write_streaming = w.header.len + std.Io.Writer.countSplat(w.data, w.splat) };
-        },
-        else => {},
+fn toLinuxClock(clock: Io.Clock) std.os.linux.clockid_t {
+    return switch (clock) {
+        .real => .REALTIME,
+        .awake => .MONOTONIC,
+        .boot => .BOOTTIME,
+        .cpu_process, .cpu_thread => unreachable,
+    };
+}
+
+fn fileLength(_: ?*anyopaque, file: File) File.LengthError!u64 {
+    const fd = std.math.cast(c_uint, file.handle) orelse return File.LengthError.Unexpected;
+    const kernel_file = bindings.File.get(fd) orelse return File.LengthError.Unexpected;
+    defer kernel_file.put();
+
+    return @intCast(kernel_file.size());
+}
+
+const Future = struct {
+    node: std.DoublyLinkedList.Node,
+
+    atomically_allocated: bool,
+
+    func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    status: Status,
+
+    cancel: std.atomic.Value(Cancel),
+    runner: std.atomic.Value(?*kernel.Task),
+
+    done: bindings.Completion,
+    context_alignment: Alignment,
+    result_offset: usize,
+    alloc_len: usize,
+
+    const Status = enum { pending, running };
+    const Cancel = packed struct(u8) {
+        requested: bool = false,
+        acknowledged: bool = false,
+        protection: Io.CancelProtection = .unblocked,
+        _: u5 = 0,
+    };
+
+    fn create(
+        gpa: Allocator,
+        atomically_allocated: bool,
+        result_len: usize,
+        result_alignment: Alignment,
+        context: []const u8,
+        context_alignment: Alignment,
+        func: *const fn (context: *const anyopaque, result: *anyopaque) void,
+    ) Allocator.Error!*Future {
+        const max_context_misalignment = context_alignment.toByteUnits() -| @alignOf(Future);
+        const worst_case_context_offset = context_alignment.forward(@sizeOf(Future) + max_context_misalignment);
+        const worst_case_result_offset = result_alignment.forward(worst_case_context_offset + context.len);
+        const alloc_len = worst_case_result_offset + result_len;
+
+        const future: *Future = @ptrCast(@alignCast(try gpa.alignedAlloc(u8, .of(Future), alloc_len)));
+        errdefer comptime unreachable;
+
+        const actual_context_addr = context_alignment.forward(@intFromPtr(future) + @sizeOf(Future));
+        const actual_result_addr = result_alignment.forward(actual_context_addr + context.len);
+        const actual_result_offset = actual_result_addr - @intFromPtr(future);
+        future.* = .{
+            .node = .{},
+            .atomically_allocated = atomically_allocated,
+            .func = func,
+            .status = .pending,
+            .cancel = .init(.{}),
+            .runner = .init(null),
+            .done = undefined,
+            .context_alignment = context_alignment,
+            .result_offset = actual_result_offset,
+            .alloc_len = alloc_len,
+        };
+        future.done.init();
+        @memcpy(future.contextPointer()[0..context.len], context);
+        return future;
     }
 
-    return std.Io.failing.vtable.operate(userdata, operation);
-}
+    fn destroy(future: *Future, gpa: Allocator) void {
+        const base: [*]align(@alignOf(Future)) u8 = @ptrCast(future);
+        gpa.free(base[0..future.alloc_len]);
+    }
+
+    fn resultPointer(future: *Future) [*]u8 {
+        const base: [*]u8 = @ptrCast(future);
+        return base + future.result_offset;
+    }
+
+    fn contextPointer(future: *Future) [*]u8 {
+        const base: [*]u8 = @ptrCast(future);
+        const context_offset = future.context_alignment.forward(@intFromPtr(future) + @sizeOf(Future)) - @intFromPtr(future);
+        return base + context_offset;
+    }
+
+    fn start(this: *Future) void {
+        this.func(this.contextPointer(), this.resultPointer());
+        this.done.complete();
+    }
+};
+
+pub const Worker = struct {
+    kernel_io: *KernelIo,
+
+    node: std.SinglyLinkedList.Node = .{},
+
+    thread: *kernel.Task,
+    job: ?*Future,
+    waker: bindings.Completion,
+
+    fn spawn(this: *Worker, kernel_io: *KernelIo, job: ?*Future) !void {
+        this.kernel_io = kernel_io;
+        this.job = job;
+        this.waker.init();
+
+        _ = kernel_io.workers_count.fetchAdd(1, .monotonic);
+        errdefer _ = kernel_io.workers_count.fetchSub(1, .monotonic);
+
+        _ = try bindings.kthread.run(workerLoop, this, "zig io worker");
+    }
+
+    fn current() ?*Worker {
+        const task = kernel.Task.current();
+        if (bindings.kthread.func(task) != workerLoop) return null;
+        return @ptrCast(@alignCast(bindings.kthread.data(task).?));
+    }
+
+    fn workerLoop(data: ?*anyopaque) callconv(.c) c_int {
+        const this: *Worker = @ptrCast(@alignCast(data.?));
+        this.thread = kernel.Task.current();
+        const kernel_io = this.kernel_io;
+
+        while (!kernel_io.stop_workers.load(.monotonic)) if (this.job != null)
+            this.runJob()
+        else
+            this.pickJobOrWaitForOne();
+
+        kernel_io.allocator.destroy(this);
+        bindings.kthread.completeAndExit(&kernel_io.stopped_workers, 0);
+    }
+
+    fn runJob(this: *Worker) void {
+        this.job.?.runner.store(this.thread, .monotonic);
+        this.job.?.start();
+        this.job = null;
+    }
+
+    fn pickJobOrWaitForOne(this: *Worker) void {
+        const kernel_io = this.kernel_io;
+
+        const flags = kernel_io.lock.lockIrqsave();
+
+        if (kernel_io.stop_workers.load(.monotonic)) {
+            kernel_io.lock.unlockIrqrestore(flags);
+            return;
+        }
+
+        if (kernel_io.jobs.popFirst()) |node| {
+            const job: *Future = @fieldParentPtr("node", node);
+            job.status = .running;
+            this.job = job;
+            kernel_io.lock.unlockIrqrestore(flags);
+        } else {
+            kernel_io.idle_workers.prepend(&this.node);
+            kernel_io.lock.unlockIrqrestore(flags);
+            _ = this.waker.waitState(.idle);
+            this.waker.reinit();
+        }
+    }
+};

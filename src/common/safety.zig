@@ -13,8 +13,8 @@
 
 const std = @import("std");
 const testing = std.testing;
-const builtin = @import("builtin");
 const io = std.Options.debug_io;
+const builtin = @import("builtin");
 
 pub fn CapturedStackTrace(comptime frames_len: usize) type {
     return struct {
@@ -25,7 +25,6 @@ pub fn CapturedStackTrace(comptime frames_len: usize) type {
 
         /// The maximum number of frames this type can hold.
         pub const len = frames_len;
-
         pub const empty: Capture = .{ .addresses = @splat(0) };
 
         /// `capture` as a single expression, for initializing a field.
@@ -233,7 +232,6 @@ pub fn ConfigurableState(States: type, config: Config, messages: StateMessages) 
         last_transition: TransitionTrace,
 
         const TransitionTrace = CapturedStackTrace(config.traceFrames());
-
         const mutex = CheckMutex(S, config);
 
         /// Initializes the state to `initial_state`, without capturing a
@@ -444,7 +442,6 @@ pub fn ConfigurableObligations(config: Config, messages: ObligationsMessages) ty
         last_discharge: ObligationsTrace,
 
         const ObligationsTrace = CapturedStackTrace(config.traceFrames());
-
         const mutex = CheckMutex(O, config);
 
         pub const none: O = .{
@@ -651,12 +648,10 @@ pub fn ConfigurableBoundTo(
         last_change: Trace,
 
         pub const Identity = @typeInfo(@TypeOf(identityFn)).@"fn".return_type.?;
-
         const Trace = CapturedStackTrace(config.traceFrames());
 
         /// Identities that define `format` are printed through it.
         const identity_fmt = if (std.meta.hasMethod(Identity, "format")) "{f}" else "{any}";
-
         const mutex = CheckMutex(B, config);
 
         /// Nothing bound.

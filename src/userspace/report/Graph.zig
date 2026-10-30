@@ -33,9 +33,7 @@ const Point = struct {
 };
 
 pub const Error = error{NotEnoughSamples};
-
 pub const min_samples_per_level = 5;
-
 const confidence = 0.95;
 const lower_tail = (1.0 - confidence) / 2.0;
 const upper_tail = 1.0 - lower_tail;

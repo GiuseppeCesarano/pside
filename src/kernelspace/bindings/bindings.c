@@ -2,27 +2,28 @@
 #include <linux/cdev.h>
 #include <linux/completion.h>
 #include <linux/dcache.h>
-#include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/fs.h>
 #include <linux/ftrace_regs.h>
+#include <linux/hrtimer.h>
 #include <linux/io.h>
+#include <linux/irqflags.h>
 #include <linux/kallsyms.h>
 #include <linux/kprobes.h>
 #include <linux/kthread.h>
-#include <linux/ktime.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
 #include <linux/perf_event.h>
-#include <linux/pid.h>
 #include <linux/preempt.h>
 #include <linux/printk.h>
-#include <linux/rcupdate.h>
+#include <linux/sched/mm.h>
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
-#include <linux/stacktrace.h>
+#include <linux/spinlock.h>
 #include <linux/tracepoint.h>
 #include <linux/uaccess.h>
+#include <linux/wait_bit.h>
 
 /* Types shared with the Zig bindings */
 
@@ -48,9 +49,29 @@ struct session {
 
 /* The Zig side mirrors these as fixed-size opaque byte arrays. */
 _Static_assert(sizeof(struct chardev) <= 512,
-               "CharDevice placeholder in kernel.zig is too small");
+               "Chardev placeholder in kernel.zig is too small");
+_Static_assert(_Alignof(struct chardev) <= 8,
+               "Chardev placeholder in kernel.zig is underaligned");
 _Static_assert(sizeof(struct completion) <= 64,
-               "Completion placeholder in kernel.zig is too small");
+               "Completion placeholder in bindings.zig is too small");
+_Static_assert(_Alignof(struct completion) <= 8,
+               "Completion placeholder in bindings.zig is underaligned");
+_Static_assert(sizeof(spinlock_t) <= 64,
+               "Spinlock placeholder in bindings.zig is too small");
+_Static_assert(_Alignof(spinlock_t) <= 8,
+               "Spinlock placeholder in bindings.zig is underaligned");
+_Static_assert(sizeof(struct wait_bit_queue_entry) <= 64,
+               "WaitBitQueueEntry placeholder in bindings.zig is too small");
+_Static_assert(_Alignof(struct wait_bit_queue_entry) <= 8,
+               "WaitBitQueueEntry placeholder in bindings.zig is underaligned");
+
+/* The Zig side mirrors these values as enums. */
+_Static_assert(TASK_RUNNING == 0x0,
+               "TaskState.running in bindings.zig is out of sync");
+_Static_assert(TASK_IDLE == 0x402,
+               "TaskState.idle in bindings.zig is out of sync");
+_Static_assert(HRTIMER_MODE_ABS == 0x0,
+               "HrtimerMode.abs in bindings.zig is out of sync");
 
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
@@ -63,44 +84,30 @@ void c_printk(int, const char *, size_t);
 
 /* Symbolization */
 size_t c_ksym_symbol_len(void);
-size_t c_sprint_symbol(char *, unsigned long);
-unsigned int c_stack_trace_save(unsigned long *, unsigned int, unsigned int);
 
-/* Copy from/to userspace */
-unsigned long c_copy_to_user(void *, const void *, unsigned long);
+/* Copy from userspace */
 unsigned long c_copy_from_user(void *, const void *, unsigned long);
 
 /* Memory management */
-void *c_kmalloc(size_t);
-void c_kfree(void *);
-void *c_kmalloc_atomic(size_t);
-
-/* Delay utilities */
-void c_ndelay(unsigned long);
-void c_udelay(unsigned long);
-void c_mdelay(unsigned long);
+extern const gfp_t c_gfp_kernel;
+extern const gfp_t c_gfp_atomic;
+void *c_kmalloc(size_t, gfp_t);
 
 /* Time */
-u64 c_ktime_get_ns(void);
+unsigned int c_hrtimer_resolution(void);
 
 /* Task */
-struct task_struct *c_current_task(void);
-pid_t c_pid(struct task_struct *);
-int c_task_thread_count(struct task_struct *);
+struct task_struct *c_get_current(void);
+pid_t c_task_tgid_nr(struct task_struct *);
+int c_get_nr_threads(struct task_struct *);
 int c_task_is_running(struct task_struct *);
 int c_task_is_dead(struct task_struct *);
 int c_task_work_resolve(void);
 int c_task_work_add(struct task_struct *, struct callback_head *, int);
-struct task_struct *c_get_task_from_tid(pid_t);
 void c_get_task_struct(struct task_struct *);
 void c_put_task_struct(struct task_struct *);
 unsigned long c_current_user_ip(void);
-int c_regs_in_kernel(struct pt_regs *);
-long c_copy_from_user_nofault(void *, const void *, unsigned long);
-
-/* RCU */
-void c_rcu_read_lock(void);
-void c_rcu_read_unlock(void);
+int c_user_mode(struct pt_regs *);
 
 /* VMA */
 int c_snapshot_executable_vmas(struct task_struct *, const char *,
@@ -119,34 +126,25 @@ void c_session_unlock(struct file *);
 extern void pside_engine_release(void *);
 
 /* Perf */
-struct perf_event *c_perf_event_create_kernel_counter(struct perf_event_attr *,
-                                                      int, pid_t,
-                                                      perf_overflow_handler_t,
-                                                      void *);
-void c_perf_event_enable(struct perf_event *);
-void c_perf_event_disable(struct perf_event *);
-int c_perf_event_release_kernel(struct perf_event *);
-void *c_perf_event_context(struct perf_event *);
+void *c_perf_event_overflow_handler_context(struct perf_event *);
 
 /* Kthread */
 struct task_struct *c_kthread_run(int (*)(void *), void *, const char *);
-int c_kthread_stop(struct task_struct *);
-bool c_kthread_should_stop(void);
 
-/* Sleep */
-void c_sleep(unsigned long);
+/* Scheduler */
+void c_set_current_state(unsigned int);
 
 /* Tracepoints */
 void c_tracepoint_init(void);
-int c_register_sched_switch(void *, void *);
-void c_unregister_sched_switch(void *, void *);
-int c_register_sched_waking(void *, void *);
-void c_unregister_sched_waking(void *, void *);
-int c_register_task_newtask(void *, void *);
-void c_unregister_task_newtask(void *, void *);
-int c_register_sched_process_exit(void *, void *);
-void c_unregister_sched_process_exit(void *, void *);
-void c_tracepoint_sync(void);
+int c_register_trace_sched_switch(void *, void *);
+void c_unregister_trace_sched_switch(void *, void *);
+int c_register_trace_sched_waking(void *, void *);
+void c_unregister_trace_sched_waking(void *, void *);
+int c_register_trace_task_newtask(void *, void *);
+void c_unregister_trace_task_newtask(void *, void *);
+int c_register_trace_sched_process_exit(void *, void *);
+void c_unregister_trace_sched_process_exit(void *, void *);
+void c_tracepoint_synchronize_unregister(void);
 
 /* Preemption */
 void c_preempt_disable(void);
@@ -154,20 +152,30 @@ void c_preempt_enable(void);
 
 /* Execution context */
 int c_in_task(void);
-int c_can_sleep(void);
+int c_in_nmi(void);
+int c_preemptible(void);
+int c_in_atomic(void);
+int c_irqs_disabled(void);
+
+/* Barriers */
+void c_smp_mb(void);
 
 /* Completion */
 void c_init_completion(struct completion *);
-void c_wait_for_completion(struct completion *);
-unsigned long c_wait_for_completion_timeout(struct completion *, unsigned long);
-void c_complete(struct completion *);
 void c_reinit_completion(struct completion *);
 
+/* Spinlock */
+void c_spin_lock_init(spinlock_t *);
+unsigned long c_spin_lock_irqsave(spinlock_t *);
+void c_spin_unlock_irqrestore(spinlock_t *, unsigned long);
+
+/* Wait queue */
+long c_prepare_to_wait_event(struct wait_queue_head *,
+                             struct wait_bit_queue_entry *, int);
+void c_finish_wait(struct wait_queue_head *, struct wait_bit_queue_entry *);
+
 /* File */
-struct file *c_fget(int);
-void c_fput(struct file *);
-ssize_t c_kernel_write(struct file *, const void *, size_t, loff_t *);
-ssize_t c_file_size(struct file *);
+loff_t c_file_size(struct file *);
 
 /* Implementations */
 
@@ -192,43 +200,24 @@ void c_printk(int level, const char *line, size_t len) {
 /* Symbolization */
 size_t c_ksym_symbol_len(void) { return KSYM_SYMBOL_LEN; }
 
-size_t c_sprint_symbol(char *buffer, unsigned long address) {
-  return sprint_symbol(buffer, address);
-}
-
-unsigned int c_stack_trace_save(unsigned long *store, unsigned int size,
-                                unsigned int skip) {
-  return stack_trace_save(store, size, skip);
-}
-
-/* Copy from/to userspace */
-unsigned long c_copy_to_user(void *to, const void *from, unsigned long n) {
-  return copy_to_user(to, from, n);
-}
-
+/* Copy from userspace */
 unsigned long c_copy_from_user(void *to, const void *from, unsigned long n) {
   return copy_from_user(to, from, n);
 }
 
 /* Memory management */
-void *c_kmalloc(size_t size) { return kmalloc(size, GFP_KERNEL); }
-void c_kfree(void *ptr) { kfree(ptr); }
-void *c_kmalloc_atomic(size_t size) { return kmalloc(size, GFP_ATOMIC); }
+const gfp_t c_gfp_kernel = GFP_KERNEL;
+const gfp_t c_gfp_atomic = GFP_ATOMIC;
 
-/* Delay utilities */
-void c_ndelay(unsigned long nsec) { ndelay(nsec); }
-void c_udelay(unsigned long usec) { udelay(usec); }
-void c_mdelay(unsigned long msec) { mdelay(msec); }
+void *c_kmalloc(size_t size, gfp_t flags) { return kmalloc(size, flags); }
 
 /* Time */
-u64 c_ktime_get_ns(void) { return ktime_get_ns(); }
+unsigned int c_hrtimer_resolution(void) { return hrtimer_resolution; }
 
 /* Task */
-struct task_struct *c_current_task(void) { return current; }
-pid_t c_pid(struct task_struct *task) { return task_tgid_nr(task); }
-int c_task_thread_count(struct task_struct *task) {
-  return get_nr_threads(task);
-}
+struct task_struct *c_get_current(void) { return current; }
+pid_t c_task_tgid_nr(struct task_struct *task) { return task_tgid_nr(task); }
+int c_get_nr_threads(struct task_struct *task) { return get_nr_threads(task); }
 int c_task_is_running(struct task_struct *task) {
   return task_is_running(task);
 }
@@ -240,11 +229,7 @@ unsigned long c_current_user_ip(void) {
   return instruction_pointer(task_pt_regs(current));
 }
 
-int c_regs_in_kernel(struct pt_regs *regs) { return !user_mode(regs); }
-
-long c_copy_from_user_nofault(void *dst, const void *src, unsigned long size) {
-  return copy_from_user_nofault(dst, src, size);
-}
+int c_user_mode(struct pt_regs *regs) { return user_mode(regs); }
 
 static task_work_add_t real_task_work_add = NULL;
 
@@ -267,28 +252,13 @@ int c_task_work_add(struct task_struct *task, struct callback_head *twork,
   return real_task_work_add(task, twork, notify_mode);
 }
 
-struct task_struct *c_get_task_from_tid(pid_t tid) {
-  struct pid *pid_struct = find_get_pid(tid);
-  if (!pid_struct)
-    return NULL;
-
-  struct task_struct *task = get_pid_task(pid_struct, PIDTYPE_PID);
-  put_pid(pid_struct);
-
-  return task;
-}
-
 void c_get_task_struct(struct task_struct *task) { get_task_struct(task); }
 void c_put_task_struct(struct task_struct *task) { put_task_struct(task); }
-
-/* RCU */
-void c_rcu_read_lock(void) { rcu_read_lock(); }
-void c_rcu_read_unlock(void) { rcu_read_unlock(); }
 
 /* VMA */
 int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
                                struct VmaRange *ranges, int max) {
-  struct mm_struct *mm = task->mm;
+  struct mm_struct *mm = get_task_mm(task);
   if (!mm)
     return 0;
 
@@ -312,6 +282,7 @@ int c_snapshot_executable_vmas(struct task_struct *task, const char *filter,
     count++;
   }
   mmap_read_unlock(mm);
+  mmput(mm);
 
   return count;
 }
@@ -441,32 +412,7 @@ void c_session_unlock(struct file *filp) {
 }
 
 /* Perf */
-struct perf_event *
-c_perf_event_create_kernel_counter(struct perf_event_attr *attr, int cpu,
-                                   pid_t pid, perf_overflow_handler_t callback,
-                                   void *context) {
-  struct task_struct *task = c_get_task_from_tid(pid);
-  if (!task)
-    return ERR_PTR(-ESRCH);
-
-  struct perf_event *event =
-      perf_event_create_kernel_counter(attr, cpu, task, callback, context);
-
-  put_task_struct(task);
-
-  return event;
-}
-
-void c_perf_event_enable(struct perf_event *event) { perf_event_enable(event); }
-void c_perf_event_disable(struct perf_event *event) {
-  perf_event_disable(event);
-}
-
-int c_perf_event_release_kernel(struct perf_event *event) {
-  return perf_event_release_kernel(event);
-}
-
-void *c_perf_event_context(struct perf_event *event) {
+void *c_perf_event_overflow_handler_context(struct perf_event *event) {
   return event->overflow_handler_context;
 }
 
@@ -476,15 +422,8 @@ struct task_struct *c_kthread_run(int (*threadfn)(void *data), void *data,
   return kthread_run(threadfn, data, name);
 }
 
-int c_kthread_stop(struct task_struct *k) { return kthread_stop(k); }
-
-bool c_kthread_should_stop(void) { return kthread_should_stop(); }
-
-/* Sleep */
-void c_sleep(unsigned long usecs) {
-  unsigned long min = usecs > 5 ? usecs - 5 : usecs;
-  usleep_range(min, usecs + 5);
-}
+/* Scheduler */
+void c_set_current_state(unsigned int state) { set_current_state(state); }
 
 /* Tracepoints */
 
@@ -522,39 +461,41 @@ static void unregister_tp(struct tracepoint *tp, void *callback, void *data) {
     tracepoint_probe_unregister(tp, callback, data);
 }
 
-int c_register_sched_switch(void *callback, void *data) {
+int c_register_trace_sched_switch(void *callback, void *data) {
   return register_tp(tp_prov.sched_switch, callback, data);
 }
 
-void c_unregister_sched_switch(void *callback, void *data) {
+void c_unregister_trace_sched_switch(void *callback, void *data) {
   unregister_tp(tp_prov.sched_switch, callback, data);
 }
 
-int c_register_sched_waking(void *callback, void *data) {
+int c_register_trace_sched_waking(void *callback, void *data) {
   return register_tp(tp_prov.sched_waking, callback, data);
 }
 
-void c_unregister_sched_waking(void *callback, void *data) {
+void c_unregister_trace_sched_waking(void *callback, void *data) {
   unregister_tp(tp_prov.sched_waking, callback, data);
 }
 
-int c_register_task_newtask(void *callback, void *data) {
+int c_register_trace_task_newtask(void *callback, void *data) {
   return register_tp(tp_prov.task_newtask, callback, data);
 }
 
-void c_unregister_task_newtask(void *callback, void *data) {
+void c_unregister_trace_task_newtask(void *callback, void *data) {
   unregister_tp(tp_prov.task_newtask, callback, data);
 }
 
-int c_register_sched_process_exit(void *callback, void *data) {
+int c_register_trace_sched_process_exit(void *callback, void *data) {
   return register_tp(tp_prov.sched_process_exit, callback, data);
 }
 
-void c_unregister_sched_process_exit(void *callback, void *data) {
+void c_unregister_trace_sched_process_exit(void *callback, void *data) {
   unregister_tp(tp_prov.sched_process_exit, callback, data);
 }
 
-void c_tracepoint_sync(void) { tracepoint_synchronize_unregister(); }
+void c_tracepoint_synchronize_unregister(void) {
+  tracepoint_synchronize_unregister();
+}
 
 /* Preemption */
 void c_preempt_disable(void) { preempt_disable(); }
@@ -562,23 +503,41 @@ void c_preempt_enable(void) { preempt_enable(); }
 
 /* Execution context */
 int c_in_task(void) { return in_task(); }
-int c_can_sleep(void) { return preemptible(); }
+int c_in_nmi(void) { return in_nmi(); }
+int c_preemptible(void) { return preemptible(); }
+int c_in_atomic(void) { return in_atomic(); }
+int c_irqs_disabled(void) { return irqs_disabled(); }
+
+/* Barriers */
+void c_smp_mb(void) { smp_mb(); }
 
 /* Completion */
 void c_init_completion(struct completion *c) { init_completion(c); }
-void c_wait_for_completion(struct completion *c) { wait_for_completion(c); }
-unsigned long c_wait_for_completion_timeout(struct completion *c,
-                                            unsigned long timeout_ms) {
-  return wait_for_completion_timeout(c, msecs_to_jiffies(timeout_ms));
-}
-void c_complete(struct completion *c) { complete(c); }
 void c_reinit_completion(struct completion *c) { reinit_completion(c); }
 
-/* File */
-struct file *c_fget(int fd) { return fget(fd); }
-void c_fput(struct file *f) { fput(f); }
-ssize_t c_kernel_write(struct file *f, const void *buf, size_t count,
-                       loff_t *pos) {
-  return kernel_write(f, buf, count, pos);
+/* Spinlock */
+void c_spin_lock_init(spinlock_t *lock) { spin_lock_init(lock); }
+
+unsigned long c_spin_lock_irqsave(spinlock_t *lock) {
+  unsigned long flags;
+  spin_lock_irqsave(lock, flags);
+  return flags;
 }
-ssize_t c_file_size(struct file *f) { return i_size_read(file_inode(f)); }
+
+void c_spin_unlock_irqrestore(spinlock_t *lock, unsigned long flags) {
+  spin_unlock_irqrestore(lock, flags);
+}
+
+/* Wait queue */
+long c_prepare_to_wait_event(struct wait_queue_head *wq_head,
+                             struct wait_bit_queue_entry *entry, int state) {
+  return prepare_to_wait_event(wq_head, &entry->wq_entry, state);
+}
+
+void c_finish_wait(struct wait_queue_head *wq_head,
+                   struct wait_bit_queue_entry *entry) {
+  finish_wait(wq_head, &entry->wq_entry);
+}
+
+/* File */
+loff_t c_file_size(struct file *f) { return i_size_read(file_inode(f)); }

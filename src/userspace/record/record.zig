@@ -168,7 +168,6 @@ const Profiler = struct {
     state: safety.State(Session),
 
     const Session = enum { idle, attached, profiling };
-
     pub const InitError = communications.AttachOptions.InitError;
 
     fn init(

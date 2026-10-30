@@ -2,7 +2,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const kernel = @import("kernel");
-const atomic_allocator = kernel.heap.atomic_allocator;
 const safety = @import("safety");
 
 const DelayPool = @import("../concurrent/DelayPool.zig");
@@ -18,12 +17,16 @@ sampler: ?*kernel.PerfEvent,
 clocks: ThreadClocks,
 delay_pool: DelayPool,
 vma_ranges: VmaRanges,
+io: std.Io,
+allocator: std.mem.Allocator,
+atomic_allocator: std.mem.Allocator,
 vma_base: std.atomic.Value(usize),
-has_errored: std.atomic.Value(bool),
+failure: std.atomic.Value(ErrorInt),
 
 // Current experiment state, armed/disarmed by begin/endExperiment.
 target_ip: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
+experiment_start: Ticks,
 
 task_references: TaskReferences,
 arming: safety.State(Arming),
@@ -32,34 +35,42 @@ loop: BoundToTask,
 pin: safety.Pinned,
 
 const Window = enum { idle, running };
-
 const Arming = enum { unarmed, armed };
-
 const BoundToTask = safety.BoundTo(currentTask);
-
 const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
+const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
+
+pub const Outcome = struct {
+    relative_ip: usize,
+    injected_us: u32,
+};
+
+pub const Error = DelayPool.Error || error{NoSpace};
 
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 const clocks_reserve = 1024;
-
 const max_exit_payment_us = 50 * std.time.us_per_ms;
 
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
 }
 
-pub fn init() !ExperimentRunner {
+pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !ExperimentRunner {
     return .{
         .profiled_pid = .init(0),
         .sampler = null,
-        .clocks = try .init(atomic_allocator, clocks_reserve),
+        .clocks = try .init(allocator, clocks_reserve),
         .delay_pool = .empty,
         .vma_ranges = .empty,
+        .io = undefined,
+        .allocator = allocator,
+        .atomic_allocator = atomic_allocator,
         .vma_base = .init(0),
-        .has_errored = .init(false),
+        .failure = .init(0),
         .target_ip = .init(0),
         .delay_per_tick = .init(0),
+        .experiment_start = 0,
 
         .task_references = .none,
         .arming = .init(.unarmed),
@@ -70,12 +81,12 @@ pub fn init() !ExperimentRunner {
 }
 
 fn retainTask(this: *ExperimentRunner, task: *kernel.Task) void {
-    task.incrementReferences();
+    task.get();
     this.task_references.incur();
 }
 
 fn releaseTask(this: *ExperimentRunner, task: *kernel.Task) void {
-    task.decrementReferences();
+    task.put();
     this.task_references.discharge();
 }
 
@@ -94,17 +105,17 @@ pub fn deinit(this: *ExperimentRunner) void {
     this.window.assertEql(.idle);
 
     if (this.sampler) |s| {
-        kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
-        kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
-        kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
-        kernel.tracepoint.task.newtask.unregister(onNewTask, this);
-        kernel.tracepoint.sync();
+        kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
+        kernel.unregisterTraceSchedWaking(onSchedWaking, this);
+        kernel.unregisterTraceSchedProcessExit(onSchedProcessExit, this);
+        kernel.unregisterTraceTaskNewtask(onNewTask, this);
+        kernel.tracepoint.synchronizeUnregister();
 
-        s.deinit();
+        _ = s.releaseKernel();
     }
 
-    this.delay_pool.deinit();
-    this.vma_ranges.deinit();
+    this.delay_pool.deinit(this.allocator, this.atomic_allocator);
+    this.vma_ranges.deinit(this.allocator);
 
     var it = this.clocks.iterate();
     defer it.finish();
@@ -114,13 +125,14 @@ pub fn deinit(this: *ExperimentRunner) void {
 
     this.task_references.assertCount(.eq, 0);
 
-    this.clocks.deinit(atomic_allocator);
+    this.clocks.deinit(this.allocator, this.atomic_allocator);
 
     this.* = undefined;
 }
 
 pub fn profilePid(
     this: *ExperimentRunner,
+    io: std.Io,
     pid: std.os.linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
@@ -128,7 +140,8 @@ pub fn profilePid(
     this.arming.assertEql(.unarmed);
     this.pin.bind();
 
-    try this.delay_pool.init();
+    this.io = io;
+    try this.delay_pool.init(io, this.allocator);
 
     this.profiled_pid.store(pid, .monotonic);
     const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
@@ -136,7 +149,7 @@ pub fn profilePid(
 
     // Only this task is seeded; the rest join via onNewTask, so tracking can
     // be correct only if the target starts single-threaded.
-    if (task.threadCount() != 1) {
+    if (task.nrThreads() != 1) {
         this.releaseTask(task);
         std.log.err("Refusing to profile pid {d}: target already has multiple threads", .{pid});
         return error.MultiThreadedTarget;
@@ -145,19 +158,19 @@ pub fn profilePid(
     // Only the first key, the reserve always has room for it.
     this.clocks.put(keyFromTask(task), 0) catch unreachable;
 
-    this.vma_ranges = try .snapshot(task, vma_name);
+    this.vma_ranges = try .snapshot(this.allocator, task, vma_name);
 
-    try kernel.tracepoint.sched.@"switch".register(onSchedSwitch, this);
-    errdefer kernel.tracepoint.sched.@"switch".unregister(onSchedSwitch, this);
+    try kernel.registerTraceSchedSwitch(onSchedSwitch, this);
+    errdefer kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
 
-    try kernel.tracepoint.sched.waking.register(onSchedWaking, this);
-    errdefer kernel.tracepoint.sched.waking.unregister(onSchedWaking, this);
+    try kernel.registerTraceSchedWaking(onSchedWaking, this);
+    errdefer kernel.unregisterTraceSchedWaking(onSchedWaking, this);
 
-    try kernel.tracepoint.task.newtask.register(onNewTask, this);
-    errdefer kernel.tracepoint.task.newtask.unregister(onNewTask, this);
+    try kernel.registerTraceTaskNewtask(onNewTask, this);
+    errdefer kernel.unregisterTraceTaskNewtask(onNewTask, this);
 
-    try kernel.tracepoint.sched.process_exit.register(onSchedProcessExit, this);
-    errdefer kernel.tracepoint.sched.process_exit.unregister(onSchedProcessExit, this);
+    try kernel.registerTraceSchedProcessExit(onSchedProcessExit, this);
+    errdefer kernel.unregisterTraceSchedProcessExit(onSchedProcessExit, this);
 
     var sampler_attr = std.os.linux.perf_event_attr{
         .type = .SOFTWARE,
@@ -174,48 +187,53 @@ pub fn profilePid(
             .exclude_kernel = !attribute_kernel_samples,
         },
     };
-    this.sampler = try kernel.PerfEvent.init(&sampler_attr, -1, pid, onSamplerTick, this);
+    this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
 
     this.arming.transition(.armed);
 }
 
-pub fn beginExperiment(this: *ExperimentRunner, delay_per_tick: u16) void {
+pub fn beginExperiment(this: *ExperimentRunner, speedup_percent: u8) void {
     this.loop.bindOrAssert();
     this.arming.assertEql(.armed);
     this.window.assertEql(.idle);
     defer this.window.transition(.running);
 
+    // The speedup is delivered as a delay charged to everyone else.
+    const sampler_period = std.time.us_per_s / sampler_frequency;
+    const delay_per_tick: u16 = @intCast((@as(u32, speedup_percent) * sampler_period) / 100);
+
+    this.experiment_start = this.clocks.master.load(.monotonic);
     this.delay_per_tick.store(delay_per_tick, .monotonic);
     this.target_ip.store(0, .seq_cst);
     this.vma_base.store(0, .seq_cst);
     this.sampler.?.enable();
 }
 
-pub fn endExperiment(this: *ExperimentRunner) void {
+pub fn endExperiment(this: *ExperimentRunner) Error!?Outcome {
     this.loop.assertCurrent();
     this.arming.assertEql(.armed);
     this.window.assertEql(.running);
     defer this.window.transition(.idle);
 
-    this.delay_per_tick.store(0, .seq_cst); // zero first so any in-flight tick is a no-op
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
     this.sampler.?.disable();
-}
+    this.delayEveryoneLagging();
+    this.delay_per_tick.store(0, .monotonic);
 
-pub fn getMasterClock(this: *const ExperimentRunner) Ticks {
-    return this.clocks.master.load(.monotonic);
-}
+    const failure = this.failure.load(.monotonic);
+    if (failure != 0) return @errorCast(@errorFromInt(failure));
 
-pub fn capturedRelativeIp(this: *const ExperimentRunner) ?usize {
     const target = this.target_ip.load(.acquire);
     if (target == 0) return null;
-    return target - this.vma_base.load(.monotonic);
+
+    const ticks = this.clocks.master.load(.monotonic) - this.experiment_start;
+    return .{
+        .relative_ip = target - this.vma_base.load(.monotonic),
+        .injected_us = ticks * delay_per_tick,
+    };
 }
 
-pub fn hasErrored(this: *const ExperimentRunner) bool {
-    return this.has_errored.load(.monotonic);
-}
-
-pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
+fn delayEveryoneLagging(this: *ExperimentRunner) void {
     this.loop.assertCurrent();
     this.arming.assertEql(.armed);
     this.window.assertEql(.running);
@@ -245,7 +263,7 @@ pub fn delayEveryoneLagging(this: *ExperimentRunner) void {
     }
 
     // Signalling from inside the gate deadlocks against a spinwaiting tracepoint
-    this.delay_pool.flushPending() catch this.abort("Could not flush delays");
+    this.delay_pool.flushPending() catch |err| this.fail(err);
 }
 
 fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
@@ -255,10 +273,10 @@ fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     const task = taskFromKey(key);
     if (task.isDead()) return;
 
-    this.delay_pool.delay(task, @as(usize, lag) * delay_per_tick) catch |err| switch (err) {
+    this.delay_pool.delay(this.allocator, this.atomic_allocator, task, @as(usize, lag) * delay_per_tick) catch |err| switch (err) {
         // Past exit_task_work the work can never run; the task is off any critical path.
         error.TooLateShuttingDown => {},
-        else => this.abort("Could not apply delay"),
+        else => |e| this.fail(e),
     };
 }
 
@@ -269,13 +287,13 @@ fn settleDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     if (delay_per_tick == 0 or lag == 0 or task.isDead()) return;
 
-    this.delay_pool.pendDelay(task, @as(usize, lag) * delay_per_tick) catch this.abort("Could not pend delay");
+    this.delay_pool.pendDelay(this.allocator, this.atomic_allocator, task, @as(usize, lag) * delay_per_tick) catch |err| this.fail(err);
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(event.context() orelse return));
+    const this: *ExperimentRunner = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
 
-    const ip = kernel.execution.currentUserSpaceIp(regs);
+    const ip = kernel.currentUserSpaceIp(regs);
     const target = this.target_ip.load(.monotonic);
     const is_target = (ip == target) or (target == 0 and this.captureProfilingTarget(ip));
 
@@ -303,18 +321,18 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callc
     const parent = kernel.Task.current();
 
     const profiled_pid = this.profiled_pid.load(.monotonic);
-    if (parent.pid() != profiled_pid) return;
+    if (parent.tgidNr() != profiled_pid) return;
     if (clone_flags & std.os.linux.CLONE.THREAD == 0) return;
 
-    assert(child.pid() == profiled_pid);
+    assert(child.tgidNr() == profiled_pid);
 
     const parent_key = keyFromTask(parent);
     const child_key = keyFromTask(child);
 
     this.retainTask(child);
-    const lag = this.fork(parent_key, child_key) catch {
+    const lag = this.fork(parent_key, child_key) catch |err| {
         this.releaseTask(child);
-        return this.abort("Error while forking");
+        return this.fail(err);
     };
 
     this.applyDelay(parent_key, lag);
@@ -326,7 +344,7 @@ fn fork(this: *ExperimentRunner, parent: Key, child: Key) !Ticks {
     defer kernel.preempt.enable();
 
     return this.clocks.fork(parent, child) catch blk: {
-        try this.clocks.grow(atomic_allocator);
+        try this.clocks.grow(this.allocator, this.atomic_allocator);
         break :blk try this.clocks.fork(parent, child);
     };
 }
@@ -335,7 +353,7 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
     const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
-    if (prev.pid() == profiled_pid and !prev.isRunning() and !prev.isDead())
+    if (prev.tgidNr() == profiled_pid and !prev.isRunning() and !prev.isDead())
         this.clocks.prepareForSleep(keyFromTask(prev));
 }
 
@@ -343,13 +361,13 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
     const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
-    if (wakee.pid() != profiled_pid or wakee.isRunning() or wakee.isDead()) return;
+    if (wakee.tgidNr() != profiled_pid or wakee.isRunning() or wakee.isDead()) return;
 
     const wakee_key = keyFromTask(wakee);
 
-    if (kernel.execution.inTask()) {
+    if (kernel.inTask()) {
         const waker = kernel.Task.current();
-        if (waker.pid() == profiled_pid) {
+        if (waker.tgidNr() == profiled_pid) {
             const waker_key = keyFromTask(waker);
             const waker_lag, const wakee_lag = this.clocks.wake(waker_key, wakee_key) orelse return;
 
@@ -364,7 +382,7 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
 fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.c) void {
     const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
 
-    if (task.pid() != this.profiled_pid.load(.monotonic)) return;
+    if (task.tgidNr() != this.profiled_pid.load(.monotonic)) return;
 
     assert(task.isDead());
 
@@ -381,12 +399,12 @@ fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.
 
     this.releaseTask(task);
 
-    if (payment != 0) kernel.time.sleep.us(payment);
+    if (payment != 0) this.io.sleep(.fromMicroseconds(@intCast(payment)), .awake) catch unreachable;
 }
 
 fn exitPayment(this: *ExperimentRunner, key: Key) usize {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    if (delay_per_tick == 0 or !kernel.execution.canSleep()) return 0;
+    if (delay_per_tick == 0 or !kernel.preemptible()) return 0;
 
     const lag = lag: {
         kernel.preempt.disable();
@@ -398,8 +416,7 @@ fn exitPayment(this: *ExperimentRunner, key: Key) usize {
     return @min(@as(usize, lag) * delay_per_tick, max_exit_payment_us);
 }
 
-fn abort(this: *ExperimentRunner, s: []const u8) void {
+fn fail(this: *ExperimentRunner, err: Error) void {
     @branchHint(.cold);
-    std.log.err("{s}", .{s});
-    this.has_errored.store(true, .monotonic);
+    _ = this.failure.cmpxchgStrong(0, @intFromError(err), .monotonic, .monotonic);
 }

@@ -9,7 +9,6 @@ config: std.StringHashMapUnmanaged([]const u8),
 exports_ref_stack_chk_guard: bool,
 
 pub const Detection = union(enum) { usable: KernelHeaders, unusable: []const u8 };
-
 pub const base_features = std.Target.x86.featureSet(&.{.soft_float});
 
 pub fn detect(b: *std.Build) !Detection {

@@ -15,6 +15,7 @@ master: std.atomic.Value(Ticks) align(std.atomic.cache_line),
 ref: RefGate,
 pairs: []Pair,
 used: BitSearch,
+atomically_allocated: bool,
 reservations: Reservations,
 iterators: safety.Obligations,
 
@@ -26,10 +27,8 @@ pub const Key = packed struct(usize) {
     // Task pointers are always aligned so the first bit will always be 0
     // and we can use that as collide flag
     const collided_bit: usize = 1;
-
     pub const empty: Key = .{ .data = 0 };
     pub const empty_collided: Key = .{ .data = collided_bit };
-
     pub const reserved: Key = .{ .data = std.math.maxInt(usize) & ~collided_bit };
 
     pub fn isEql(this: Key, other: Key) bool {
@@ -90,19 +89,21 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
         .ref = .{},
         .pairs = pairs,
         .used = try .init(allocator, reserve),
+        .atomically_allocated = false,
         .reservations = .none,
         .iterators = .none,
     };
 }
 
-pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator) void {
+pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) void {
     this.iterators.assertCount(.eq, 0);
     this.ref.close();
     this.ref.drain();
     this.reservations.assertCount(.eq, 0);
 
-    allocator.free(this.pairs);
-    this.used.deinit(allocator);
+    const table_allocator = if (this.atomically_allocated) atomic_allocator else allocator;
+    table_allocator.free(this.pairs);
+    this.used.deinit(table_allocator);
 
     this.* = undefined;
 }
@@ -345,7 +346,7 @@ pub fn iterate(this: *ThreadClocks) Iterator {
     };
 }
 
-pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
+pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !void {
     // Allocate before closing: readers spin on a closed gate, so nothing that
     // can sleep may run inside it. That makes old_len a guess, re-read below.
     this.ref.increment();
@@ -354,11 +355,11 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     const new_len = old_len * 2;
     assert(isPowerOfTwo(new_len));
-    const new_pairs = try allocator.alloc(Pair, new_len);
-    errdefer allocator.free(new_pairs);
+    const new_pairs = try atomic_allocator.alloc(Pair, new_len);
+    errdefer atomic_allocator.free(new_pairs);
     @memset(new_pairs, Pair.empty);
 
-    var new_used: BitSearch = try .init(allocator, new_len);
+    var new_used: BitSearch = try .init(atomic_allocator, new_len);
 
     this.ref.close();
     this.ref.drain();
@@ -367,8 +368,8 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
     // Another grower got there first; its table is already the size we wanted.
     if (this.pairs.len != old_len) {
         this.ref.open();
-        allocator.free(new_pairs);
-        new_used.deinit(allocator);
+        atomic_allocator.free(new_pairs);
+        new_used.deinit(atomic_allocator);
         return;
     }
 
@@ -399,14 +400,16 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator) !void {
 
     const old_pairs = this.pairs;
     const old_used = this.used;
+    const old_allocator = if (this.atomically_allocated) atomic_allocator else allocator;
 
     this.pairs = new_pairs;
     this.used = new_used;
+    this.atomically_allocated = true;
 
     this.ref.open();
 
-    allocator.free(old_pairs);
-    old_used.deinit(allocator);
+    old_allocator.free(old_pairs);
+    old_used.deinit(old_allocator);
 }
 
 fn isTaken(this: *const ThreadClocks, key: Key) bool {
@@ -418,7 +421,7 @@ fn isTaken(this: *const ThreadClocks, key: Key) bool {
 test "ThreadClocks: basic lifecycle" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const key1: ThreadClocks.Key = .{ .data = 100 };
     const key2: ThreadClocks.Key = .{ .data = 200 };
@@ -433,7 +436,7 @@ test "ThreadClocks: basic lifecycle" {
 test "ThreadClocks: tick and master propagation" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const key: ThreadClocks.Key = .{ .data = 2 };
     try clocks.put(key, 5);
@@ -450,7 +453,7 @@ test "ThreadClocks: tick and master propagation" {
 test "ThreadClocks: sleep and wake logic" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const waker: ThreadClocks.Key = .{ .data = 2 };
     const wakee: ThreadClocks.Key = .{ .data = 4 };
@@ -478,7 +481,7 @@ test "ThreadClocks: sleep and wake logic" {
 test "ThreadClocks: wake without prepareForSleep yields zero wakee lag" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const waker: ThreadClocks.Key = .{ .data = 2 };
     const wakee: ThreadClocks.Key = .{ .data = 4 };
@@ -501,7 +504,7 @@ test "ThreadClocks: wake without prepareForSleep yields zero wakee lag" {
 test "ThreadClocks: fork" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const parent: ThreadClocks.Key = .{ .data = 2 };
     const child: ThreadClocks.Key = .{ .data = 4 };
@@ -520,7 +523,7 @@ test "ThreadClocks: collision path" {
     const allocator = testing.allocator;
 
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     // Use enough entries that collisions are plausible (half capacity).
     var keys: [min_cap / 2]ThreadClocks.Key = undefined;
@@ -537,7 +540,7 @@ test "ThreadClocks: collision path" {
 test "ThreadClocks: Causal Mechanics" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const parent: ThreadClocks.Key = .{ .data = 2 };
     const child: ThreadClocks.Key = .{ .data = 4 };
@@ -560,7 +563,7 @@ test "ThreadClocks: concurrent stress" {
     const allocator = testing.allocator;
 
     var clocks = try ThreadClocks.init(allocator, 128);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const thread_count = 8;
     const ops_per_thread = 10_000;
@@ -629,7 +632,7 @@ test "ThreadClocks: concurrent grow" {
     const allocator = testing.allocator;
 
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const root: ThreadClocks.Key = .{ .data = 2 };
     try clocks.put(root, 0);
@@ -656,7 +659,7 @@ test "ThreadClocks: concurrent grow" {
         fn run(ctx: *@This()) void {
             std.atomic.spinLoopHint();
 
-            ctx.clocks.grow(ctx.alloc) catch return;
+            ctx.clocks.grow(ctx.alloc, ctx.alloc) catch return;
         }
     };
 
@@ -683,7 +686,7 @@ test "ThreadClocks: concurrent grow" {
 test "ThreadClocks: catchUp charges full lag including sleep ticks" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const sleeper: ThreadClocks.Key = .{ .data = 2 };
 
@@ -702,7 +705,7 @@ test "ThreadClocks: catchUp charges full lag including sleep ticks" {
 test "ThreadClocks: a closed gate yields nothing owed instead of blocking" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const waker: ThreadClocks.Key = .{ .data = 2 };
     const wakee: ThreadClocks.Key = .{ .data = 4 };
@@ -725,7 +728,7 @@ test "ThreadClocks: a closed gate yields nothing owed instead of blocking" {
 test "ThreadClocks: remove tolerates untracked keys" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const tracked: ThreadClocks.Key = .{ .data = 2 };
     const untracked: ThreadClocks.Key = .{ .data = 4 };
@@ -742,7 +745,7 @@ test "ThreadClocks: remove tolerates untracked keys" {
 test "ThreadClocks: put takes the slot, remove releases it" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     try testing.expectEqual(0, clocks.used.countTaken());
 
@@ -761,7 +764,7 @@ test "ThreadClocks: put takes the slot, remove releases it" {
 test "ThreadClocks: taken count tracks live entries across puts and removes" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [16]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -782,7 +785,7 @@ test "ThreadClocks: taken count tracks live entries across puts and removes" {
 test "ThreadClocks: fork takes the child slot without releasing the parent" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const parent: ThreadClocks.Key = .{ .data = 2 };
     const child: ThreadClocks.Key = .{ .data = 4 };
@@ -801,7 +804,7 @@ test "ThreadClocks: fork takes the child slot without releasing the parent" {
 test "ThreadClocks: grow migrates every taken slot and releases none" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [8]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -811,7 +814,7 @@ test "ThreadClocks: grow migrates every taken slot and releases none" {
 
     try testing.expectEqual(keys.len, clocks.used.countTaken());
 
-    try clocks.grow(allocator);
+    try clocks.grow(allocator, allocator);
 
     for (keys) |key| try testing.expect(clocks.isTaken(key));
 
@@ -821,7 +824,7 @@ test "ThreadClocks: grow migrates every taken slot and releases none" {
 test "ThreadClocks: grow with partial removes, only live entries stay taken" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [12]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -833,7 +836,7 @@ test "ThreadClocks: grow with partial removes, only live entries stay taken" {
 
     try testing.expectEqual(keys.len / 2, clocks.used.countTaken());
 
-    try clocks.grow(allocator);
+    try clocks.grow(allocator, allocator);
 
     try testing.expectEqual(keys.len / 2, clocks.used.countTaken());
 
@@ -847,7 +850,7 @@ test "ThreadClocks: grow with partial removes, only live entries stay taken" {
 test "ThreadClocks: grow preserves ticks and pending lag" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [8]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -858,7 +861,7 @@ test "ThreadClocks: grow preserves ticks and pending lag" {
     clocks.master.store(100, .release);
     for (keys, 0..) |key, i| if (i % 2 == 0) clocks.prepareForSleep(key);
 
-    try clocks.grow(allocator);
+    try clocks.grow(allocator, allocator);
 
     for (keys, 0..) |key, i| {
         const expected_lag: ThreadClocks.Ticks = if (i % 2 == 0) @intCast(100 - i * 10) else 0;
@@ -870,7 +873,7 @@ test "ThreadClocks: grow preserves ticks and pending lag" {
 test "ThreadClocks: repeated grow keeps every entry reachable" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [min_cap / 2]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -879,7 +882,7 @@ test "ThreadClocks: repeated grow keeps every entry reachable" {
     }
 
     for (0..2) |_| {
-        try clocks.grow(allocator);
+        try clocks.grow(allocator, allocator);
     }
 
     try testing.expectEqual(min_cap * 4, clocks.pairs.len);
@@ -890,7 +893,7 @@ test "ThreadClocks: repeated grow keeps every entry reachable" {
 test "ThreadClocks: slot reuse after remove" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     const key: ThreadClocks.Key = .{ .data = 42 };
 
@@ -906,7 +909,7 @@ test "ThreadClocks: racing growers keep every entry" {
     const allocator = testing.allocator;
 
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [min_cap / 2]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -925,7 +928,7 @@ test "ThreadClocks: racing growers keep every entry" {
             _ = ctx.ready.fetchAdd(1, .release);
             while (ctx.ready.load(.acquire) < grower_count) std.atomic.spinLoopHint();
 
-            ctx.clocks.grow(ctx.alloc) catch return;
+            ctx.clocks.grow(ctx.alloc, ctx.alloc) catch return;
         }
     };
 
@@ -946,7 +949,7 @@ test "ThreadClocks: racing growers keep every entry" {
 test "ThreadClocks: the taken bits of a grown map point at live entries" {
     const allocator = testing.allocator;
     var clocks = try ThreadClocks.init(allocator, min_cap);
-    defer clocks.deinit(allocator);
+    defer clocks.deinit(allocator, allocator);
 
     var keys: [20]ThreadClocks.Key = undefined;
     for (&keys, 0..) |*key, i| {
@@ -956,7 +959,7 @@ test "ThreadClocks: the taken bits of a grown map point at live entries" {
 
     for (&keys, 0..) |key, i| _ = if (i % 2 == 0) clocks.remove(key);
 
-    try clocks.grow(allocator);
+    try clocks.grow(allocator, allocator);
 
     var live: usize = 0;
     var it = clocks.used.iterate();
