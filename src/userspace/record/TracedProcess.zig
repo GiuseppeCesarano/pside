@@ -166,10 +166,10 @@ fn elfRuntimeEntrypoint(child_pid: linux.pid_t, io: std.Io) !usize {
 
 pub fn start(this: *TracedProcess) StartError!void {
     this.state.assertEql(.attached);
+    this.state.transition(.detached);
+    errdefer this.state.transition(.attached);
 
     this.startTraced() catch |err| return traceFailure(err);
-
-    this.state.transition(.detached);
 }
 
 fn startTraced(this: TracedProcess) !void {
@@ -184,6 +184,8 @@ fn startTraced(this: TracedProcess) !void {
 
 pub fn wait(this: *TracedProcess) WaitError!void {
     this.state.assertEql(.detached);
+    this.state.transition(.reaped);
+    errdefer this.state.transition(.detached);
 
     var status: i32 = undefined;
     const wait_rc = linux.waitpid(this.pid, &status, 0);
@@ -191,8 +193,6 @@ pub fn wait(this: *TracedProcess) WaitError!void {
     global_traced_pid.store(0, .release);
 
     if (linux.errno(wait_rc) != .SUCCESS) return WaitError.WaitFailed;
-
-    this.state.transition(.reaped);
 }
 
 pub fn patchProgressPoint(this: *TracedProcess, addr: usize, ctl_fd: linux.fd_t) PatchError!void {

@@ -165,9 +165,9 @@ const Profiler = struct {
     device: KernelControlDevice,
     output_fd: linux.fd_t,
     attach_options: communications.AttachOptions,
-    state: safety.State(Session),
+    state: safety.State(Lifecycle),
 
-    const Session = enum { idle, attached, profiling };
+    const Lifecycle = enum { idle, attached, profiling };
     pub const InitError = communications.AttachOptions.InitError;
 
     fn init(
@@ -194,29 +194,29 @@ const Profiler = struct {
 
     fn attach(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
         this.state.assertEql(.idle);
+        this.state.transition(.attached);
+        errdefer this.state.transition(.idle);
 
         var attach_options = this.attach_options;
         attach_options.pid = pid;
 
         try this.device.attachProfilerToPid(attach_options);
-
-        this.state.transition(.attached);
     }
 
     fn start(this: *Profiler) KernelControlDevice.ControlError!void {
         this.state.assertEql(.attached);
+        this.state.transition(.profiling);
+        errdefer this.state.transition(.attached);
 
         try this.device.startProfiler(.{ .output_fd = this.output_fd });
-
-        this.state.transition(.profiling);
     }
 
     fn stop(this: *Profiler) KernelControlDevice.ControlError!void {
         this.state.assertEql(.profiling);
+        this.state.transition(.idle);
+        errdefer this.state.transition(.profiling);
 
         try this.device.stop();
-
-        this.state.transition(.idle);
     }
 };
 

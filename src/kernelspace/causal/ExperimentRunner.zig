@@ -29,13 +29,11 @@ delay_per_tick: std.atomic.Value(u16),
 experiment_start: Ticks,
 
 task_references: TaskReferences,
-arming: safety.State(Arming),
-window: safety.State(Window),
-loop: BoundToTask,
-pin: safety.Pinned,
+state: safety.State(Lifecycle),
+loop_task: BoundToTask,
+address: safety.Pinned,
 
-const Window = enum { idle, running };
-const Arming = enum { unarmed, armed };
+const Lifecycle = enum { idle, attached, running };
 const BoundToTask = safety.BoundTo(currentTask);
 const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
 const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
@@ -73,10 +71,9 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !
         .experiment_start = 0,
 
         .task_references = .none,
-        .arming = .init(.unarmed),
-        .window = .init(.idle),
-        .loop = .unbound,
-        .pin = .unbound,
+        .state = .init(.idle),
+        .loop_task = .unbound,
+        .address = .unbound,
     };
 }
 
@@ -101,8 +98,8 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *ExperimentRunner) void {
-    this.pin.assertCurrentIfBound();
-    this.window.assertEql(.idle);
+    this.state.assertEqlAnyOf(&.{ .idle, .attached });
+    this.address.assertCurrentIfBound();
 
     if (this.sampler) |s| {
         kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
@@ -137,8 +134,10 @@ pub fn profilePid(
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
 ) !void {
-    this.arming.assertEql(.unarmed);
-    this.pin.bind();
+    this.state.assertEql(.idle);
+    this.state.transition(.attached);
+    errdefer this.state.transition(.idle);
+    this.address.bind();
 
     this.io = io;
     try this.delay_pool.init(io, this.allocator);
@@ -188,15 +187,12 @@ pub fn profilePid(
         },
     };
     this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
-
-    this.arming.transition(.armed);
 }
 
 pub fn beginExperiment(this: *ExperimentRunner, speedup_percent: u8) void {
-    this.loop.bindOrAssert();
-    this.arming.assertEql(.armed);
-    this.window.assertEql(.idle);
-    defer this.window.transition(.running);
+    this.state.assertEql(.attached);
+    this.state.transition(.running);
+    this.loop_task.bindOrAssert();
 
     // The speedup is delivered as a delay charged to everyone else.
     const sampler_period = std.time.us_per_s / sampler_frequency;
@@ -210,10 +206,9 @@ pub fn beginExperiment(this: *ExperimentRunner, speedup_percent: u8) void {
 }
 
 pub fn endExperiment(this: *ExperimentRunner) Error!?Outcome {
-    this.loop.assertCurrent();
-    this.arming.assertEql(.armed);
-    this.window.assertEql(.running);
-    defer this.window.transition(.idle);
+    this.state.assertEql(.running);
+    this.state.transition(.attached);
+    this.loop_task.assertCurrent();
 
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     this.sampler.?.disable();
@@ -234,10 +229,6 @@ pub fn endExperiment(this: *ExperimentRunner) Error!?Outcome {
 }
 
 fn delayEveryoneLagging(this: *ExperimentRunner) void {
-    this.loop.assertCurrent();
-    this.arming.assertEql(.armed);
-    this.window.assertEql(.running);
-
     {
         // The map walk and per-thread delay application must not be preempted,
         // since we hold the gate closed, if a tracepoint callback gets scheduled

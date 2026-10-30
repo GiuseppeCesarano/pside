@@ -12,7 +12,7 @@ queue: std.Io.Queue(Throughput),
 queue_buffer: [records_per_frame]Throughput,
 batch: [records_per_frame]Throughput,
 writer: ?std.Io.Future(WriteError!void),
-pin: safety.Pinned,
+address: safety.Pinned,
 
 pub const StartError = std.Io.File.LengthError || std.Io.File.SeekError || std.Io.ConcurrentError;
 pub const Error = std.Io.QueueClosedError || std.Io.Cancelable;
@@ -31,7 +31,7 @@ pub const empty: ExperimentRecorder = .{
     .queue_buffer = undefined,
     .batch = undefined,
     .writer = null,
-    .pin = .unbound,
+    .address = .unbound,
 };
 
 pub fn deinit(this: *ExperimentRecorder, io: std.Io) void {
@@ -40,9 +40,10 @@ pub fn deinit(this: *ExperimentRecorder, io: std.Io) void {
 }
 
 pub fn stop(this: *ExperimentRecorder, io: std.Io) void {
+    this.address.assertCurrentIfBound();
+
     const writer = if (this.writer) |*w| w else return;
 
-    this.pin.assertCurrent();
     this.queue.close(io);
     writer.await(io) catch |err| std.log.err("Writing records failed: {s}", .{@errorName(err)});
 
@@ -51,7 +52,7 @@ pub fn stop(this: *ExperimentRecorder, io: std.Io) void {
 
 pub fn start(this: *ExperimentRecorder, io: std.Io, fd: std.os.linux.fd_t) StartError!void {
     std.debug.assert(this.writer == null);
-    this.pin.bind();
+    this.address.bind();
 
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     this.file_writer = .init(file, io, &.{});
@@ -70,7 +71,7 @@ pub fn recordThroughput(
     injected_us: u32,
     speedup_percent: u8,
 ) Error!void {
-    this.pin.assertCurrent();
+    this.address.assertCurrent();
 
     try this.queue.putOne(io, .{
         .relative_ip = relative_ip,

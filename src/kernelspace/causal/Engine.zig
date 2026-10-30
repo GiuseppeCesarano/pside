@@ -18,10 +18,10 @@ recorder: ExperimentRecorder,
 runner: ExperimentRunner,
 
 profiler: ?std.Io.Future(LoopError!void),
-state: safety.State(Session),
-pin: safety.Pinned,
+state: safety.State(Lifecycle),
+address: safety.Pinned,
 
-const Session = enum { idle, attached, profiling };
+const Lifecycle = enum { idle, attached, profiling };
 const LoopError = std.Io.Cancelable || ExperimentRunner.Error || ExperimentRecorder.Error;
 const clock: std.Io.Clock = .boot;
 
@@ -35,12 +35,12 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, p
 
         .profiler = null,
         .state = .init(.idle),
-        .pin = .unbound,
+        .address = .unbound,
     };
 }
 
 pub fn deinit(this: *Engine, io: std.Io) void {
-    this.pin.assertCurrentIfBound();
+    this.address.assertCurrentIfBound();
     if (this.profiler) |*profiler| profiler.cancel(io) catch {};
     this.runner.deinit();
     this.recorder.deinit(io);
@@ -60,23 +60,23 @@ pub fn attach(
     attribute_kernel_samples: bool,
 ) !void {
     this.state.assertEql(.idle);
+    this.state.transition(.attached);
+    errdefer this.state.transition(.idle);
 
     this.planner = .init(@intCast(pid));
     try this.runner.profilePid(io, pid, vma_name, attribute_kernel_samples);
-
-    this.state.transition(.attached);
 }
 
 pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
     this.state.assertEql(.attached);
+    this.state.transition(.profiling);
+    errdefer this.state.transition(.attached);
+    this.address.bind();
 
     try this.recorder.start(io, fd);
     errdefer this.recorder.stop(io);
 
-    this.pin.bind();
     this.profiler = try io.concurrent(profilingLoop, .{ this, io });
-
-    this.state.transition(.profiling);
 }
 
 fn profilingLoop(this: *Engine, io: std.Io) LoopError!void {
