@@ -6,7 +6,6 @@ const linux = std.os.linux;
 const arch = @import("builtin").cpu.arch;
 
 pub const Io = @import("Io.zig");
-pub const io = Io.debug_io;
 
 const is_target_kernel = @import("builtin").code_model == .kernel;
 //TODO: keep an eye on the std lib; they may implement that.

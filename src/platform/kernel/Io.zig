@@ -27,8 +27,6 @@ workers_count: std.atomic.Value(u32),
 stop_workers: std.atomic.Value(bool),
 stopped_workers: bindings.Completion,
 
-pub const debug_io: Io = .{ .userdata = null, .vtable = &vtable };
-
 pub fn init(
     this: *KernelIo,
     allocator: Allocator,
@@ -492,4 +490,46 @@ pub const Worker = struct {
             this.waker.reinit();
         }
     }
+};
+
+pub const Debug = struct {
+    kernel_io: KernelIo,
+
+    pub fn init(this: *Debug, allocator: Allocator, atomic_allocator: Allocator) !void {
+        try this.kernel_io.init(allocator, atomic_allocator, 0);
+    }
+
+    pub fn deinit(this: *Debug) void {
+        this.kernel_io.deinit();
+    }
+
+    pub fn io(this: *Debug) Io {
+        return .{ .userdata = &this.kernel_io, .vtable = &Debug.vtable };
+    }
+
+    const vtable: Io.VTable = vtable: {
+        var v = KernelIo.vtable;
+        v.futexWait = Debug.futexWait;
+        v.futexWaitUncancelable = Debug.futexWaitUncancelable;
+        v.futexWake = Debug.futexWake;
+        break :vtable v;
+    };
+
+    fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
+        const word: *const std.atomic.Value(u32) = @ptrCast(ptr);
+        const deadline = timeout.toTimestamp(.{ .userdata = userdata, .vtable = &Debug.vtable });
+
+        while (word.load(.monotonic) == expected) {
+            try checkCancel(userdata);
+            if (deadline) |d| if (now(userdata, d.clock).nanoseconds >= d.raw.nanoseconds) return;
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn futexWaitUncancelable(_: ?*anyopaque, ptr: *const u32, expected: u32) void {
+        const word: *const std.atomic.Value(u32) = @ptrCast(ptr);
+        while (word.load(.monotonic) == expected) std.atomic.spinLoopHint();
+    }
+
+    fn futexWake(_: ?*anyopaque, _: *const u32, _: u32) void {}
 };

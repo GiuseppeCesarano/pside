@@ -5,7 +5,7 @@ const name = communications.name;
 const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
-pub const std_options_debug_io = kernel.io;
+pub const std_options_debug_io = debug_io.io();
 
 const Engine = @import("Engine");
 
@@ -26,23 +26,31 @@ pub const debug = struct {
 
 var ctl: kernel.Chardev = undefined;
 var kernel_io: kernel.Io = undefined;
+var debug_io: kernel.Io.Debug = undefined;
 
 export fn init_module() linksection(".init.text") c_int {
-    kernel.Task.resolveWorkAdd() catch return 1;
+    init() catch return 1;
+    return 0;
+}
+
+fn init() !void {
+    try debug_io.init(allocator, atomic_allocator);
+    errdefer debug_io.deinit();
+
+    try kernel.Task.resolveWorkAdd();
     kernel.tracepoint.init();
 
-    kernel_io.init(allocator, atomic_allocator, 8) catch return 1;
+    try kernel_io.init(allocator, atomic_allocator, 8);
     errdefer kernel_io.deinit();
 
-    ctl.register(name, ioctlHandler) catch return 1;
+    try ctl.register(name, ioctlHandler);
     std.log.debug("chardev created at: " ++ communications.control_device_path, .{});
-
-    return 0;
 }
 
 export fn cleanup_module() linksection(".exit.text") void {
     ctl.unregister();
     kernel_io.deinit();
+    debug_io.deinit();
 }
 
 export fn pside_engine_release(ptr: *anyopaque) void {
