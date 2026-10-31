@@ -4,13 +4,13 @@ const assert = std.debug.assert;
 const kernel = @import("kernel");
 const safety = @import("safety");
 
-const DelayPool = @import("../concurrent/DelayPool.zig");
-const VmaRanges = @import("../process/VmaRanges.zig");
-const ThreadClocks = @import("time/ThreadClocks.zig");
+const DelayPool = @import("DelayPool");
+const VmaRanges = @import("VmaRanges.zig");
+const ThreadClocks = @import("ThreadClocks.zig");
 const Key = ThreadClocks.Key;
 const Ticks = ThreadClocks.Ticks;
 
-const ExperimentRunner = @This();
+const Speedup = @This();
 
 profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
 sampler: ?*kernel.PerfEvent,
@@ -44,6 +44,11 @@ pub const Outcome = struct {
 };
 
 pub const Error = DelayPool.Error || error{NoSpace};
+pub const AttachError = error{ TaskNotFound, MultiThreadedTarget } ||
+    std.mem.Allocator.Error ||
+    VmaRanges.SnapshotError ||
+    kernel.RegisterTraceError ||
+    kernel.PerfEvent.CreateKernelCounterError;
 
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
@@ -54,7 +59,7 @@ fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
 }
 
-pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !ExperimentRunner {
+pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !Speedup {
     return .{
         .profiled_pid = .init(0),
         .sampler = null,
@@ -77,12 +82,12 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !
     };
 }
 
-fn retainTask(this: *ExperimentRunner, task: *kernel.Task) void {
+fn retainTask(this: *Speedup, task: *kernel.Task) void {
     task.get();
     this.task_references.incur();
 }
 
-fn releaseTask(this: *ExperimentRunner, task: *kernel.Task) void {
+fn releaseTask(this: *Speedup, task: *kernel.Task) void {
     task.put();
     this.task_references.discharge();
 }
@@ -97,7 +102,7 @@ fn taskFromKey(key: Key) *kernel.Task {
     return @ptrFromInt(key.withoutCollisionBit().data);
 }
 
-pub fn deinit(this: *ExperimentRunner) void {
+pub fn deinit(this: *Speedup) void {
     this.state.assertEqlAnyOf(&.{ .idle, .attached });
     this.address.assertCurrentIfBound();
 
@@ -128,12 +133,12 @@ pub fn deinit(this: *ExperimentRunner) void {
 }
 
 pub fn profilePid(
-    this: *ExperimentRunner,
+    this: *Speedup,
     io: std.Io,
     pid: std.os.linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
-) !void {
+) AttachError!void {
     this.state.assertEql(.idle);
     this.state.transition(.attached);
     errdefer this.state.transition(.idle);
@@ -143,7 +148,7 @@ pub fn profilePid(
     try this.delay_pool.init(io, this.allocator);
 
     this.profiled_pid.store(pid, .monotonic);
-    const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return error.TaskNotFound;
+    const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return AttachError.TaskNotFound;
     this.task_references.incur();
 
     // Only this task is seeded; the rest join via onNewTask, so tracking can
@@ -151,7 +156,7 @@ pub fn profilePid(
     if (task.nrThreads() != 1) {
         this.releaseTask(task);
         std.log.err("Refusing to profile pid {d}: target already has multiple threads", .{pid});
-        return error.MultiThreadedTarget;
+        return AttachError.MultiThreadedTarget;
     }
 
     // Only the first key, the reserve always has room for it.
@@ -189,7 +194,7 @@ pub fn profilePid(
     this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
 }
 
-pub fn beginExperiment(this: *ExperimentRunner, speedup_percent: u8) void {
+pub fn beginExperiment(this: *Speedup, speedup_percent: u8) void {
     this.state.assertEql(.attached);
     this.state.transition(.running);
     this.loop_task.bindOrAssert();
@@ -205,7 +210,7 @@ pub fn beginExperiment(this: *ExperimentRunner, speedup_percent: u8) void {
     this.sampler.?.enable();
 }
 
-pub fn endExperiment(this: *ExperimentRunner) Error!?Outcome {
+pub fn endExperiment(this: *Speedup) Error!?Outcome {
     this.state.assertEql(.running);
     this.state.transition(.attached);
     this.loop_task.assertCurrent();
@@ -228,7 +233,7 @@ pub fn endExperiment(this: *ExperimentRunner) Error!?Outcome {
     };
 }
 
-fn delayEveryoneLagging(this: *ExperimentRunner) void {
+fn delayEveryoneLagging(this: *Speedup) void {
     {
         // The map walk and per-thread delay application must not be preempted,
         // since we hold the gate closed, if a tracepoint callback gets scheduled
@@ -257,7 +262,7 @@ fn delayEveryoneLagging(this: *ExperimentRunner) void {
     this.delay_pool.flushPending() catch |err| this.fail(err);
 }
 
-fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
+fn applyDelay(this: *Speedup, key: Key, lag: Ticks) void {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     if (delay_per_tick == 0 or lag == 0) return;
 
@@ -271,7 +276,7 @@ fn applyDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
     };
 }
 
-fn settleDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
+fn settleDelay(this: *Speedup, key: Key, lag: Ticks) void {
     const task = taskFromKey(key);
     if (task.isRunning()) return this.applyDelay(key, lag);
 
@@ -282,7 +287,7 @@ fn settleDelay(this: *ExperimentRunner, key: Key, lag: Ticks) void {
 }
 
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
+    const this: *Speedup = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
 
     const ip = kernel.currentUserSpaceIp(regs);
     const target = this.target_ip.load(.monotonic);
@@ -294,7 +299,7 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     // since the causal attribution algorithm is robust against missed samples.
 }
 
-fn captureProfilingTarget(this: *ExperimentRunner, ip: usize) bool {
+fn captureProfilingTarget(this: *Speedup, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
 
     const we_claimed_first = this.vma_base.cmpxchgStrong(0, vma_base, .monotonic, .monotonic) == null;
@@ -308,7 +313,7 @@ fn captureProfilingTarget(this: *ExperimentRunner, ip: usize) bool {
 }
 
 fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
+    const this: *Speedup = @ptrCast(@alignCast(data.?));
     const parent = kernel.Task.current();
 
     const profiled_pid = this.profiled_pid.load(.monotonic);
@@ -330,7 +335,7 @@ fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callc
     this.applyDelay(child_key, lag);
 }
 
-fn fork(this: *ExperimentRunner, parent: Key, child: Key) !Ticks {
+fn fork(this: *Speedup, parent: Key, child: Key) !Ticks {
     kernel.preempt.disable();
     defer kernel.preempt.enable();
 
@@ -341,7 +346,7 @@ fn fork(this: *ExperimentRunner, parent: Key, child: Key) !Ticks {
 }
 
 fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
+    const this: *Speedup = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
     if (prev.tgidNr() == profiled_pid and !prev.isRunning() and !prev.isDead())
@@ -349,7 +354,7 @@ fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task
 }
 
 fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
+    const this: *Speedup = @ptrCast(@alignCast(data.?));
     const profiled_pid = this.profiled_pid.load(.monotonic);
 
     if (wakee.tgidNr() != profiled_pid or wakee.isRunning() or wakee.isDead()) return;
@@ -371,7 +376,7 @@ fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
 }
 
 fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.c) void {
-    const this: *ExperimentRunner = @ptrCast(@alignCast(data.?));
+    const this: *Speedup = @ptrCast(@alignCast(data.?));
 
     if (task.tgidNr() != this.profiled_pid.load(.monotonic)) return;
 
@@ -393,7 +398,7 @@ fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.
     if (payment != 0) this.io.sleep(.fromMicroseconds(@intCast(payment)), .awake) catch unreachable;
 }
 
-fn exitPayment(this: *ExperimentRunner, key: Key) usize {
+fn exitPayment(this: *Speedup, key: Key) usize {
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     if (delay_per_tick == 0 or !kernel.preemptible()) return 0;
 
@@ -407,7 +412,7 @@ fn exitPayment(this: *ExperimentRunner, key: Key) usize {
     return @min(@as(usize, lag) * delay_per_tick, max_exit_payment_us);
 }
 
-fn fail(this: *ExperimentRunner, err: Error) void {
+fn fail(this: *Speedup, err: Error) void {
     @branchHint(.cold);
     _ = this.failure.cmpxchgStrong(0, @intFromError(err), .monotonic, .monotonic);
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ExperimentPlanner = @This();
+const Planner = @This();
 
 prng: std.Random.DefaultPrng,
 experiment_duration: std.Io.Duration,
@@ -15,14 +15,14 @@ const max_experiment_duration: std.Io.Duration = .fromSeconds(1);
 const progress_grow_threshold = 5;
 const progress_decay_threshold = progress_grow_threshold * 4;
 
-pub fn init(seed: u64) ExperimentPlanner {
+pub fn init(seed: u64) Planner {
     return .{
         .prng = .init(seed),
         .experiment_duration = initial_experiment_duration,
     };
 }
 
-pub fn nextExperiment(this: *ExperimentPlanner) Experiment {
+pub fn nextExperiment(this: *Planner) Experiment {
     const random = this.prng.random();
 
     // 27 rolls over 21 levels: 0-6 all saturate to 0%, so the baseline every
@@ -36,7 +36,7 @@ pub fn nextExperiment(this: *ExperimentPlanner) Experiment {
     };
 }
 
-pub fn adjustDuration(this: *ExperimentPlanner, progress_delta: usize) void {
+pub fn adjustDuration(this: *Planner, progress_delta: usize) void {
     if (progress_delta < progress_grow_threshold)
         this.experiment_duration.nanoseconds = @min(max_experiment_duration.nanoseconds, this.experiment_duration.nanoseconds * 2)
     else if (progress_delta > progress_decay_threshold)

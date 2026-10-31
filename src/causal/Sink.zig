@@ -5,7 +5,7 @@ const serialization = @import("serialization");
 const payload = serialization.payload;
 const Throughput = payload.records.Throughput;
 
-const ExperimentRecorder = @This();
+const Sink = @This();
 
 file_writer: std.Io.File.Writer,
 queue: std.Io.Queue(Throughput),
@@ -25,7 +25,7 @@ const records_header: payload.records.Header = .{
     .vma_id = payload.default_vma_id,
 };
 
-pub const empty: ExperimentRecorder = .{
+pub const empty: Sink = .{
     .file_writer = undefined,
     .queue = undefined,
     .queue_buffer = undefined,
@@ -34,12 +34,12 @@ pub const empty: ExperimentRecorder = .{
     .address = .unbound,
 };
 
-pub fn deinit(this: *ExperimentRecorder, io: std.Io) void {
+pub fn deinit(this: *Sink, io: std.Io) void {
     this.stop(io);
     this.* = undefined;
 }
 
-pub fn stop(this: *ExperimentRecorder, io: std.Io) void {
+pub fn stop(this: *Sink, io: std.Io) void {
     this.address.assertCurrentIfBound();
 
     const writer = if (this.writer) |*w| w else return;
@@ -50,7 +50,7 @@ pub fn stop(this: *ExperimentRecorder, io: std.Io) void {
     this.writer = null;
 }
 
-pub fn start(this: *ExperimentRecorder, io: std.Io, fd: std.os.linux.fd_t) StartError!void {
+pub fn start(this: *Sink, io: std.Io, fd: std.os.linux.fd_t) StartError!void {
     std.debug.assert(this.writer == null);
     this.address.bind();
 
@@ -63,7 +63,7 @@ pub fn start(this: *ExperimentRecorder, io: std.Io, fd: std.os.linux.fd_t) Start
 }
 
 pub fn recordThroughput(
-    this: *ExperimentRecorder,
+    this: *Sink,
     io: std.Io,
     relative_ip: usize,
     progress_delta: u64,
@@ -82,7 +82,7 @@ pub fn recordThroughput(
     });
 }
 
-fn writeLoop(this: *ExperimentRecorder, io: std.Io) WriteError!void {
+fn writeLoop(this: *Sink, io: std.Io) WriteError!void {
     while (this.queue.getUncancelable(io, &this.batch, this.batch.len)) |len| {
         try serialization.writeBatch(&this.file_writer.interface, records_header, std.mem.sliceAsBytes(this.batch[0..len]));
     } else |_| {}

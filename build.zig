@@ -28,11 +28,11 @@ pub fn build(b: *std.Build) !void {
     });
 
     const ref_gate_mod = b.addModule("RefGate", .{
-        .root_source_file = b.path("src/kernelspace/concurrent/RefGate.zig"),
+        .root_source_file = b.path("src/concurrent/RefGate.zig"),
     });
 
     const bit_search_mod = b.addModule("BitSearch", .{
-        .root_source_file = b.path("src/kernelspace/concurrent/BitSearch.zig"),
+        .root_source_file = b.path("src/concurrent/BitSearch.zig"),
     });
 
     const safety_mod = b.addModule("safety", .{
@@ -40,18 +40,39 @@ pub fn build(b: *std.Build) !void {
     });
 
     const bindings_mod = b.addModule("kernel_bindings", .{
-        .root_source_file = b.path("src/kernelspace/bindings/kernel.zig"),
+        .root_source_file = b.path("src/platform/kernel/kernel.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{.{ .name = "safety", .module = safety_mod }},
     });
 
+    const delay_pool_mod = b.addModule("DelayPool", .{
+        .root_source_file = b.path("src/platform/kernel/DelayPool.zig"),
+        .imports = &.{
+            .{ .name = "kernel", .module = bindings_mod },
+            .{ .name = "BitSearch", .module = bit_search_mod },
+            .{ .name = "safety", .module = safety_mod },
+        },
+    });
+
+    const engine_mod = b.addModule("Engine", .{
+        .root_source_file = b.path("src/causal/Engine.zig"),
+        .imports = &.{
+            .{ .name = "kernel", .module = bindings_mod },
+            .{ .name = "DelayPool", .module = delay_pool_mod },
+            .{ .name = "RefGate", .module = ref_gate_mod },
+            .{ .name = "BitSearch", .module = bit_search_mod },
+            .{ .name = "safety", .module = safety_mod },
+            .{ .name = "serialization", .module = serialization_mod },
+        },
+    });
+
     const kernel_obj_options: std.Build.ObjectOptions = .{
         .name = "pside_zig",
         .use_llvm = true,
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/kernelspace/main.zig"),
+            .root_source_file = b.path("src/platform/kernel/module.zig"),
             .target = kernel_target,
             .optimize = kernel_optimize,
             .link_libc = false,
@@ -69,10 +90,7 @@ pub fn build(b: *std.Build) !void {
             .imports = &.{
                 .{ .name = "communications", .module = communications_mod },
                 .{ .name = "kernel", .module = bindings_mod },
-                .{ .name = "RefGate", .module = ref_gate_mod },
-                .{ .name = "BitSearch", .module = bit_search_mod },
-                .{ .name = "safety", .module = safety_mod },
-                .{ .name = "serialization", .module = serialization_mod },
+                .{ .name = "Engine", .module = engine_mod },
             },
         }),
     };
@@ -87,19 +105,19 @@ pub fn build(b: *std.Build) !void {
     }
 
     const cli_mod = b.addModule("cli", .{
-        .root_source_file = b.path("src/userspace/cli.zig"),
+        .root_source_file = b.path("src/tool/cli.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const user_ids_mod = b.addModule("UserIds", .{
-        .root_source_file = b.path("src/userspace/UserIds.zig"),
+        .root_source_file = b.path("src/tool/UserIds.zig"),
         .target = target,
         .optimize = optimize,
     });
 
     const driver_mod = b.addModule("driver", .{
-        .root_source_file = b.path("src/userspace/driver/driver.zig"),
+        .root_source_file = b.path("src/tool/driver/driver.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -110,7 +128,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const record_mod = b.addModule("record", .{
-        .root_source_file = b.path("src/userspace/record/record.zig"),
+        .root_source_file = b.path("src/tool/record/record.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -123,7 +141,7 @@ pub fn build(b: *std.Build) !void {
     });
 
     const report_mod = b.addModule("report", .{
-        .root_source_file = b.path("src/userspace/report/report.zig"),
+        .root_source_file = b.path("src/tool/report/report.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -137,7 +155,7 @@ pub fn build(b: *std.Build) !void {
     const executable_options: std.Build.ExecutableOptions = .{
         .name = "pside",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/userspace/main.zig"),
+            .root_source_file = b.path("src/tool/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -168,16 +186,16 @@ pub fn build(b: *std.Build) !void {
         use_llvm: ?bool = null,
         imports: []const std.Build.Module.Import = &.{},
     }{
-        .{ .name = "concurrent_refgate", .path = "src/kernelspace/concurrent/RefGate.zig", .sanitize_thread = true },
-        .{ .name = "concurrent_bitsearch", .path = "src/kernelspace/concurrent/BitSearch.zig", .sanitize_thread = true },
-        .{ .name = "causal_threadclocks", .path = "src/kernelspace/causal/time/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{
+        .{ .name = "concurrent_refgate", .path = "src/concurrent/RefGate.zig", .sanitize_thread = true },
+        .{ .name = "concurrent_bitsearch", .path = "src/concurrent/BitSearch.zig", .sanitize_thread = true },
+        .{ .name = "causal_threadclocks", .path = "src/causal/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{
             .{ .name = "RefGate", .module = ref_gate_mod },
             .{ .name = "BitSearch", .module = bit_search_mod },
             .{ .name = "safety", .module = safety_mod },
         } },
         .{ .name = "common_safety", .path = "src/common/safety.zig", .sanitize_thread = true },
         .{ .name = "common_serialization", .path = "src/common/serialization.zig" },
-        .{ .name = "traced_x86_64", .path = "src/userspace/record/traced/x86_64.zig" },
+        .{ .name = "traced_x86_64", .path = "src/tool/record/traced/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
     };
     for (standalone_tests) |spec| {
@@ -200,7 +218,7 @@ fn kernelTarget(b: *std.Build, target: std.Build.ResolvedTarget, kernel_headers:
         .x86_64 => .{
             .cpu_arch = .x86_64,
             .os_tag = .linux,
-            .abi = .none,
+            .abi = .eabi,
             .cpu_features_add = switch (kernel_headers) {
                 .usable => |headers| headers.zigFeatures(),
                 .unusable => KernelHeaders.base_features,
@@ -215,7 +233,7 @@ fn installWebAssets(b: *std.Build) void {
     const uplot = b.dependency("uplot", .{});
     const web_dir: std.Build.InstallDir = .{ .custom = "usr/share/pside" };
     const web_files = [_]struct { source: std.Build.LazyPath, dest: []const u8 }{
-        .{ .source = b.path("src/userspace/report/web/index.html"), .dest = "index.html" },
+        .{ .source = b.path("src/tool/report/web/index.html"), .dest = "index.html" },
         .{ .source = uplot.path("dist/uPlot.iife.min.js"), .dest = "uplot.min.js" },
         .{ .source = uplot.path("dist/uPlot.min.css"), .dest = "uplot.min.css" },
     };
@@ -264,7 +282,7 @@ fn installKernelModule(b: *std.Build, headers: KernelHeaders, zig_obj_options: s
 fn addZigObject(b: *std.Build, options: std.Build.ObjectOptions, lto: std.zig.LtoMode) !std.Build.LazyPath {
     const object = b.addObject(options);
     object.bundle_compiler_rt = false;
-    object.link_function_sections = true;
+    object.function_sections = true;
     object.link_gc_sections = true;
     object.lto = lto;
     try keepSymbols(b, object, &.{ "init_module", "cleanup_module", "description", "license", "pside_engine_release" });
@@ -275,7 +293,7 @@ fn addZigObject(b: *std.Build, options: std.Build.ObjectOptions, lto: std.zig.Lt
 fn addBindingsObject(b: *std.Build, headers: KernelHeaders, options: std.Build.Module.CreateOptions, lto: std.zig.LtoMode) !std.Build.LazyPath {
     const object = addKernelObject(b, "pside_kernel_c", options);
     object.lto = lto;
-    try headers.addCSourceFile(b, object.root_module, b.path("src/kernelspace/bindings/bindings.c"), "kernel");
+    try headers.addCSourceFile(b, object.root_module, b.path("src/platform/kernel/bindings.c"), "kernel");
 
     return object.getEmittedBin();
 }
@@ -292,7 +310,7 @@ fn addCompilerRtObject(b: *std.Build, options: std.Build.Module.CreateOptions) !
         .root_module = b.createModule(compiler_rt_options),
     });
     compiler_rt.bundle_compiler_rt = false;
-    compiler_rt.link_function_sections = true;
+    compiler_rt.function_sections = true;
 
     const used_compiler_rt = addKernelObject(b, "compiler_rt_gc", options);
     used_compiler_rt.link_gc_sections = true;

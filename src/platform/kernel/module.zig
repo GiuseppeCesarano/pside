@@ -7,15 +7,13 @@ const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 pub const std_options_debug_io = kernel.io;
 
-const Engine = @import("causal/Engine.zig");
-const VmaRanges = @import("process/VmaRanges.zig");
+const Engine = @import("Engine");
 
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL v2".*;
 
 pub const std_options: std.Options = .{
     .logFn = kernel.logWithName(name),
-    .page_size_min = 4096,
 };
 
 pub const panic = std.debug.FullPanic(kernel.debug.panic);
@@ -33,12 +31,10 @@ export fn init_module() linksection(".init.text") c_int {
     kernel.Task.resolveWorkAdd() catch return 1;
     kernel.tracepoint.init();
 
-    kernel_io.init(allocator, atomic_allocator, 1) catch return 1;
+    kernel_io.init(allocator, atomic_allocator, 8) catch return 1;
+    errdefer kernel_io.deinit();
 
-    ctl.register(name, ioctlHandler) catch {
-        kernel_io.deinit();
-        return 1;
-    };
+    ctl.register(name, ioctlHandler) catch return 1;
     std.log.debug("chardev created at: " ++ communications.control_device_path, .{});
 
     return 0;
@@ -85,7 +81,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
                 releaseEngine(filp, engine);
 
                 return switch (err) {
-                    VmaRanges.SnapshotError.NoMatchingVma => code(.NOENT),
+                    Engine.AttachError.NoMatchingVma => code(.NOENT),
                     else => code(.IO),
                 };
             };

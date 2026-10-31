@@ -5,24 +5,25 @@ const linux = std.os.linux;
 
 const safety = @import("safety");
 
-const ExperimentPlanner = @import("ExperimentPlanner.zig");
-const ExperimentRecorder = @import("ExperimentRecorder.zig");
-const ExperimentRunner = @import("ExperimentRunner.zig");
+const Planner = @import("Planner.zig");
+const Sink = @import("Sink.zig");
+const Speedup = @import("Speedup.zig");
 
 const Engine = @This();
 
 progress: *std.atomic.Value(usize),
 
-planner: ExperimentPlanner,
-recorder: ExperimentRecorder,
-runner: ExperimentRunner,
+planner: Planner,
+sink: Sink,
+speedup: Speedup,
 
 profiler: ?std.Io.Future(LoopError!void),
 state: safety.State(Lifecycle),
 address: safety.Pinned,
 
 const Lifecycle = enum { idle, attached, profiling };
-const LoopError = std.Io.Cancelable || ExperimentRunner.Error || ExperimentRecorder.Error;
+const LoopError = std.Io.Cancelable || Speedup.Error || Sink.Error;
+pub const AttachError = Speedup.AttachError;
 const clock: std.Io.Clock = .boot;
 
 pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, progress_ptr: *std.atomic.Value(usize)) !Engine {
@@ -30,8 +31,8 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, p
         .progress = progress_ptr,
 
         .planner = .init(0),
-        .recorder = .empty,
-        .runner = try .init(allocator, atomic_allocator),
+        .sink = .empty,
+        .speedup = try .init(allocator, atomic_allocator),
 
         .profiler = null,
         .state = .init(.idle),
@@ -42,8 +43,8 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, p
 pub fn deinit(this: *Engine, io: std.Io) void {
     this.address.assertCurrentIfBound();
     if (this.profiler) |*profiler| profiler.cancel(io) catch {};
-    this.runner.deinit();
-    this.recorder.deinit(io);
+    this.speedup.deinit();
+    this.sink.deinit(io);
 
     this.* = undefined;
 }
@@ -58,13 +59,13 @@ pub fn attach(
     pid: linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
-) !void {
+) AttachError!void {
     this.state.assertEql(.idle);
     this.state.transition(.attached);
     errdefer this.state.transition(.idle);
 
     this.planner = .init(@intCast(pid));
-    try this.runner.profilePid(io, pid, vma_name, attribute_kernel_samples);
+    try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples);
 }
 
 pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
@@ -73,8 +74,8 @@ pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
     errdefer this.state.transition(.attached);
     this.address.bind();
 
-    try this.recorder.start(io, fd);
-    errdefer this.recorder.stop(io);
+    try this.sink.start(io, fd);
+    errdefer this.sink.stop(io);
 
     this.profiler = try io.concurrent(profilingLoop, .{ this, io });
 }
@@ -85,17 +86,17 @@ fn profilingLoop(this: *Engine, io: std.Io) LoopError!void {
 
         const base_progress = this.progress.load(.monotonic);
         const base_time: std.Io.Timestamp = .now(io, clock);
-        this.runner.beginExperiment(experiment.speedup_percent);
+        this.speedup.beginExperiment(experiment.speedup_percent);
 
         const slept = io.sleep(experiment.duration, clock);
-        const outcome = try this.runner.endExperiment();
+        const outcome = try this.speedup.endExperiment();
         try slept;
 
         const progress_delta = this.progress.load(.monotonic) -% base_progress;
         const time_delta = base_time.untilNow(io, clock);
         this.planner.adjustDuration(progress_delta);
 
-        if (outcome) |o| try this.recorder.recordThroughput(
+        if (outcome) |o| try this.sink.recordThroughput(
             io,
             o.relative_ip,
             progress_delta,

@@ -9,7 +9,7 @@ config: std.StringHashMapUnmanaged([]const u8),
 exports_ref_stack_chk_guard: bool,
 
 pub const Detection = union(enum) { usable: KernelHeaders, unusable: []const u8 };
-pub const base_features = std.Target.x86.featureSet(&.{.soft_float});
+pub const base_features: std.Target.Cpu.Feature.Set = .empty;
 
 pub fn detect(b: *std.Build) !Detection {
     b.graph.poisonCache();
@@ -79,7 +79,7 @@ pub fn addCSourceFile(this: KernelHeaders, b: *std.Build, module: *std.Build.Mod
         this.build_dir.path(b, "arch/x86/include/generated/uapi"),
         this.source_dir.path(b, "include/uapi"),
         this.build_dir.path(b, "include/generated/uapi"),
-        b.path("src/kernelspace/bindings"),
+        b.path("src/platform/kernel"),
     }) |dir| module.addIncludePath(dir);
 
     for ([_][2][]const u8{
@@ -155,10 +155,8 @@ pub fn addCSourceFile(this: KernelHeaders, b: *std.Build, module: *std.Build.Mod
 }
 
 pub fn zigFeatures(this: KernelHeaders) std.Target.Cpu.Feature.Set {
-    var features = base_features;
-    if (this.hasRetpoline()) features.addFeatureSet(std.Target.x86.featureSet(&.{ .retpoline, .retpoline_external_thunk }));
-    if (this.hasSls()) features.addFeatureSet(std.Target.x86.featureSet(&.{ .harden_sls_ijmp, .harden_sls_ret }));
-    return features;
+    _ = this;
+    return base_features;
 }
 
 fn findSourceDir(b: *std.Build, release: []const u8, build_dir: []const u8) []const u8 {
