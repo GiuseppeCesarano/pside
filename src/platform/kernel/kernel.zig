@@ -70,10 +70,9 @@ pub const PtRegs = switch (arch) {
     else => @compileError("Unsupported arch"),
 };
 
-extern fn c_copy_from_user(*anyopaque, *const anyopaque, usize) usize;
-pub fn copyFromUser(to: []u8, from: []const u8) []const u8 {
-    const len = @min(to.len, from.len);
-    return to[0 .. len - c_copy_from_user(to.ptr, from.ptr, len)];
+extern fn c_copy_from_user(*anyopaque, usize, usize) usize;
+pub fn copyFromUser(to: []u8, from: usize) []const u8 {
+    return to[0 .. to.len - c_copy_from_user(to.ptr, from, to.len)];
 }
 
 pub const heap = struct {
@@ -151,16 +150,16 @@ pub const heap = struct {
         };
     }
 
-    extern const c_gfp_kernel: c_uint;
-    extern const c_gfp_atomic: c_uint;
+    extern fn c_gfp_kernel() c_uint;
+    extern fn c_gfp_atomic() c_uint;
     extern fn c_kmalloc(c_ulong, c_uint) ?*anyopaque;
 
     fn kmallocGfpKernel(size: c_ulong) callconv(.c) ?*anyopaque {
-        return c_kmalloc(size, c_gfp_kernel);
+        return c_kmalloc(size, c_gfp_kernel());
     }
 
     fn kmallocGfpAtomic(size: c_ulong) callconv(.c) ?*anyopaque {
-        return c_kmalloc(size, c_gfp_atomic);
+        return c_kmalloc(size, c_gfp_atomic());
     }
 
     pub const allocator: std.mem.Allocator = .{

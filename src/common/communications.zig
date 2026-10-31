@@ -48,7 +48,7 @@ pub const StartOptions = extern struct {
     output_fd: std.os.linux.fd_t,
 };
 
-pub const Data = union {
+pub const Data = extern union {
     attach: AttachOptions,
     start: StartOptions,
     empty: void,

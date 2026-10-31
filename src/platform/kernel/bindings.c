@@ -89,8 +89,8 @@ size_t c_ksym_symbol_len(void);
 unsigned long c_copy_from_user(void *, const void *, unsigned long);
 
 /* Memory management */
-extern const gfp_t c_gfp_kernel;
-extern const gfp_t c_gfp_atomic;
+gfp_t c_gfp_kernel(void);
+gfp_t c_gfp_atomic(void);
 void *c_kmalloc(size_t, gfp_t);
 
 /* Time */
@@ -206,8 +206,8 @@ unsigned long c_copy_from_user(void *to, const void *from, unsigned long n) {
 }
 
 /* Memory management */
-const gfp_t c_gfp_kernel = GFP_KERNEL;
-const gfp_t c_gfp_atomic = GFP_ATOMIC;
+gfp_t c_gfp_kernel(void) { return GFP_KERNEL; }
+gfp_t c_gfp_atomic(void) { return GFP_ATOMIC; }
 
 void *c_kmalloc(size_t size, gfp_t flags) { return kmalloc(size, flags); }
 
