@@ -155,7 +155,6 @@ pub fn profilePid(
     // be correct only if the target starts single-threaded.
     if (task.nrThreads() != 1) {
         this.releaseTask(task);
-        std.log.err("Refusing to profile pid {d}: target already has multiple threads", .{pid});
         return AttachError.MultiThreadedTarget;
     }
 

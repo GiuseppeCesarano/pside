@@ -283,6 +283,13 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
             "No executable mapping named '{s}' when the program reached its entry point; -l takes the mapped file's name as it appears in /proc/<pid>/maps. pside snapshots the mappings once, at the entry point, so a library the program dlopens later cannot be targeted.",
             .{plan.profiler.vmaName()},
         ),
+        KernelControlDevice.ControlError.MultiThreadedTarget => std.process.fatal(
+            "Process {d} already had multiple threads at its entry point; pside can only attach while the program is single-threaded.",
+            .{profiled_process.pid},
+        ),
+        KernelControlDevice.ControlError.TaskNotFound => std.process.fatal("Process {d} no longer exists; it exited before the kernel could attach.", .{profiled_process.pid}),
+        KernelControlDevice.ControlError.CouldNotRegisterTracepoints => std.process.fatal("The kernel could not register the scheduler tracepoints pside needs to follow process {d}.", .{profiled_process.pid}),
+        KernelControlDevice.ControlError.OutOfMemory => std.process.fatal("The kernel ran out of memory while attaching to process {d}.", .{profiled_process.pid}),
         else => std.process.fatal("Could not attach the profiler ({s})", .{@errorName(err)}),
     };
 

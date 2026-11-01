@@ -67,7 +67,18 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
 
                 return switch (err) {
                     Engine.AttachError.NoMatchingVma => code(.NOENT),
-                    else => code(.IO),
+                    Engine.AttachError.MultiThreadedTarget => code(.OPNOTSUPP),
+                    Engine.AttachError.TaskNotFound => code(.SRCH),
+                    Engine.AttachError.OutOfMemory => code(.NOMEM),
+                    Engine.AttachError.Failed => code(.NOLINK),
+                    Engine.AttachError.InvalidConfiguration,
+                    Engine.AttachError.CpuOffline,
+                    Engine.AttachError.HardwareBusy,
+                    Engine.AttachError.NotSupported,
+                    Engine.AttachError.HardwareNotFound,
+                    Engine.AttachError.InvalidAttributeSize,
+                    Engine.AttachError.Unexpected,
+                    => code(.IO),
                 };
             };
             filp.sessionSetEngine(engine);
