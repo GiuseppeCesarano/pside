@@ -34,7 +34,7 @@ fn init() !void {
     try kernel_io.init(allocator, atomic_allocator, 8);
     errdefer kernel_io.deinit();
 
-    try ctl.register(name, ioctlHandler);
+    try ctl.register(name, ioctlHandler, releaseHandler);
     std.log.debug("chardev created at: " ++ communications.control_device_path, .{});
 }
 
@@ -50,40 +50,37 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
 
     switch (@as(communications.Commands, @fromBackingInt(@intCast(command)))) {
         .attach_profiler => {
-            if (filp.sessionGetEngine() != null) return code(.BUSY);
+            if (sessionEngine(filp) != null) return code(.BUSY);
 
             const engine = allocator.create(Engine) catch return code(.NOMEM);
             engine.* = Engine.init(allocator, atomic_allocator, filp.sessionProgressPage()) catch {
                 allocator.destroy(engine);
                 return code(.NOMEM);
             };
-            filp.sessionSetEngine(engine);
 
             const len = data.attach.vma_name_len;
             data.attach.vma_name[len] = 0;
             const raw = data.attach.vma_name[0..len :0];
 
             engine.attach(kernel_io.io(), data.attach.pid, raw, data.attach.attribute_kernel_samples) catch |err| {
-                releaseEngine(filp, engine);
+                destroyEngine(engine);
 
                 return switch (err) {
                     Engine.AttachError.NoMatchingVma => code(.NOENT),
                     else => code(.IO),
                 };
             };
+            filp.sessionSetEngine(engine);
         },
 
         .start_profiler => {
-            const engine: *Engine = @ptrCast(@alignCast(filp.sessionGetEngine() orelse return code(.NXIO)));
+            const engine = sessionEngine(filp) orelse return code(.NXIO);
             if (engine.isProfiling()) return code(.BUSY);
 
-            engine.start(kernel_io.io(), data.start.output_fd) catch {
-                releaseEngine(filp, engine);
-                return code(.IO);
-            };
+            engine.start(kernel_io.io(), data.start.output_fd) catch return code(.IO);
         },
 
-        .stop_profiler => if (filp.sessionGetEngine()) |ptr| releaseEngine(filp, @ptrCast(@alignCast(ptr))),
+        .stop_profiler => if (takeEngine(filp)) |engine| destroyEngine(engine),
 
         else => return code(.INVAL),
     }
@@ -97,13 +94,18 @@ export fn cleanup_module() linksection(".exit.text") void {
     debug_io.deinit();
 }
 
-export fn pside_engine_release(ptr: *anyopaque) void {
-    destroyEngine(@ptrCast(@alignCast(ptr)));
+fn releaseHandler(filp_ptr: *anyopaque) callconv(.c) void {
+    if (takeEngine(@ptrCast(filp_ptr))) |engine| destroyEngine(engine);
 }
 
-fn releaseEngine(filp: *kernel.File, engine: *Engine) void {
-    destroyEngine(engine);
+fn sessionEngine(filp: *kernel.File) ?*Engine {
+    return @ptrCast(@alignCast(filp.sessionGetEngine()));
+}
+
+fn takeEngine(filp: *kernel.File) ?*Engine {
+    const engine = sessionEngine(filp);
     filp.sessionSetEngine(null);
+    return engine;
 }
 
 fn destroyEngine(engine: *Engine) void {

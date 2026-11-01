@@ -38,6 +38,7 @@ struct chardev {
   struct class *class;
   struct device *device;
   struct file_operations fops;
+  void (*release)(struct file *);
 };
 
 struct session {
@@ -76,6 +77,7 @@ _Static_assert(HRTIMER_MODE_ABS == 0x0,
 typedef int (*task_work_add_t)(struct task_struct *, struct callback_head *,
                                int);
 typedef long (*ioctl_fn)(struct file *, unsigned int, unsigned long);
+typedef void (*release_fn)(struct file *);
 
 /* Prototypes */
 
@@ -114,16 +116,13 @@ int c_snapshot_executable_vmas(struct task_struct *, const char *,
                                struct VmaRange *, int);
 
 /* Chardev */
-int c_chardev_register(struct chardev *, const char *, ioctl_fn);
+int c_chardev_register(struct chardev *, const char *, ioctl_fn, release_fn);
 void c_chardev_unregister(struct chardev *);
 void *c_session_progress_page(struct file *);
 void *c_session_get_engine(struct file *);
 void c_session_set_engine(struct file *, void *);
 void c_session_lock(struct file *);
 void c_session_unlock(struct file *);
-
-/* Defined in Zig (main.zig): tears down an engine owned by a session. */
-extern void pside_engine_release(void *);
 
 /* Perf */
 void *c_perf_event_overflow_handler_context(struct perf_event *);
@@ -312,8 +311,8 @@ static int internal_release(struct inode *inode, struct file *filp) {
   if (!s)
     return 0;
 
-  if (s->engine)
-    pside_engine_release(s->engine);
+  if (s->dev->release)
+    s->dev->release(filp);
 
   if (s->progress_page)
     free_page((unsigned long)s->progress_page);
@@ -338,7 +337,8 @@ static int internal_mmap(struct file *filp, struct vm_area_struct *vma) {
   return 0;
 }
 
-int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
+int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback,
+                       release_fn release) {
   int rc;
 
   rc = alloc_chrdev_region(&d->dev, 0, 1, name);
@@ -350,6 +350,7 @@ int c_chardev_register(struct chardev *d, const char *name, ioctl_fn callback) {
   d->fops.release = internal_release;
   d->fops.mmap = internal_mmap;
   d->fops.unlocked_ioctl = callback;
+  d->release = release;
   cdev_init(&d->cdev, &d->fops);
 
   rc = cdev_add(&d->cdev, d->dev, 1);

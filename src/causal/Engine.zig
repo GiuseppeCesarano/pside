@@ -73,6 +73,7 @@ pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
     this.state.transition(.profiling);
     errdefer this.state.transition(.attached);
     this.address.bind();
+    errdefer this.address.unbind();
 
     try this.sink.start(io, fd);
     errdefer this.sink.stop(io);

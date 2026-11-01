@@ -443,6 +443,7 @@ pub const VmaRange = extern struct {
 pub const Chardev = extern struct {
     _: [512]u8 align(8) = undefined,
     pub const IoctlFn = ?*const fn (*anyopaque, c_uint, c_ulong) callconv(.c) c_long;
+    pub const ReleaseFn = ?*const fn (*anyopaque) callconv(.c) void;
 
     pub const RegisterError = error{
         OutOfMemory,
@@ -450,9 +451,9 @@ pub const Chardev = extern struct {
         Unexpected,
     };
 
-    extern fn c_chardev_register(*Chardev, [*:0]const u8, IoctlFn) c_int;
-    pub fn register(this: *Chardev, name: [:0]const u8, ioctl: IoctlFn) RegisterError!void {
-        return switch (cErrno(c_chardev_register(this, name.ptr, ioctl))) {
+    extern fn c_chardev_register(*Chardev, [*:0]const u8, IoctlFn, ReleaseFn) c_int;
+    pub fn register(this: *Chardev, name: [:0]const u8, ioctl: IoctlFn, release: ReleaseFn) RegisterError!void {
+        return switch (cErrno(c_chardev_register(this, name.ptr, ioctl, release))) {
             .SUCCESS => {},
             .NOMEM => RegisterError.OutOfMemory,
             .BUSY => RegisterError.Busy,

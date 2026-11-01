@@ -285,7 +285,7 @@ fn addZigObject(b: *std.Build, options: std.Build.ObjectOptions, lto: std.zig.Lt
     object.function_sections = true;
     object.link_gc_sections = true;
     object.lto = lto;
-    try keepSymbols(b, object, &.{ "init_module", "cleanup_module", "description", "license", "pside_engine_release" });
+    try keepSymbols(b, object, &.{ "init_module", "cleanup_module", "description", "license" });
 
     return object.getEmittedBin();
 }
