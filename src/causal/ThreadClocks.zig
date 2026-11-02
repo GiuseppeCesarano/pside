@@ -70,9 +70,12 @@ pub const Value = packed struct(u64) {
 pub const Pair = struct {
     key: std.atomic.Value(Key),
     value: std.atomic.Value(Value),
+    since_hit: std.atomic.Value(u32),
 
-    const empty: Pair = .{ .key = .init(.empty), .value = undefined };
+    const empty: Pair = .{ .key = .init(.empty), .value = undefined, .since_hit = .init(no_recent_hit) };
 };
+
+const no_recent_hit = std.math.maxInt(u32);
 
 const Reservations = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
 
@@ -147,6 +150,7 @@ fn publishReservedUnsafe(this: *ThreadClocks, key: Key, ptr: *Pair) void {
     assert(ptr.key.load(.unordered).isEql(.reserved));
 
     this.used.take(this.getIndexUnsafe(ptr));
+    ptr.since_hit.store(no_recent_hit, .monotonic);
 
     _ = ptr.key.fetchAnd(key.withCollisionBit(), .release);
 
@@ -277,6 +281,24 @@ pub fn catchUp(this: *ThreadClocks, key: Key) ?Ticks {
     return master -| old.ticks;
 }
 
+pub fn settleSample(this: *ThreadClocks, key: Key, hit: bool, window: u32, max_deferred: Ticks) ?Ticks {
+    this.ref.tryIncrement() catch return null;
+    defer this.ref.decrement();
+
+    const slot = this.getSlotUnsafe(key) orelse return null;
+
+    const since_hit: u32 = if (hit) 0 else slot.since_hit.load(.monotonic) +| 1;
+    slot.since_hit.store(since_hit, .monotonic);
+
+    const master = this.master.load(.monotonic);
+    const old = slot.value.load(.monotonic);
+    const lag = master -| old.ticks;
+    if (since_hit <= window and lag <= max_deferred) return 0;
+
+    slot.value.store(.atValue(master), .monotonic);
+    return lag;
+}
+
 pub fn removePairUnsafe(this: *ThreadClocks, slot: *Pair) void {
     this.used.release(this.getIndexUnsafe(slot));
     _ = slot.key.fetchAnd(Key.empty_collided, .release);
@@ -386,7 +408,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator, atomic_allocator:
             const index = (hash + i) & index_mask;
 
             if (new_pairs[index].key.raw.isEql(.empty)) {
-                new_pairs[index] = .{ .key = .init(key), .value = .init(value) };
+                new_pairs[index] = .{ .key = .init(key), .value = .init(value), .since_hit = .init(pair.since_hit.raw) };
                 new_used.takeUnordered(index);
                 break;
             }

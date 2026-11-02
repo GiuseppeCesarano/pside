@@ -638,7 +638,7 @@ pub fn assertSleepable() void {
 }
 
 extern fn c_user_mode(*PtRegs) c_int;
-fn userMode(regs: *PtRegs) bool {
+pub fn userMode(regs: *PtRegs) bool {
     return c_user_mode(regs) != 0;
 }
 

@@ -53,6 +53,8 @@ pub const AttachError = error{ TaskNotFound, MultiThreadedTarget } ||
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 const clocks_reserve = 1024;
+const co_runner_window = 8;
+const co_runner_max_lag = 8;
 
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
@@ -291,10 +293,16 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
     const target = this.target_ip.load(.monotonic);
     const is_target = (ip == target) or (target == 0 and this.captureProfilingTarget(ip));
 
-    if (is_target and this.delay_per_tick.load(.monotonic) != 0)
-        this.clocks.tick(keyFromTask(kernel.Task.current())) catch {};
+    if (this.delay_per_tick.load(.monotonic) == 0) return;
+
+    const key = keyFromTask(kernel.Task.current());
+
     // .tick() errors on a locked map; we discard the error (and the tick itself)
     // since the causal attribution algorithm is robust against missed samples.
+    if (is_target) this.clocks.tick(key) catch {};
+
+    if (kernel.userMode(regs))
+        this.applyDelay(key, this.clocks.settleSample(key, is_target, co_runner_window, co_runner_max_lag) orelse return);
 }
 
 fn captureProfilingTarget(this: *Speedup, ip: usize) bool {
