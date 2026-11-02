@@ -68,14 +68,14 @@ pub fn attach(
     try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples);
 }
 
-pub fn start(this: *Engine, io: std.Io, fd: linux.fd_t) !void {
+pub fn start(this: *Engine, io: std.Io, output: std.Io.File) !void {
     this.state.assertEql(.attached);
     this.state.transition(.profiling);
     errdefer this.state.transition(.attached);
     this.address.bind();
     errdefer this.address.unbind();
 
-    try this.sink.start(io, fd);
+    try this.sink.start(io, output);
     errdefer this.sink.stop(io);
 
     this.profiler = try io.concurrent(profilingLoop, .{ this, io });

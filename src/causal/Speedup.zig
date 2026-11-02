@@ -53,7 +53,6 @@ pub const AttachError = error{ TaskNotFound, MultiThreadedTarget } ||
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 const clocks_reserve = 1024;
-const max_exit_payment_us = 50 * std.time.us_per_ms;
 
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
@@ -408,7 +407,7 @@ fn exitPayment(this: *Speedup, key: Key) usize {
         break :lag this.clocks.catchUp(key) orelse return 0;
     };
 
-    return @min(@as(usize, lag) * delay_per_tick, max_exit_payment_us);
+    return @as(usize, lag) * delay_per_tick;
 }
 
 fn fail(this: *Speedup, err: Error) void {

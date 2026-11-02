@@ -104,6 +104,31 @@ pub const File = opaque {
     pub fn size(this: *File) i64 {
         return c_file_size(this);
     }
+
+    extern fn kernel_write(*File, [*]const u8, usize, *i64) isize;
+    pub fn write(this: *File, bytes: []const u8, pos: *i64) std.Io.File.WritePositionalError!usize {
+        if (bytes.len == 0) return 0;
+
+        const Error = std.Io.File.WritePositionalError;
+        const rc = kernel_write(this, bytes.ptr, bytes.len, pos);
+        return switch (std.os.linux.errno(@as(usize, @bitCast(rc)))) {
+            .SUCCESS => @intCast(rc),
+            .NOSPC => Error.NoSpaceLeft,
+            .DQUOT => Error.DiskQuota,
+            .FBIG => Error.FileTooBig,
+            .IO => Error.InputOutput,
+            .ACCES => Error.AccessDenied,
+            .PERM => Error.PermissionDenied,
+            .PIPE => Error.BrokenPipe,
+            .NOMEM => Error.SystemResources,
+            .AGAIN => Error.WouldBlock,
+            .NXIO => Error.NoDevice,
+            .BUSY => Error.DeviceBusy,
+            .SPIPE => Error.Unseekable,
+            .BADF => Error.NotOpenForWriting,
+            else => Error.Unexpected,
+        };
+    }
 };
 
 pub const Spinlock = extern struct {

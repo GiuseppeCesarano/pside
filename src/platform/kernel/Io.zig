@@ -27,6 +27,13 @@ workers_count: std.atomic.Value(u32),
 stop_workers: std.atomic.Value(bool),
 stopped_workers: bindings.Completion,
 
+// TODO: https://codeberg.org/ziglang/zig/pulls/31235
+files: [max_files]std.atomic.Value(?*bindings.File),
+const max_files = 16;
+
+// TODO: #31235
+pub const AdoptFileError = error{ BadFileDescriptor, ProcessFdQuotaExceeded };
+
 pub fn init(
     this: *KernelIo,
     allocator: Allocator,
@@ -47,7 +54,32 @@ pub fn init(
     this.stop_workers = .init(false);
     this.stopped_workers.init();
 
+    // TODO:REMOVE ME #31235
+    this.files = @splat(.init(null));
+
     try this.startWorkers(workers_count);
+}
+
+// TODO: #31235
+pub fn adoptFile(this: *KernelIo, fd: std.os.linux.fd_t) AdoptFileError!File {
+    const fd_index = std.math.cast(c_uint, fd) orelse return AdoptFileError.BadFileDescriptor;
+    const kernel_file = bindings.File.get(fd_index) orelse return AdoptFileError.BadFileDescriptor;
+    errdefer kernel_file.put();
+
+    for (&this.files, 0..) |*slot, index|
+        if (slot.cmpxchgStrong(null, kernel_file, .release, .monotonic) == null)
+            return .{ .handle = @intCast(index), .flags = .{ .nonblocking = false } };
+
+    return AdoptFileError.ProcessFdQuotaExceeded;
+}
+
+// TODO: #31235
+fn adoptedFile(userdata: ?*anyopaque, file: File) ?*bindings.File {
+    const kernel_io: *KernelIo = @ptrCast(@alignCast(userdata.?));
+    const index = std.math.cast(usize, file.handle).?;
+    if (index >= kernel_io.files.len) unreachable;
+
+    return kernel_io.files[index].load(.acquire);
 }
 
 fn startWorkers(this: *KernelIo, workers_count: u32) !void {
@@ -102,6 +134,8 @@ const vtable: Io.VTable = vtable: {
     v.clockResolution = clockResolution;
     v.sleep = sleep;
     v.fileLength = fileLength;
+    v.fileClose = fileClose;
+    v.fileWritePositional = fileWritePositional;
     break :vtable v;
 };
 
@@ -331,12 +365,54 @@ fn toLinuxClock(clock: Io.Clock) std.os.linux.clockid_t {
     };
 }
 
-fn fileLength(_: ?*anyopaque, file: File) File.LengthError!u64 {
-    const fd = std.math.cast(c_uint, file.handle) orelse return File.LengthError.Unexpected;
-    const kernel_file = bindings.File.get(fd) orelse return File.LengthError.Unexpected;
-    defer kernel_file.put();
-
+fn fileLength(userdata: ?*anyopaque, file: File) File.LengthError!u64 {
+    const kernel_file = adoptedFile(userdata, file) orelse return File.LengthError.Unexpected;
     return @intCast(kernel_file.size());
+}
+
+fn fileClose(userdata: ?*anyopaque, files: []const File) void {
+    const kernel_io: *KernelIo = @ptrCast(@alignCast(userdata.?));
+
+    for (files) |file| {
+        const index: usize = @intCast(file.handle);
+        const kernel_file = kernel_io.files[index].swap(null, .acquire).?;
+        kernel_file.put();
+    }
+}
+
+fn fileWritePositional(
+    userdata: ?*anyopaque,
+    file: File,
+    header: []const u8,
+    data_and_splat: []const []const u8,
+    splat_repeats: usize,
+    offset: u64,
+) File.WritePositionalError!usize {
+    // TODO: consider vfs_iter_write
+    const kernel_file = adoptedFile(userdata, file) orelse return File.WritePositionalError.NotOpenForWriting;
+    const data = data_and_splat[0 .. data_and_splat.len - 1];
+    const splat = data_and_splat[data_and_splat.len - 1];
+
+    const start = std.math.cast(i64, offset) orelse return File.WritePositionalError.FileTooBig;
+    var pos = start;
+
+    if (try kernel_file.write(header, &pos) < header.len) return @intCast(pos - start);
+
+    for (data) |bytes| {
+        const written_bytes = kernel_file.write(bytes, &pos) catch |err|
+            return if (pos == start) err else @intCast(pos - start);
+
+        if (written_bytes < bytes.len) return @intCast(pos - start);
+    }
+
+    for (0..splat_repeats) |_| {
+        const written_bytes = kernel_file.write(splat, &pos) catch |err|
+            return if (pos == start) err else @intCast(pos - start);
+
+        if (written_bytes < splat.len) return @intCast(pos - start);
+    }
+
+    return @intCast(pos - start);
 }
 
 const Future = struct {

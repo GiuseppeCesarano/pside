@@ -88,7 +88,11 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
             const engine = sessionEngine(filp) orelse return code(.NXIO);
             if (engine.isProfiling()) return code(.BUSY);
 
-            engine.start(kernel_io.io(), data.start.output_fd) catch return code(.IO);
+            const output = kernel_io.adoptFile(data.start.output_fd) catch |err| return switch (err) {
+                kernel.Io.AdoptFileError.BadFileDescriptor => code(.BADF),
+                kernel.Io.AdoptFileError.ProcessFdQuotaExceeded => code(.MFILE),
+            };
+            engine.start(kernel_io.io(), output) catch return code(.IO);
         },
 
         .stop_profiler => if (takeEngine(filp)) |engine| destroyEngine(engine),

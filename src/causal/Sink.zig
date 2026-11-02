@@ -46,15 +46,16 @@ pub fn stop(this: *Sink, io: std.Io) void {
 
     this.queue.close(io);
     writer.await(io) catch |err| std.log.err("Writing records failed: {s}", .{@errorName(err)});
+    this.file_writer.file.close(io);
 
     this.writer = null;
 }
 
-pub fn start(this: *Sink, io: std.Io, fd: std.os.linux.fd_t) StartError!void {
+pub fn start(this: *Sink, io: std.Io, file: std.Io.File) StartError!void {
+    errdefer file.close(io);
     std.debug.assert(this.writer == null);
     this.address.bind();
 
-    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     this.file_writer = .init(file, io, &.{});
     try this.file_writer.seekToUnbuffered(try file.length(io));
 
