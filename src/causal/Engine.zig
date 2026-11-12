@@ -8,6 +8,7 @@ const safety = @import("safety");
 const Planner = @import("Planner.zig");
 const Sink = @import("Sink.zig");
 const Speedup = @import("Speedup.zig");
+pub const AttachError = Speedup.AttachError;
 
 const Engine = @This();
 
@@ -18,12 +19,12 @@ sink: Sink,
 speedup: Speedup,
 
 profiler: ?std.Io.Future(LoopError!void),
-state: safety.State(Lifecycle),
+
 address: safety.Pinned,
+state: safety.State(Lifecycle),
 
 const Lifecycle = enum { idle, attached, profiling };
 const LoopError = std.Io.Cancelable || Speedup.Error || Sink.Error;
-pub const AttachError = Speedup.AttachError;
 const clock: std.Io.Clock = .boot;
 
 pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, progress_ptr: *std.atomic.Value(usize)) !Engine {
@@ -35,14 +36,23 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, p
         .speedup = try .init(allocator, atomic_allocator),
 
         .profiler = null,
-        .state = .init(.idle),
+
         .address = .unbound,
+        .state = .init(.idle),
     };
 }
 
 pub fn deinit(this: *Engine, io: std.Io) void {
-    this.address.assertCurrentIfBound();
-    if (this.profiler) |*profiler| profiler.cancel(io) catch {};
+    this.address.assertUnchangedOrUnbound();
+
+    if (this.profiler) |*profiler| {
+        this.state.assertEql(.profiling);
+        profiler.cancel(io) catch {};
+        this.state.transition(.attached);
+    }
+
+    this.state.assertOneOf(&.{ .idle, .attached });
+
     this.speedup.deinit();
     this.sink.deinit(io);
 
@@ -61,24 +71,24 @@ pub fn attach(
     attribute_kernel_samples: bool,
 ) AttachError!void {
     this.state.assertEql(.idle);
-    this.state.transition(.attached);
-    errdefer this.state.transition(.idle);
 
     this.planner = .init(@intCast(pid));
     try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples);
+
+    this.state.transition(.attached);
 }
 
 pub fn start(this: *Engine, io: std.Io, output: std.Io.File) !void {
     this.state.assertEql(.attached);
-    this.state.transition(.profiling);
-    errdefer this.state.transition(.attached);
-    this.address.bind();
-    errdefer this.address.unbind();
 
     try this.sink.start(io, output);
     errdefer this.sink.stop(io);
 
+    this.address.bind();
+    errdefer this.address.unbind();
     this.profiler = try io.concurrent(profilingLoop, .{ this, io });
+
+    this.state.transition(.profiling);
 }
 
 fn profilingLoop(this: *Engine, io: std.Io) LoopError!void {

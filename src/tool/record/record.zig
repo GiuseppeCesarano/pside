@@ -152,7 +152,7 @@ fn driverCommand(io: std.Io, verb: enum { load, unload }) DriverError!void {
 
     const term = child.wait(io) catch return DriverError.CouldNotWait;
 
-    if (!term.success()) return DriverError.DriverCommandFailed;
+    if (!term.eql(.success)) return DriverError.DriverCommandFailed;
 }
 
 fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
@@ -194,29 +194,29 @@ const Profiler = struct {
 
     fn attach(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
         this.state.assertEql(.idle);
-        this.state.transition(.attached);
-        errdefer this.state.transition(.idle);
 
         var attach_options = this.attach_options;
         attach_options.pid = pid;
 
         try this.device.attachProfilerToPid(attach_options);
+
+        this.state.transition(.attached);
     }
 
     fn start(this: *Profiler) KernelControlDevice.ControlError!void {
         this.state.assertEql(.attached);
-        this.state.transition(.profiling);
-        errdefer this.state.transition(.attached);
 
         try this.device.startProfiler(.{ .output_fd = this.output_fd });
+
+        this.state.transition(.profiling);
     }
 
     fn stop(this: *Profiler) KernelControlDevice.ControlError!void {
         this.state.assertEql(.profiling);
-        this.state.transition(.idle);
-        errdefer this.state.transition(.profiling);
 
         try this.device.stop();
+
+        this.state.transition(.idle);
     }
 };
 
@@ -237,7 +237,7 @@ const PrepareCommand = struct {
 
         const term = child.wait(io) catch return RunError.CouldNotWait;
 
-        if (!term.success()) {
+        if (!term.eql(.success)) {
             std.log.err("Prepare command '{s}' {f}", .{ this.command, term });
             return RunError.PrepareCommandFailed;
         }

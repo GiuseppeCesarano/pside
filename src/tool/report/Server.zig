@@ -39,7 +39,7 @@ pub fn init(allocator: std.mem.Allocator, io: Io, profile: *const Profile) !Serv
 
 pub fn deinit(this: *Server, allocator: std.mem.Allocator, io: Io) void {
     this.state.assertEql(.drained);
-    this.address.assertCurrentIfBound();
+    this.address.assertUnchangedOrUnbound();
 
     this.stop(io);
     this.server.deinit(io);
@@ -74,7 +74,7 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
         this.connections.cancel(io);
         this.state.transition(.drained);
     }
-    this.address.bindOrAssert();
+    this.address.bindOrAssertUnchanged();
 
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);

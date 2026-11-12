@@ -99,10 +99,10 @@ pub fn init(allocator: std.mem.Allocator, reserve: usize) !ThreadClocks {
 }
 
 pub fn deinit(this: *ThreadClocks, allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) void {
-    this.iterators.assertCount(.eq, 0);
+    this.iterators.assert(.eq, 0);
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertCount(.eq, 0);
+    this.reservations.assert(.eq, 0);
 
     const table_allocator = if (this.atomically_allocated) atomic_allocator else allocator;
     table_allocator.free(this.pairs);
@@ -385,7 +385,7 @@ pub fn grow(this: *ThreadClocks, allocator: std.mem.Allocator, atomic_allocator:
 
     this.ref.close();
     this.ref.drain();
-    this.reservations.assertCount(.eq, 0);
+    this.reservations.assert(.eq, 0);
 
     // Another grower got there first; its table is already the size we wanted.
     if (this.pairs.len != old_len) {

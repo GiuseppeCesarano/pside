@@ -52,27 +52,28 @@ pub const empty: DelayPool = .{
 
 pub fn init(this: *DelayPool, io: std.Io, allocator: Allocator) !void {
     this.state.assertEql(.uninitialized);
-    this.state.transition(.ready);
-    errdefer this.state.transition(.uninitialized);
-    this.address.bind();
 
     this.chunks = try allocator.create(Chunk);
+
+    this.address.bind();
     this.initChunk(this.chunks, false);
 
     this.io = io;
     this.all_released = .unset;
 
     this.users_count = .init(1);
+
+    this.state.transition(.ready);
 }
 
 pub fn deinit(this: *DelayPool, allocator: Allocator, atomic_allocator: Allocator) void {
     if (this.users_count.load(.monotonic) == uninitialized) return;
 
-    this.address.assertCurrent();
+    this.address.assertUnchanged();
 
     // A pending delay still counts as a user and nothing is left to flush it
     this.cancelAllPending();
-    this.pending.assertCount(.eq, 0);
+    this.pending.assert(.eq, 0);
     this.waitAllDelays();
     assert(this.users_count.load(.monotonic) == 0);
 
@@ -127,7 +128,7 @@ pub fn flushPending(this: *DelayPool) kernel.Task.WorkAddError!void {
         }
     }
 
-    this.pending.assertCount(.eq, 0);
+    this.pending.assert(.eq, 0);
 
     if (failure) |err| return err;
 }
@@ -138,7 +139,7 @@ pub fn waitAllDelays(this: *DelayPool) void {
 }
 
 fn reserve(this: *DelayPool, allocator: Allocator, atomic_allocator: Allocator, task: *kernel.Task, delay_time: usize) Allocator.Error!*DelayWork {
-    this.address.assertCurrent();
+    this.address.assertUnchanged();
     assert(delay_time != 0);
 
     _ = this.users_count.fetchAdd(1, .monotonic);

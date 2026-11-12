@@ -104,8 +104,8 @@ fn taskFromKey(key: Key) *kernel.Task {
 }
 
 pub fn deinit(this: *Speedup) void {
-    this.state.assertEqlAnyOf(&.{ .idle, .attached });
-    this.address.assertCurrentIfBound();
+    this.state.assertOneOf(&.{ .idle, .attached });
+    this.address.assertUnchangedOrUnbound();
 
     if (this.sampler) |s| {
         kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
@@ -126,7 +126,7 @@ pub fn deinit(this: *Speedup) void {
     while (it.next()) |pair|
         this.releaseTask(taskFromKey(pair.key.raw));
 
-    this.task_references.assertCount(.eq, 0);
+    this.task_references.assert(.eq, 0);
 
     this.clocks.deinit(this.allocator, this.atomic_allocator);
 
@@ -141,9 +141,6 @@ pub fn profilePid(
     attribute_kernel_samples: bool,
 ) AttachError!void {
     this.state.assertEql(.idle);
-    this.state.transition(.attached);
-    errdefer this.state.transition(.idle);
-    this.address.bind();
 
     this.io = io;
     try this.delay_pool.init(io, this.allocator);
@@ -163,6 +160,11 @@ pub fn profilePid(
     this.clocks.put(keyFromTask(task), 0) catch unreachable;
 
     this.vma_ranges = try .snapshot(this.allocator, task, vma_name);
+
+    this.address.bind();
+    errdefer this.address.unbind();
+
+    errdefer kernel.tracepoint.synchronizeUnregister();
 
     try kernel.registerTraceSchedSwitch(onSchedSwitch, this);
     errdefer kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
@@ -192,12 +194,13 @@ pub fn profilePid(
         },
     };
     this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
+
+    this.state.transition(.attached);
 }
 
 pub fn beginExperiment(this: *Speedup, speedup_percent: u8) void {
     this.state.assertEql(.attached);
-    this.state.transition(.running);
-    this.loop_task.bindOrAssert();
+    this.loop_task.bindOrAssertUnchanged();
 
     // The speedup is delivered as a delay charged to everyone else.
     const sampler_period = std.time.us_per_s / sampler_frequency;
@@ -208,17 +211,20 @@ pub fn beginExperiment(this: *Speedup, speedup_percent: u8) void {
     this.target_ip.store(0, .seq_cst);
     this.vma_base.store(0, .seq_cst);
     this.sampler.?.enable();
+
+    this.state.transition(.running);
 }
 
 pub fn endExperiment(this: *Speedup) Error!?Outcome {
     this.state.assertEql(.running);
-    this.state.transition(.attached);
-    this.loop_task.assertCurrent();
+    this.loop_task.assertUnchanged();
 
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
     this.sampler.?.disable();
     this.delayEveryoneLagging();
     this.delay_per_tick.store(0, .monotonic);
+
+    this.state.transition(.attached);
 
     const failure = this.failure.load(.monotonic);
     if (failure != 0) return @errorCast(@errorFromInt(failure));

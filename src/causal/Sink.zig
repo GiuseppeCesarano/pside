@@ -40,7 +40,7 @@ pub fn deinit(this: *Sink, io: std.Io) void {
 }
 
 pub fn stop(this: *Sink, io: std.Io) void {
-    this.address.assertCurrentIfBound();
+    this.address.assertUnchangedOrUnbound();
 
     const writer = if (this.writer) |*w| w else return;
 
@@ -49,16 +49,18 @@ pub fn stop(this: *Sink, io: std.Io) void {
     this.file_writer.file.close(io);
 
     this.writer = null;
+    this.address.unbind();
 }
 
 pub fn start(this: *Sink, io: std.Io, file: std.Io.File) StartError!void {
     errdefer file.close(io);
     std.debug.assert(this.writer == null);
-    this.address.bind();
 
     this.file_writer = .init(file, io, &.{});
     try this.file_writer.seekToUnbuffered(try file.length(io));
 
+    this.address.bind();
+    errdefer this.address.unbind();
     this.queue = .init(&this.queue_buffer);
     this.writer = try io.concurrent(writeLoop, .{ this, io });
 }
@@ -72,7 +74,7 @@ pub fn recordThroughput(
     injected_us: u32,
     speedup_percent: u8,
 ) Error!void {
-    this.address.assertCurrent();
+    this.address.assertUnchanged();
 
     try this.queue.putOne(io, .{
         .relative_ip = relative_ip,
