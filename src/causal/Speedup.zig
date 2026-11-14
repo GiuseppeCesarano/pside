@@ -1,14 +1,14 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const DelayPool = @import("DelayPool");
 const kernel = @import("kernel");
 const safety = @import("safety");
 
-const DelayPool = @import("DelayPool");
-const VmaRanges = @import("VmaRanges.zig");
 const ThreadClocks = @import("ThreadClocks.zig");
 const Key = ThreadClocks.Key;
 const Ticks = ThreadClocks.Ticks;
+const VmaRanges = @import("VmaRanges.zig");
 
 const Speedup = @This();
 
@@ -55,7 +55,6 @@ pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics wit
 const clocks_reserve = 1024;
 const co_runner_window = 8;
 const co_runner_max_lag = 8;
-
 fn currentTask(_: *const anyopaque) *kernel.Task {
     return kernel.Task.current();
 }
@@ -82,7 +81,6 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !
         .address = .unbound,
     };
 }
-
 fn retainTask(this: *Speedup, task: *kernel.Task) void {
     task.get();
     this.task_references.incur();

@@ -1,7 +1,5 @@
 const std = @import("std");
-
 const cli = @import("cli");
-
 const Graph = @import("Graph.zig");
 const Profile = @import("Profile.zig");
 const Server = @import("Server.zig");

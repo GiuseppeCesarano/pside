@@ -21,7 +21,7 @@ iterators: safety.Obligations,
 
 pub const Ticks = u32;
 
-pub const Key = packed struct(usize) {
+pub const Key = bitpack struct(usize) {
     data: usize,
 
     // Task pointers are always aligned so the first bit will always be 0
@@ -52,7 +52,7 @@ pub const Key = packed struct(usize) {
     }
 };
 
-pub const Value = packed struct(u64) {
+pub const Value = bitpack struct(u64) {
     ticks: Ticks,
     master_at_sleep: Ticks,
 

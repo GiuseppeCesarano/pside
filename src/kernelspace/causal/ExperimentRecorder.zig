@@ -1,0 +1,49 @@
+const std = @import("std");
+
+const payload = @import("serialization").payload;
+
+const DiskWriter = @import("../io/DiskWriter.zig");
+
+const ExperimentRecorder = @This();
+
+disk_writer: DiskWriter,
+
+pub const Error = error{ Full, DelayExceedsWindow };
+
+pub const Reading = struct {
+    progress: usize,
+    vclock: u64,
+    time_us: u64,
+};
+
+pub const empty: ExperimentRecorder = .{ .disk_writer = .empty };
+
+pub fn deinit(this: *ExperimentRecorder, allocator: std.mem.Allocator) void {
+    this.disk_writer.deinit(allocator);
+}
+
+pub fn start(this: *ExperimentRecorder, allocator: std.mem.Allocator, fd: std.os.linux.fd_t) !void {
+    try this.disk_writer.start(allocator, fd, .throughput, @sizeOf(payload.records.Throughput), payload.default_vma_id);
+}
+
+pub fn recordThroughput(
+    this: *ExperimentRecorder,
+    base: Reading,
+    end: Reading,
+    delay_per_tick: u16,
+    relative_ip: usize,
+    speedup_percent: u16,
+) Error!void {
+    const wall = end.time_us - base.time_us;
+    const injected_delay = (end.vclock - base.vclock) * delay_per_tick;
+    if (injected_delay >= wall) return Error.DelayExceedsWindow;
+
+    const progress_delta: f32 = @floatFromInt(end.progress -% base.progress);
+    const virtual_time: f32 = @floatFromInt(wall - injected_delay);
+
+    try this.disk_writer.push(payload.records.Throughput{
+        .relative_ip = relative_ip,
+        .throughput = progress_delta / virtual_time,
+        .speedup_percent = @truncate(speedup_percent),
+    });
+}

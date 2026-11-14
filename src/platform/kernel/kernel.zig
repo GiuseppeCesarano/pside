@@ -34,7 +34,7 @@ pub const PtRegs = switch (arch) {
         c: extern union {
             s: u16,
             sx: u64,
-            fred_cs: packed struct(u64) {
+            fred_cs: bitpack struct(u64) {
                 cs: u16,
                 sl: u2,
                 wfe: bool,
@@ -48,7 +48,7 @@ pub const PtRegs = switch (arch) {
         s: extern union {
             s: u16,
             sx: u64,
-            fred_ss: packed struct(u64) {
+            fred_ss: bitpack struct(u64) {
                 ss: u16,
                 sti: bool,
                 swevent: bool,

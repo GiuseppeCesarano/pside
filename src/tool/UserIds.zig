@@ -1,6 +1,5 @@
 const std = @import("std");
 const linux = std.os.linux;
-
 const UserIds = @This();
 
 gid: u32,

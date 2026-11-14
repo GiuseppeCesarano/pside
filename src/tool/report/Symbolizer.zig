@@ -1,6 +1,5 @@
 const std = @import("std");
 const Dwarf = std.debug.Dwarf;
-
 const Symbolizer = @This();
 
 debug_info: union(enum) { open: Debug, unavailable: OpenError },

@@ -1,11 +1,8 @@
 const std = @import("std");
 const linux = std.os.linux;
-
 const safety = @import("safety");
 const UserIds = @import("UserIds");
-
 const Program = @import("Program.zig");
-
 const TracedProcess = @This();
 const arch_specific = switch (@import("builtin").cpu.arch) {
     .x86_64 => @import("traced/x86_64.zig"),

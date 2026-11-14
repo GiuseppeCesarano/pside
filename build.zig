@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const KernelHeaders = @import("build/KernelHeaders.zig");
 
 pub fn build(b: *std.Build) !void {
@@ -40,6 +39,11 @@ pub fn build(b: *std.Build) !void {
     });
 
     const bindings_mod = b.addModule("kernel_bindings", .{
+        .root_source_file = b.path("src/platform/kernel/kernel.zig"),
+        .imports = &.{.{ .name = "safety", .module = safety_mod }},
+    });
+
+    const bindings_test_mod = b.createModule(.{
         .root_source_file = b.path("src/platform/kernel/kernel.zig"),
         .target = target,
         .optimize = optimize,
@@ -176,7 +180,7 @@ pub fn build(b: *std.Build) !void {
     installWebAssets(b);
 
     const test_step = b.step("test", "Run tests");
-    for ([_]*std.Build.Module{ cli_mod, bindings_mod, report_mod, record_mod, driver_mod }) |module|
+    for ([_]*std.Build.Module{ cli_mod, bindings_test_mod, report_mod, record_mod, driver_mod }) |module|
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module })).step);
 
     const standalone_tests = [_]struct {

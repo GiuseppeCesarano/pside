@@ -1,5 +1,4 @@
 const std = @import("std");
-
 const cli = @import("cli");
 const driver = @import("driver").driver;
 const record = @import("record").record;

@@ -432,7 +432,7 @@ const Future = struct {
     alloc_len: usize,
 
     const Status = enum { pending, running };
-    const Cancel = packed struct(u8) {
+    const Cancel = bitpack struct(u8) {
         requested: bool = false,
         acknowledged: bool = false,
         protection: Io.CancelProtection = .unblocked,

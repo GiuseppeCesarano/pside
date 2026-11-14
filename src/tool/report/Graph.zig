@@ -1,8 +1,6 @@
 const std = @import("std");
-
 const serialization = @import("serialization");
 const speedup_levels_len = serialization.speedup_levels_len;
-
 const Graph = @This();
 
 location: []const u8,

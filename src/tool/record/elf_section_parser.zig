@@ -1,6 +1,5 @@
 const std = @import("std");
 const elf = std.elf;
-
 const Program = @import("Program.zig");
 
 pub const ParseError = error{
@@ -36,7 +35,7 @@ fn getStrtab(header: elf.Header, reader: *std.Io.File.Reader, allocator: std.mem
     } else return ParseError.BadElf;
 
     reader.seekTo(strtab_sh.sh_offset) catch return ParseError.BadElf;
-    return reader.interface.readAlloc(allocator, strtab_sh.sh_size) catch |err| switch (err) {
+    return reader.interface.readAllocAll(allocator, strtab_sh.sh_size) catch |err| switch (err) {
         error.OutOfMemory => ParseError.OutOfMemory,
         else => ParseError.BadElf,
     };
@@ -52,7 +51,7 @@ fn getSectionByName(header: elf.Header, reader: *std.Io.File.Reader, target_name
 
 fn findCorrectProgressPoint(header: elf.Header, shdr: std.elf.Elf64_Shdr, reader: *std.Io.File.Reader, name: []const u8, allocator: std.mem.Allocator) ParseError![]const usize {
     reader.seekTo(shdr.sh_offset) catch return ParseError.BadElf;
-    const section_data = reader.interface.readAlloc(allocator, shdr.sh_size) catch |err| switch (err) {
+    const section_data = reader.interface.readAllocAll(allocator, shdr.sh_size) catch |err| switch (err) {
         error.OutOfMemory => return ParseError.OutOfMemory,
         else => return ParseError.BadElf,
     };

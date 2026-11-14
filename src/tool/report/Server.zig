@@ -2,11 +2,8 @@ const std = @import("std");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
-
 const safety = @import("safety");
-
 const Profile = @import("Profile.zig");
-
 const Server = @This();
 
 server: net.Server,

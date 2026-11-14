@@ -96,7 +96,7 @@ pub const Header = extern struct {
         minor: u8,
     };
 
-    pub const Flags = packed struct(u16) {
+    pub const Flags = bitpack struct(u16) {
         _: u16 = 0,
     };
 

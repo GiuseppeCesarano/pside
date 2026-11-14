@@ -1,8 +1,6 @@
 const std = @import("std");
 const linux = std.os.linux;
-
 const communications = @import("communications");
-
 const KernelControlDevice = @This();
 
 ctl: std.Io.File,
