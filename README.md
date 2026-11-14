@@ -11,7 +11,7 @@ path (`bindings/kernel.zig`, `record/traced/x86_64.zig`) are x86_64-specific.
 
 ## Build
 
-To use Pside, you will need the Zig master compiler, kernel headers, and the standard toolchain for building kernel modules. Once these requirements are satisfied, you can compile the profiler by running:
+To use Pside, you will need the Zig master compiler and the kernel headers for the running kernel; the module is built by Zig itself, so no C toolchain is required. Once these requirements are satisfied, you can compile the profiler by running:
 
 `zig build -Drelease`
 

@@ -24,6 +24,7 @@ address: safety.Pinned,
 state: safety.State(Lifecycle),
 
 const Lifecycle = enum { idle, attached, profiling };
+pub const StopError = Speedup.Error || Sink.WriteError;
 const LoopError = std.Io.Cancelable || Speedup.Error || Sink.Error;
 const clock: std.Io.Clock = .boot;
 
@@ -42,21 +43,30 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator, p
     };
 }
 
-pub fn deinit(this: *Engine, io: std.Io) void {
+pub fn deinit(this: *Engine) void {
     this.address.assertUnchangedOrUnbound();
-
-    if (this.profiler) |*profiler| {
-        this.state.assertEql(.profiling);
-        profiler.cancel(io) catch {};
-        this.state.transition(.attached);
-    }
-
     this.state.assertOneOf(&.{ .idle, .attached });
 
     this.speedup.deinit();
-    this.sink.deinit(io);
+    this.sink.deinit();
 
     this.* = undefined;
+}
+
+pub fn stop(this: *Engine, io: std.Io) StopError!void {
+    const profiler = if (this.profiler) |*p| p else return;
+    this.state.assertEql(.profiling);
+
+    const loop_result = profiler.cancel(io);
+    this.profiler = null;
+    this.state.transition(.attached);
+
+    try this.sink.stop(io);
+
+    loop_result catch |err| switch (err) {
+        std.Io.Cancelable.Canceled, std.Io.QueueClosedError.Closed => {},
+        else => |e| return e,
+    };
 }
 
 pub fn isProfiling(this: *const Engine) bool {
@@ -82,7 +92,7 @@ pub fn start(this: *Engine, io: std.Io, output: std.Io.File) !void {
     this.state.assertEql(.attached);
 
     try this.sink.start(io, output);
-    errdefer this.sink.stop(io);
+    errdefer this.sink.stop(io) catch {};
 
     this.address.bind();
     errdefer this.address.unbind();

@@ -16,7 +16,7 @@ address: safety.Pinned,
 
 pub const StartError = std.Io.File.LengthError || std.Io.File.SeekError || std.Io.ConcurrentError;
 pub const Error = std.Io.QueueClosedError || std.Io.Cancelable;
-const WriteError = std.Io.Writer.Error;
+pub const WriteError = std.Io.Writer.Error;
 
 const records_per_frame = 64;
 const records_header: payload.records.Header = .{
@@ -34,22 +34,23 @@ pub const empty: Sink = .{
     .address = .unbound,
 };
 
-pub fn deinit(this: *Sink, io: std.Io) void {
-    this.stop(io);
+pub fn deinit(this: *Sink) void {
+    std.debug.assert(this.writer == null);
     this.* = undefined;
 }
 
-pub fn stop(this: *Sink, io: std.Io) void {
+pub fn stop(this: *Sink, io: std.Io) WriteError!void {
     this.address.assertUnchangedOrUnbound();
 
     const writer = if (this.writer) |*w| w else return;
+    defer {
+        this.file_writer.file.close(io);
+        this.writer = null;
+        this.address.unbind();
+    }
 
     this.queue.close(io);
-    writer.await(io) catch |err| std.log.err("Writing records failed: {s}", .{@errorName(err)});
-    this.file_writer.file.close(io);
-
-    this.writer = null;
-    this.address.unbind();
+    try writer.await(io);
 }
 
 pub fn start(this: *Sink, io: std.Io, file: std.Io.File) StartError!void {

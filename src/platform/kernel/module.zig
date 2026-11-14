@@ -95,7 +95,20 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
             engine.start(kernel_io.io(), output) catch return code(.IO);
         },
 
-        .stop_profiler => if (takeEngine(filp)) |engine| destroyEngine(engine),
+        .stop_profiler => if (takeEngine(filp)) |engine| {
+            defer destroyEngine(engine);
+
+            engine.stop(kernel_io.io()) catch |err| return switch (err) {
+                Engine.StopError.OutOfMemory => code(.NOMEM),
+                Engine.StopError.NoSpace => code(.NOSPC),
+                Engine.StopError.WriteFailed => code(.PIPE),
+                Engine.StopError.KprobeLeakFailed,
+                Engine.StopError.BadConfig,
+                Engine.StopError.TooLateShuttingDown,
+                Engine.StopError.Unknown,
+                => code(.TIME),
+            };
+        },
 
         else => return code(.INVAL),
     }
@@ -110,7 +123,11 @@ export fn cleanup_module() linksection(".exit.text") void {
 }
 
 fn releaseHandler(filp_ptr: *anyopaque) callconv(.c) void {
-    if (takeEngine(@ptrCast(filp_ptr))) |engine| destroyEngine(engine);
+    const engine = takeEngine(@ptrCast(filp_ptr)) orelse return;
+    defer destroyEngine(engine);
+
+    engine.stop(kernel_io.io()) catch |err|
+        std.log.err("Profiling stopped early: {s}", .{@errorName(err)});
 }
 
 fn sessionEngine(filp: *kernel.File) ?*Engine {
@@ -124,7 +141,7 @@ fn takeEngine(filp: *kernel.File) ?*Engine {
 }
 
 fn destroyEngine(engine: *Engine) void {
-    engine.deinit(kernel_io.io());
+    engine.deinit();
     allocator.destroy(engine);
 }
 

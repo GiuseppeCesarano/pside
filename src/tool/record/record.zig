@@ -308,8 +308,13 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
     profiled_process.wait() catch |err|
         std.process.fatal("Could not wait on profiled process (pid: {}, err: {s})", .{ profiled_process.pid, @errorName(err) });
 
-    plan.profiler.stop() catch |err|
-        std.process.fatal("Could not stop the profiler ({s})", .{@errorName(err)});
+    plan.profiler.stop() catch |err| switch (err) {
+        KernelControlDevice.ControlError.OutputWriteFailed => std.process.fatal("The kernel could not write this run's records to the output file; the run stopped measuring early and its samples are incomplete.", .{}),
+        KernelControlDevice.ControlError.ThreadTableFull => std.process.fatal("The kernel ran out of room to track the program's threads; the run stopped measuring early and its samples are incomplete.", .{}),
+        KernelControlDevice.ControlError.CouldNotInjectDelay => std.process.fatal("The kernel could not inject a delay into one of the program's threads; the run stopped measuring early and its samples are incomplete.", .{}),
+        KernelControlDevice.ControlError.OutOfMemory => std.process.fatal("The kernel ran out of memory while profiling; the run stopped measuring early and its samples are incomplete.", .{}),
+        else => std.process.fatal("Could not stop the profiler ({s})", .{@errorName(err)}),
+    };
 }
 
 test {
