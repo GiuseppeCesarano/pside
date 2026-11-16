@@ -8,7 +8,6 @@ const Symbolizer = @import("Symbolizer.zig");
 const Profile = @This();
 
 vmas: []Vma,
-symbols_unavailable: ?Symbolizer.OpenError,
 
 pub const Vma = struct {
     name: []const u8,
@@ -33,7 +32,7 @@ pub const Error = error{
     OutOfMemory,
 };
 
-pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Error!Profile {
+pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Profile {
     var file_map = try mapFile(io, path);
     defer file_map.destroy(io);
 
@@ -42,15 +41,13 @@ pub fn fromFilePath(gpa: std.mem.Allocator, io: std.Io, path: []const u8) Error!
 
     const binary_path = findBinaryPath(reader) orelse return Error.MissingBinaryPath;
 
-    var parser: Parser = .init(gpa, io, binary_path);
-    errdefer parser.deinit(io);
+    var parser: Parser = try .init(gpa, io, binary_path);
+    errdefer parser.deinit();
 
     var frames: payload.Frame.Iterator = .init(&reader);
     while (frames.next()) |frame| try parser.take(frame);
 
-    const symbols_unavailable = parser.symbolizer.symbolsUnavailable();
-
-    return .{ .vmas = try parser.finish(io), .symbols_unavailable = symbols_unavailable };
+    return .{ .vmas = try parser.finish(io) };
 }
 
 pub fn deinit(this: *Profile, gpa: std.mem.Allocator) void {
@@ -91,24 +88,26 @@ const Parser = struct {
     gpa: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     symbolizer: Symbolizer,
-    buckets: std.array_hash_map.String(Sites) = .empty,
+    buckets: std.array_hash_map.String(TargetIps) = .empty,
     names: std.AutoHashMapUnmanaged(payload.VmaId, []const u8) = .empty,
 
     const Levels = [speedup_levels_len]std.ArrayList(f32);
-    const Sites = std.array_hash_map.String(Levels);
+    const TargetIps = std.array_hash_map.Auto(u64, Levels);
+    const Sites = std.array_hash_map.Auto(Site, Levels);
+    const Site = struct { file: std.debug.Coverage.File.Index, line: u32 };
 
     const min_progress = 5;
 
-    fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) Parser {
+    fn init(gpa: std.mem.Allocator, io: std.Io, binary_path: []const u8) !Parser {
         return .{
             .gpa = gpa,
             .arena = .init(gpa),
-            .symbolizer = .init(gpa, io, binary_path),
+            .symbolizer = try .init(gpa, io, binary_path),
         };
     }
 
-    fn deinit(this: *Parser, io: std.Io) void {
-        this.symbolizer.deinit(this.gpa, io);
+    fn deinit(this: *Parser) void {
+        this.symbolizer.deinit(this.gpa);
         this.arena.deinit();
         this.* = undefined;
     }
@@ -142,7 +141,7 @@ const Parser = struct {
         if (batch.header.kind != .throughput) return;
 
         const name = this.names.get(batch.header.vma_id) orelse return Error.UnknownVmaId;
-        const sites = this.buckets.getPtr(name).?;
+        const target_ips = this.buckets.getPtr(name).?;
 
         var samples = batch.iterate(payload.records.Throughput) orelse return Error.MalformedRecordsFrame;
         while (samples.next()) |sample| {
@@ -153,20 +152,15 @@ const Parser = struct {
             const virtual_time: f32 = @floatFromInt(sample.time_delta_us - sample.injected_us);
             const throughput = @as(f32, @floatFromInt(sample.progress_delta)) / virtual_time;
 
-            const location = try this.symbolizer.locate(this.gpa, sample.relative_ip);
+            const target_ip = try target_ips.getOrPut(allocator, sample.relative_ip);
+            if (!target_ip.found_existing) target_ip.value_ptr.* = @splat(.empty);
 
-            const site = try sites.getOrPut(allocator, location);
-            if (!site.found_existing) {
-                site.key_ptr.* = try allocator.dupe(u8, location);
-                site.value_ptr.* = @splat(.empty);
-            }
-
-            const level = &site.value_ptr[@divExact(speedup, speedup_step_per_level)];
+            const level = &target_ip.value_ptr[@divExact(speedup, speedup_step_per_level)];
             try level.append(allocator, throughput);
         }
     }
 
-    fn finish(this: *Parser, io: std.Io) Error![]Vma {
+    fn finish(this: *Parser, io: std.Io) ![]Vma {
         const vmas = try this.gpa.alloc(Vma, this.buckets.count());
 
         var built: usize = 0;
@@ -175,17 +169,52 @@ const Parser = struct {
             this.gpa.free(vmas);
         }
 
-        for (this.buckets.keys(), this.buckets.values()) |name, *sites| {
-            vmas[built] = try this.buildVma(name, sites);
+        for (this.buckets.keys(), this.buckets.values()) |name, *target_ips| {
+            vmas[built] = try this.buildVma(name, try this.groupBySite(io, target_ips));
             built += 1;
         }
 
-        this.deinit(io);
+        this.deinit();
 
         return vmas;
     }
 
-    fn buildVma(this: *Parser, name: []const u8, sites: *Sites) Error!Vma {
+    fn groupBySite(this: *Parser, io: std.Io, target_ips: *TargetIps) !Sites {
+        const allocator = this.arena.allocator();
+
+        const ByIp = struct {
+            keys: []const u64,
+
+            pub fn lessThan(by_ip: @This(), a_index: usize, b_index: usize) bool {
+                return by_ip.keys[a_index] < by_ip.keys[b_index];
+            }
+        };
+
+        target_ips.sortUnstable(ByIp{ .keys = target_ips.keys() });
+
+        target_ips.lockPointers();
+        defer target_ips.unlockPointers();
+
+        this.symbolizer.toVaddrs(target_ips.keys());
+
+        const locations = try this.symbolizer.resolve(this.gpa, io, target_ips.keys());
+        defer this.gpa.free(locations);
+
+        var sites: Sites = .empty;
+        for (locations, target_ips.values()) |location, levels| {
+            if (location.file == .invalid) continue;
+
+            const site = try sites.getOrPut(allocator, .{ .file = location.file, .line = location.line });
+            if (!site.found_existing) site.value_ptr.* = @splat(.empty);
+
+            for (site.value_ptr, levels) |*merged, level|
+                try merged.appendSlice(allocator, level.items);
+        }
+
+        return sites;
+    }
+
+    fn buildVma(this: *Parser, name: []const u8, sites: Sites) Error!Vma {
         const owned_name = try this.gpa.dupe(u8, name);
         errdefer this.gpa.free(owned_name);
 
@@ -197,12 +226,15 @@ const Parser = struct {
             this.gpa.free(graphs);
         }
 
-        for (sites.keys(), sites.values()) |location, *levels| {
+        for (sites.keys(), sites.values()) |site, levels| {
             var samples: [speedup_levels_len][]f32 = undefined;
             for (&samples, levels) |*level, list| level.* = list.items;
 
-            graphs[measured] = Graph.init(location, samples) catch continue;
-            graphs[measured].location = try this.gpa.dupe(u8, location);
+            const location_name = try this.symbolizer.allocName(this.gpa, site.file, site.line);
+            graphs[measured] = Graph.init(location_name, samples) catch {
+                this.gpa.free(location_name);
+                continue;
+            };
             measured += 1;
         }
 
