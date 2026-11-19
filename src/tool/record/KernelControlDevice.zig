@@ -20,6 +20,8 @@ pub const ControlError = error{
     CouldNotInjectDelay,
     UnknownCommand,
     CommandNotReadable,
+    MalformedLineMap,
+    LineMapNotLoaded,
     OutOfMemory,
     Unexpected,
 };
@@ -40,6 +42,8 @@ fn controlError(e: linux.E) ControlError {
         .TIME => ControlError.CouldNotInjectDelay,
         .INVAL => ControlError.UnknownCommand,
         .FAULT => ControlError.CommandNotReadable,
+        .BADMSG => ControlError.MalformedLineMap,
+        .NODATA => ControlError.LineMapNotLoaded,
         .NOMEM => ControlError.OutOfMemory,
         else => ControlError.Unexpected,
     };
@@ -75,6 +79,10 @@ pub fn close(this: KernelControlDevice, io: std.Io) void {
 
 pub fn attachProfilerToPid(this: KernelControlDevice, attach: communications.AttachOptions) ControlError!void {
     return this.command(.attach_profiler, .{ .attach = attach });
+}
+
+pub fn loadLineMap(this: KernelControlDevice, line_map: communications.LineMapSource) ControlError!void {
+    return this.command(.load_line_map, .{ .line_map = line_map });
 }
 
 pub fn startProfiler(this: KernelControlDevice, start: communications.StartOptions) ControlError!void {

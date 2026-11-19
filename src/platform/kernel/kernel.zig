@@ -78,10 +78,16 @@ pub fn copyFromUser(to: []u8, from: usize) []const u8 {
 pub const heap = struct {
     const Context = enum { sleepable, atomic, any };
 
-    pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque, allocation_context: Context) type {
+    const Release = enum { kfree, kvfree };
+
+    pub fn KAllocator(cmalloc: fn (c_ulong) callconv(.c) ?*anyopaque, release: Release, allocation_context: Context) type {
         return struct {
             extern fn kfree(*anyopaque) void;
-            const cfree = if (is_target_kernel) kfree else std.c.free;
+            extern fn kvfree(*anyopaque) void;
+            const cfree = if (!is_target_kernel) std.c.free else switch (release) {
+                .kfree => kfree,
+                .kvfree => kvfree,
+            };
             const Metadata = u16;
 
             const vtable: std.mem.Allocator.VTable = .{
@@ -153,6 +159,7 @@ pub const heap = struct {
     extern fn c_gfp_kernel() c_uint;
     extern fn c_gfp_atomic() c_uint;
     extern fn c_kmalloc(c_ulong, c_uint) ?*anyopaque;
+    extern fn c_kvmalloc(c_ulong, c_uint) ?*anyopaque;
 
     fn kmallocGfpKernel(size: c_ulong) callconv(.c) ?*anyopaque {
         return c_kmalloc(size, c_gfp_kernel());
@@ -162,19 +169,28 @@ pub const heap = struct {
         return c_kmalloc(size, c_gfp_atomic());
     }
 
+    fn kvmallocGfpKernel(size: c_ulong) callconv(.c) ?*anyopaque {
+        return c_kvmalloc(size, c_gfp_kernel());
+    }
+
     pub const allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(if (is_target_kernel) kmallocGfpKernel else std.c.malloc, .sleepable).vtable,
+        .vtable = &KAllocator(if (is_target_kernel) kmallocGfpKernel else std.c.malloc, .kfree, .sleepable).vtable,
+    };
+
+    pub const large_allocator: std.mem.Allocator = .{
+        .ptr = undefined,
+        .vtable = &KAllocator(if (is_target_kernel) kvmallocGfpKernel else std.c.malloc, .kvfree, .sleepable).vtable,
     };
 
     pub const atomic_allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(kmallocGfpAtomic, .atomic).vtable,
+        .vtable = &KAllocator(kmallocGfpAtomic, .kfree, .atomic).vtable,
     };
 
     const any_context_allocator: std.mem.Allocator = .{
         .ptr = undefined,
-        .vtable = &KAllocator(kmallocGfpAtomic, .any).vtable,
+        .vtable = &KAllocator(kmallocGfpAtomic, .kfree, .any).vtable,
     };
 };
 
@@ -481,6 +497,16 @@ pub const File = opaque {
     extern fn c_session_set_engine(*File, ?*anyopaque) void;
     pub fn sessionSetEngine(this: *File, engine: ?*anyopaque) void {
         c_session_set_engine(this, engine);
+    }
+
+    extern fn c_session_get_line_map(*File) ?*anyopaque;
+    pub fn sessionGetLineMap(this: *File) ?*anyopaque {
+        return c_session_get_line_map(this);
+    }
+
+    extern fn c_session_set_line_map(*File, ?*anyopaque) void;
+    pub fn sessionSetLineMap(this: *File, line_map: ?*anyopaque) void {
+        c_session_set_line_map(this, line_map);
     }
 
     extern fn c_session_lock(*File) void;

@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 
 const DelayPool = @import("DelayPool");
 const kernel = @import("kernel");
+const LineMap = @import("LineMap");
 const safety = @import("safety");
 
 const ThreadClocks = @import("ThreadClocks.zig");
@@ -17,6 +18,7 @@ sampler: ?*kernel.PerfEvent,
 clocks: ThreadClocks,
 delay_pool: DelayPool,
 vma_ranges: VmaRanges,
+line_map: *const LineMap,
 io: std.Io,
 allocator: std.mem.Allocator,
 atomic_allocator: std.mem.Allocator,
@@ -24,7 +26,7 @@ vma_base: std.atomic.Value(usize),
 failure: std.atomic.Value(ErrorInt),
 
 // Current experiment state, armed/disarmed by begin/endExperiment.
-target_ip: std.atomic.Value(usize),
+target_site: std.atomic.Value(LineMap.Site),
 delay_per_tick: std.atomic.Value(u16),
 experiment_start: Ticks,
 
@@ -39,7 +41,7 @@ const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, 
 const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
 pub const Outcome = struct {
-    relative_ip: usize,
+    site: LineMap.Site,
     injected_us: u32,
 };
 
@@ -66,12 +68,13 @@ pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !
         .clocks = try .init(allocator, clocks_reserve),
         .delay_pool = .empty,
         .vma_ranges = .empty,
+        .line_map = undefined,
         .io = undefined,
         .allocator = allocator,
         .atomic_allocator = atomic_allocator,
         .vma_base = .init(0),
         .failure = .init(0),
-        .target_ip = .init(0),
+        .target_site = .init(.none),
         .delay_per_tick = .init(0),
         .experiment_start = 0,
 
@@ -137,10 +140,12 @@ pub fn profilePid(
     pid: std.os.linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
+    line_map: *const LineMap,
 ) AttachError!void {
     this.state.assertEql(.idle);
 
     this.io = io;
+    this.line_map = line_map;
     try this.delay_pool.init(io, this.allocator);
 
     this.profiled_pid.store(pid, .monotonic);
@@ -206,7 +211,7 @@ pub fn beginExperiment(this: *Speedup, speedup_percent: u8) void {
 
     this.experiment_start = this.clocks.master.load(.monotonic);
     this.delay_per_tick.store(delay_per_tick, .monotonic);
-    this.target_ip.store(0, .seq_cst);
+    this.target_site.store(.none, .seq_cst);
     this.vma_base.store(0, .seq_cst);
     this.sampler.?.enable();
 
@@ -227,12 +232,12 @@ pub fn endExperiment(this: *Speedup) Error!?Outcome {
     const failure = this.failure.load(.monotonic);
     if (failure != 0) return @errorCast(@errorFromInt(failure));
 
-    const target = this.target_ip.load(.acquire);
-    if (target == 0) return null;
+    const target = this.target_site.load(.acquire);
+    if (target == LineMap.Site.none) return null;
 
     const ticks = this.clocks.master.load(.monotonic) - this.experiment_start;
     return .{
-        .relative_ip = target - this.vma_base.load(.monotonic),
+        .site = target,
         .injected_us = ticks * delay_per_tick,
     };
 }
@@ -293,9 +298,7 @@ fn settleDelay(this: *Speedup, key: Key, lag: Ticks) void {
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *Speedup = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
 
-    const ip = kernel.currentUserSpaceIp(regs);
-    const target = this.target_ip.load(.monotonic);
-    const is_target = (ip == target) or (target == 0 and this.captureProfilingTarget(ip));
+    const is_target = this.isTarget(kernel.currentUserSpaceIp(regs));
 
     if (this.delay_per_tick.load(.monotonic) == 0) return;
 
@@ -309,14 +312,26 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
         this.applyDelay(key, this.clocks.settleSample(key, is_target, co_runner_window, co_runner_max_lag) orelse return);
 }
 
+fn isTarget(this: *Speedup, ip: usize) bool {
+    const target = this.target_site.load(.acquire);
+    if (target == LineMap.Site.none) return this.captureProfilingTarget(ip);
+
+    const vma_base = this.vma_base.load(.monotonic);
+    if (ip < vma_base) return false;
+
+    return this.line_map.getSite(ip - vma_base) == target;
+}
+
 fn captureProfilingTarget(this: *Speedup, ip: usize) bool {
     const vma_base = this.vma_ranges.findBase(ip) orelse return false;
+    const site = this.line_map.getSite(ip - vma_base) orelse return false;
+    if (site == LineMap.Site.none) return false;
 
     const we_claimed_first = this.vma_base.cmpxchgStrong(0, vma_base, .monotonic, .monotonic) == null;
 
     if (we_claimed_first) {
         @branchHint(.likely);
-        this.target_ip.store(ip, .release);
+        this.target_site.store(site, .release);
     }
 
     return we_claimed_first;

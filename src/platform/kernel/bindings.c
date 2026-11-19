@@ -45,6 +45,7 @@ struct session {
   struct chardev *dev;
   void *progress_page;
   void *engine;
+  void *line_map;
   struct mutex lock;
 };
 
@@ -94,6 +95,7 @@ unsigned long c_copy_from_user(void *, const void *, unsigned long);
 gfp_t c_gfp_kernel(void);
 gfp_t c_gfp_atomic(void);
 void *c_kmalloc(size_t, gfp_t);
+void *c_kvmalloc(size_t, gfp_t);
 
 /* Time */
 unsigned int c_hrtimer_resolution(void);
@@ -121,6 +123,8 @@ void c_chardev_unregister(struct chardev *);
 void *c_session_progress_page(struct file *);
 void *c_session_get_engine(struct file *);
 void c_session_set_engine(struct file *, void *);
+void *c_session_get_line_map(struct file *);
+void c_session_set_line_map(struct file *, void *);
 void c_session_lock(struct file *);
 void c_session_unlock(struct file *);
 
@@ -209,6 +213,7 @@ gfp_t c_gfp_kernel(void) { return GFP_KERNEL; }
 gfp_t c_gfp_atomic(void) { return GFP_ATOMIC; }
 
 void *c_kmalloc(size_t size, gfp_t flags) { return kmalloc(size, flags); }
+void *c_kvmalloc(size_t size, gfp_t flags) { return kvmalloc(size, flags); }
 
 /* Time */
 unsigned int c_hrtimer_resolution(void) { return hrtimer_resolution; }
@@ -400,6 +405,16 @@ void *c_session_get_engine(struct file *filp) {
 void c_session_set_engine(struct file *filp, void *engine) {
   struct session *s = filp->private_data;
   s->engine = engine;
+}
+
+void *c_session_get_line_map(struct file *filp) {
+  struct session *s = filp->private_data;
+  return s->line_map;
+}
+
+void c_session_set_line_map(struct file *filp, void *line_map) {
+  struct session *s = filp->private_data;
+  s->line_map = line_map;
 }
 
 void c_session_lock(struct file *filp) {

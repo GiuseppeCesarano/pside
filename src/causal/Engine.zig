@@ -3,6 +3,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 
+const LineMap = @import("LineMap");
 const safety = @import("safety");
 
 const Planner = @import("Planner.zig");
@@ -79,11 +80,12 @@ pub fn attach(
     pid: linux.pid_t,
     vma_name: [:0]const u8,
     attribute_kernel_samples: bool,
+    line_map: *const LineMap,
 ) AttachError!void {
     this.state.assertEql(.idle);
 
     this.planner = .init(@intCast(pid));
-    try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples);
+    try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples, line_map);
 
     this.state.transition(.attached);
 }
@@ -119,7 +121,7 @@ fn profilingLoop(this: *Engine, io: std.Io) LoopError!void {
 
         if (outcome) |o| try this.sink.recordThroughput(
             io,
-            o.relative_ip,
+            o.site,
             progress_delta,
             time_delta,
             o.injected_us,

@@ -60,12 +60,20 @@
 //   A reader that does not understand `kind` skips the whole frame via `len`.
 //
 // #### kind = 0  throughput record (payload.records.Throughput, record_size = 32)
-//     relative_ip      u64    sample instruction pointer minus the vma base
+//     file             u32    source file of the target site (see tag = 3)
+//     line             u32    source line of the target site
 //     progress_delta   u64    progress points counted during the experiment
 //     time_delta_us    u64    wall-clock length of the experiment
 //     injected_us      u32    delay injected during it, virtual time = time_delta_us - injected_us
 //     speedup_percent  u8     virtual speedup applied (0..100, step 5)
 //     _                [3]u8  padding, zero
+//
+// ### tag = 3  file
+//   Declares a name for a source file id, so records can reference it compactly.
+//     id       u32           payload.FileId
+//     name     [len - 4]u8   source file name as the debug info spells it (no trailing NUL)
+//   Ids are dense from 0 and stable for a given binary, so aggregating runs
+//   reuse the frames the first run wrote.
 //
 // ## Versioning
 //
@@ -141,6 +149,7 @@ pub const payload = struct {
             binary_path = 0,
             vma = 1,
             records = 2,
+            file = 3,
             _,
         };
 
@@ -151,6 +160,7 @@ pub const payload = struct {
 
     pub const VmaId = u32;
     pub const default_vma_id: VmaId = 0;
+    pub const FileId = u32;
 
     pub const Frame = struct {
         tag: payload.Header.Tag,
@@ -208,6 +218,30 @@ pub const payload = struct {
         }
     };
 
+    pub const File = struct {
+        id: FileId,
+        name: []const u8,
+
+        pub fn decode(body: []const u8) ?File {
+            if (body.len < @sizeOf(FileId)) return null;
+
+            return .{
+                .id = std.mem.readInt(FileId, body[0..@sizeOf(FileId)], .little),
+                .name = body[@sizeOf(FileId)..],
+            };
+        }
+
+        pub fn write(this: File, w: *std.Io.Writer) std.Io.Writer.Error!void {
+            const len = @sizeOf(FileId) + this.name.len;
+            const header: payload.Header = .{ .tag = .file, .len = @intCast(len) };
+
+            try header.write(w);
+            try w.writeInt(FileId, this.id, .little);
+            try w.writeAll(this.name);
+            try writePad(w, len);
+        }
+    };
+
     pub const records = struct {
         pub const Header = extern struct {
             kind: Kind,
@@ -222,7 +256,8 @@ pub const payload = struct {
         };
 
         pub const Throughput = extern struct {
-            relative_ip: u64,
+            file: FileId,
+            line: u32,
             progress_delta: u64,
             time_delta_us: u64,
             injected_us: u32,
@@ -358,6 +393,32 @@ test "binary_path and vma frames round trip through the iterator" {
     try std.testing.expect(payload.Vma.decode(second.body[0..3]) == null);
 }
 
+test "file frames round trip through the iterator" {
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    const first: payload.File = .{ .id = 0, .name = "toy.cpp" };
+    const second: payload.File = .{ .id = 1, .name = "bits/std_thread.h" };
+
+    try first.write(&writer);
+    try second.write(&writer);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var frames: payload.Frame.Iterator = .init(&reader);
+
+    for ([_]payload.File{ first, second }) |expected| {
+        const frame = frames.next().?;
+        try std.testing.expectEqual(payload.Header.Tag.file, frame.tag);
+
+        const decoded = payload.File.decode(frame.body).?;
+        try std.testing.expectEqual(expected.id, decoded.id);
+        try std.testing.expectEqualStrings(expected.name, decoded.name);
+    }
+
+    try std.testing.expect(frames.next() == null);
+    try std.testing.expect(payload.File.decode("abc") == null);
+}
+
 test "an odd length body is padded with zeros and the walk steps over them" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -384,8 +445,8 @@ test "an odd length body is padded with zeros and the walk steps over them" {
 
 test "a throughput batch round trips with its kind and vma" {
     const samples = [_]payload.records.Throughput{
-        .{ .relative_ip = 0x6b8, .progress_delta = 50, .time_delta_us = 100, .injected_us = 0, .speedup_percent = 0 },
-        .{ .relative_ip = 0x6b4, .progress_delta = 25, .time_delta_us = 100, .injected_us = 45, .speedup_percent = 45 },
+        .{ .file = 0, .line = 12, .progress_delta = 50, .time_delta_us = 100, .injected_us = 0, .speedup_percent = 0 },
+        .{ .file = 3, .line = 18, .progress_delta = 25, .time_delta_us = 100, .injected_us = 45, .speedup_percent = 45 },
     };
 
     var buffer: [512]u8 = undefined;
@@ -406,7 +467,8 @@ test "a throughput batch round trips with its kind and vma" {
     for (samples) |expected| {
         const actual = read_samples.next().?;
 
-        try std.testing.expectEqual(expected.relative_ip, actual.relative_ip);
+        try std.testing.expectEqual(expected.file, actual.file);
+        try std.testing.expectEqual(expected.line, actual.line);
         try std.testing.expectEqual(expected.progress_delta, actual.progress_delta);
         try std.testing.expectEqual(expected.speedup_percent, actual.speedup_percent);
     }
@@ -422,8 +484,8 @@ test "a record grown by a later writer is still readable, a shrunk one is refuse
     };
 
     const wide = [_]Wide{
-        .{ .base = .{ .relative_ip = 0x10, .progress_delta = 10, .time_delta_us = 10, .injected_us = 0, .speedup_percent = 5 }, .added = 0xfeed },
-        .{ .base = .{ .relative_ip = 0x20, .progress_delta = 20, .time_delta_us = 10, .injected_us = 1, .speedup_percent = 10 }, .added = 0xbeef },
+        .{ .base = .{ .file = 1, .line = 10, .progress_delta = 10, .time_delta_us = 10, .injected_us = 0, .speedup_percent = 5 }, .added = 0xfeed },
+        .{ .base = .{ .file = 2, .line = 20, .progress_delta = 20, .time_delta_us = 10, .injected_us = 1, .speedup_percent = 10 }, .added = 0xbeef },
     };
 
     var buffer: [512]u8 = undefined;
@@ -438,7 +500,8 @@ test "a record grown by a later writer is still readable, a shrunk one is refuse
     for (wide) |expected| {
         const actual = read_samples.next().?;
 
-        try std.testing.expectEqual(expected.base.relative_ip, actual.relative_ip);
+        try std.testing.expectEqual(expected.base.file, actual.file);
+        try std.testing.expectEqual(expected.base.line, actual.line);
         try std.testing.expectEqual(expected.base.speedup_percent, actual.speedup_percent);
     }
     try std.testing.expect(read_samples.next() == null);

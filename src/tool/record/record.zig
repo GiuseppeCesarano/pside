@@ -3,6 +3,7 @@ const linux = std.os.linux;
 
 const cli = @import("cli");
 const communications = @import("communications");
+const LineMap = @import("LineMap");
 const safety = @import("safety");
 const UserIds = @import("UserIds");
 
@@ -10,7 +11,16 @@ const elf_section_parser = @import("elf_section_parser.zig");
 const KernelControlDevice = @import("KernelControlDevice.zig");
 const OutputFile = @import("OutputFile.zig");
 const Program = @import("Program.zig");
+const Symbolizer = @import("Symbolizer.zig");
 const TracedProcess = @import("TracedProcess.zig");
+
+const fatal = std.process.fatal;
+const Dwarf = std.debug.Dwarf;
+const ControlError = KernelControlDevice.ControlError;
+const OpenControlError = KernelControlDevice.OpenControlError;
+const OpenError = OutputFile.OpenError;
+const ParseError = elf_section_parser.ParseError;
+const SpawnError = TracedProcess.SpawnError;
 
 const Flags = struct {
     c: []const u8 = "",
@@ -30,21 +40,52 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const parsed_options = options.parse(Flags);
     cli.validateOptions(parsed_options.unknown_flags, "Unknown flag: ") catch std.process.exit(1);
     cli.validateOptions(parsed_options.parse_errors, "Could not parse: ") catch std.process.exit(1);
-
-    const progress_point_name = parsed_options.flags.p;
+    const flags = parsed_options.flags;
 
     setSigintHandler();
 
-    const profiled_program = Program.initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io) catch |err|
-        switch (err) {
-            Program.InitError.ExtraPositionalArguments => std.process.fatal("Give the program either positionally or with -c, not both.", .{}),
-            Program.InitError.UnspecifiedCommand => std.process.fatal("No program to profile.\n\tUsage: sudo pside record <program> [args…]", .{}),
-            else => std.process.fatal("Could not resolve the program ({s})", .{@errorName(err)}),
-        };
+    const profiled_program = Program.initFromParsedOptions(parsed_options, init.minimal.environ, allocator, io) catch |err| switch (err) {
+        Program.InitError.ExtraPositionalArguments => fatal("Give the program either positionally or with -c, not both.", .{}),
+        Program.InitError.UnspecifiedCommand => fatal("No program to profile.\n\tUsage: sudo pside record <program> [args…]", .{}),
+        else => fatal("Could not resolve the program ({s})", .{@errorName(err)}),
+    };
     defer profiled_program.deinit(allocator);
+    const program_path = std.mem.span(profiled_program.path);
 
     const user_ids = UserIds.sudoCallerFromEnviron(init.minimal.environ) catch |err|
-        std.process.fatal("Could not read the invoking user ({s})", .{@errorName(err)});
+        fatal("Could not read the invoking user ({s})", .{@errorName(err)});
+
+    var future_sites = io.async(Sites.init, .{ allocator, io, program_path });
+    var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ profiled_program, flags.p, allocator, io });
+    var future_program_hash = io.async(OutputFile.computeFileHash, .{ io, program_path });
+
+    var sites = future_sites.await(io) catch |err| switch (err) {
+        Dwarf.ScanError.MissingDebugInfo => fatal("'{s}' has no DWARF debug info; rebuild it with -g.", .{program_path}),
+        Symbolizer.LineMapError.NoLineTable => fatal("'{s}' has debug info but no line table for its code; rebuild it with -g.", .{program_path}),
+        else => fatal("Could not read the line table of '{s}' ({s})", .{ program_path, @errorName(err) }),
+    };
+    defer sites.deinit(allocator);
+
+    const patch_addresses = future_patch_addresses.await(io) catch |err| switch (err) {
+        ParseError.NoPsideSection => fatal("'{s}' has no pside progress points; add PSIDE_THROUGHPUT_POINT(\"name\") to the source and rebuild.", .{program_path}),
+        ParseError.NoProgressPointsWithSuchName => fatal("No progress point named '{s}' in '{s}'.", .{ flags.p, program_path }),
+        else => fatal("Could not read progress points from '{s}' ({s})", .{ program_path, @errorName(err) }),
+    };
+    defer allocator.free(patch_addresses);
+
+    const program_hash = future_program_hash.await(io) catch |err|
+        fatal("Could not read '{s}' to hash it ({s})", .{ program_path, @errorName(err) });
+
+    const vma_name = resolveVmaName(flags.l, profiled_program.path);
+    if (!communications.AttachOptions.vmaNameFits(vma_name)) fatal("VMA name '{s}' is longer than {d} bytes.", .{ vma_name, std.math.maxInt(u8) });
+
+    var output_file = OutputFile.open(allocator, io, program_path, program_hash, user_ids, sites.file_names) catch |err| switch (err) {
+        OpenError.HashDontMatch => fatal("{s}.pside was recorded from a different build of the binary; delete it to start a fresh profile.", .{program_path}),
+        OpenError.FileTableDontMatch => fatal("{s}.pside numbers the source files differently than this pside build does; delete it to start a fresh profile.", .{program_path}),
+        OpenError.NotAPsideFile => fatal("{s}.pside is not a pside recording; delete it to start a fresh profile.", .{program_path}),
+        else => fatal("Could not open {s}.pside ({s})", .{ program_path, @errorName(err) }),
+    };
+    defer output_file.close(io);
 
     const control_device, const module_ownership = openControlDevice(io);
     defer {
@@ -52,36 +93,23 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         if (module_ownership == .ours) unloadModule(io);
     }
 
-    var future_patch_addresses = io.async(elf_section_parser.getPatchAddr, .{ profiled_program, progress_point_name, allocator, io });
-
-    const vma_name = resolveVmaName(parsed_options.flags.l, profiled_program.path);
-    var output_file = OutputFile.open(allocator, io, std.mem.span(profiled_program.path), user_ids) catch |err| switch (err) {
-        OutputFile.OpenError.HashDontMatch => std.process.fatal("{s}.pside was recorded from a different build of the binary; delete it to start a fresh profile.", .{profiled_program.path}),
-        OutputFile.OpenError.NotAPsideFile => std.process.fatal("{s}.pside is not a pside recording; delete it to start a fresh profile.", .{profiled_program.path}),
-        else => std.process.fatal("Could not open {s}.pside ({s})", .{ profiled_program.path, @errorName(err) }),
+    control_device.loadLineMap(sites.source()) catch |err| {
+        switch (err) {
+            ControlError.MalformedLineMap => std.log.err("The kernel rejected the line map built from '{s}'.", .{program_path}),
+            ControlError.OutOfMemory => std.log.err("The kernel ran out of memory while loading the line map of '{s}'.", .{program_path}),
+            else => std.log.err("Could not load the line map into the kernel ({s})", .{@errorName(err)}),
+        }
+        return err;
     };
-    defer output_file.close(io);
 
-    const patch_addresses = future_patch_addresses.await(io) catch |err| switch (err) {
-        elf_section_parser.ParseError.NoPsideSection => std.process.fatal("'{s}' has no pside progress points; add PSIDE_THROUGHPUT_POINT(\"name\") to the source and rebuild.", .{profiled_program.path}),
-        elf_section_parser.ParseError.NoProgressPointsWithSuchName => std.process.fatal("No progress point named '{s}' in '{s}'.", .{ progress_point_name, profiled_program.path }),
-        else => std.process.fatal("Could not read progress points from '{s}' ({s})", .{ profiled_program.path, @errorName(err) }),
+    var profiler = Profiler.init(control_device, output_file.file.handle, vma_name, flags.k) catch |err| {
+        std.log.err("Could not use VMA name '{s}' ({s})", .{ vma_name, @errorName(err) });
+        return err;
     };
-    defer allocator.free(patch_addresses);
 
-    var profiler = Profiler.init(
-        control_device,
-        output_file.file.handle,
-        vma_name,
-        parsed_options.flags.k,
-    ) catch |err| std.process.fatal("Could not use VMA name '{s}' ({s})", .{ vma_name, @errorName(err) });
+    const prepare: ?PrepareCommand = if (flags.prepare.len != 0) .{ .command = flags.prepare, .user_ids = user_ids } else null;
 
-    const prepare: ?PrepareCommand = if (parsed_options.flags.prepare.len != 0)
-        .{ .command = parsed_options.flags.prepare, .user_ids = user_ids }
-    else
-        null;
-
-    executeRuns(io, parsed_options.flags.n, .{
+    executeRuns(io, flags.n, .{
         .prepare = prepare,
         .profiled_program = profiled_program,
         .patch_addresses = patch_addresses,
@@ -90,7 +118,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         .vma_name = vma_name,
     });
 
-    std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(std.mem.span(profiled_program.path))});
+    std.log.info("Done. View the report with: pside report {s}.pside", .{std.fs.path.basename(program_path)});
 }
 
 fn setSigintHandler() void {
@@ -115,12 +143,12 @@ const ModuleOwnership = enum { ours, preexisting };
 
 fn openControlDevice(io: std.Io) struct { KernelControlDevice, ModuleOwnership } {
     const device = KernelControlDevice.open(io) catch |err| {
-        if (err == KernelControlDevice.OpenControlError.ModuleNotLoaded and linux.geteuid() == 0) return loadModuleAndOpen(io);
+        if (err == OpenControlError.ModuleNotLoaded and linux.geteuid() == 0) return loadModuleAndOpen(io);
 
         switch (err) {
-            KernelControlDevice.OpenControlError.ModuleNotLoaded => std.process.fatal("The pside module is not loaded\n\trun: sudo pside driver load", .{}),
-            KernelControlDevice.OpenControlError.AccessDenied => std.process.fatal("Cannot open {s}: load the module as the same user with `sudo pside driver load`", .{communications.control_device_path}),
-            else => std.process.fatal("Could not open {s} ({s})", .{ communications.control_device_path, @errorName(err) }),
+            OpenControlError.ModuleNotLoaded => fatal("The pside module is not loaded\n\trun: sudo pside driver load", .{}),
+            OpenControlError.AccessDenied => fatal("Cannot open {s}: load the module as the same user with `sudo pside driver load`", .{communications.control_device_path}),
+            else => fatal("Could not open {s} ({s})", .{ communications.control_device_path, @errorName(err) }),
         }
     };
 
@@ -128,11 +156,11 @@ fn openControlDevice(io: std.Io) struct { KernelControlDevice, ModuleOwnership }
 }
 
 fn loadModuleAndOpen(io: std.Io) struct { KernelControlDevice, ModuleOwnership } {
-    driverCommand(io, .load) catch std.process.fatal("Could not load the kernel module", .{});
+    driverCommand(io, .load) catch fatal("Could not load the kernel module", .{});
 
     const device = KernelControlDevice.open(io) catch |err| {
         driverCommand(io, .unload) catch {};
-        std.process.fatal("Could not open {s} after loading the module ({s})", .{ communications.control_device_path, @errorName(err) });
+        fatal("Could not open {s} after loading the module ({s})", .{ communications.control_device_path, @errorName(err) });
     };
 
     return .{ device, .ours };
@@ -154,6 +182,37 @@ fn driverCommand(io: std.Io, verb: enum { load, unload }) DriverError!void {
 
     if (!term.eql(.success)) return DriverError.DriverCommandFailed;
 }
+
+const Sites = struct {
+    line_map: LineMap,
+    file_names: [][]u8,
+
+    fn init(allocator: std.mem.Allocator, io: std.Io, binary_path: []const u8) !Sites {
+        var symbolizer: Symbolizer = try .init(allocator, io, binary_path);
+        defer symbolizer.deinit(allocator);
+
+        var line_map = try symbolizer.lineMap(allocator);
+        errdefer line_map.deinit(allocator);
+
+        return .{ .line_map = line_map, .file_names = try symbolizer.allocFileNames(allocator) };
+    }
+
+    fn source(this: *const Sites) communications.LineMapSource {
+        const slices = this.line_map.data.slice();
+        return .{
+            .starts = @intFromPtr(slices.items(.start).ptr),
+            .sites = @intFromPtr(slices.items(.site).ptr),
+            .len = slices.len,
+        };
+    }
+
+    fn deinit(this: *Sites, allocator: std.mem.Allocator) void {
+        for (this.file_names) |name| allocator.free(name);
+        allocator.free(this.file_names);
+        this.line_map.deinit(allocator);
+        this.* = undefined;
+    }
+};
 
 fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
     if (flag.len != 0) return flag;
@@ -192,7 +251,7 @@ const Profiler = struct {
         return this.attach_options.vma_name[0..this.attach_options.vma_name_len];
     }
 
-    fn attach(this: *Profiler, pid: linux.pid_t) KernelControlDevice.ControlError!void {
+    fn attach(this: *Profiler, pid: linux.pid_t) ControlError!void {
         this.state.assertEql(.idle);
 
         var attach_options = this.attach_options;
@@ -203,7 +262,7 @@ const Profiler = struct {
         this.state.transition(.attached);
     }
 
-    fn start(this: *Profiler) KernelControlDevice.ControlError!void {
+    fn start(this: *Profiler) ControlError!void {
         this.state.assertEql(.attached);
 
         try this.device.startProfiler(.{ .output_fd = this.output_fd });
@@ -211,7 +270,7 @@ const Profiler = struct {
         this.state.transition(.profiling);
     }
 
-    fn stop(this: *Profiler) KernelControlDevice.ControlError!void {
+    fn stop(this: *Profiler) ControlError!void {
         this.state.assertEql(.profiling);
 
         try this.device.stop();
@@ -263,57 +322,53 @@ fn executeRuns(io: std.Io, runs_count: u32, plan: RunPlan) void {
 }
 
 fn executeRun(io: std.Io, plan: RunPlan) void {
-    if (plan.prepare) |prepare_command|
-        prepare_command.run(io) catch |err|
-            std.process.fatal("Could not run prepare command '{s}' ({s})", .{ prepare_command.command, @errorName(err) });
+    const incomplete_run = "the run stopped measuring early and its samples are incomplete";
 
-    var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| {
-        if (err == TracedProcess.SpawnError.ChildDied and interrupted.load(.monotonic)) return;
+    if (plan.prepare) |prepare_command| prepare_command.run(io) catch |err|
+        fatal("Could not run prepare command '{s}' ({s})", .{ prepare_command.command, @errorName(err) });
 
-        switch (err) {
-            TracedProcess.SpawnError.ChildNotTraceable => std.process.fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
-            else => std.process.fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
-        }
+    var profiled_process = TracedProcess.spawn(plan.profiled_program, io) catch |err| switch (err) {
+        SpawnError.ChildDied => if (interrupted.load(.monotonic)) return else fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
+        SpawnError.ChildNotTraceable => fatal("Could not ptrace the program; check /proc/sys/kernel/yama/ptrace_scope.", .{}),
+        else => fatal("Could not start the program under the profiler ({s})", .{@errorName(err)}),
     };
+    const pid = profiled_process.pid;
 
-    plan.profiler.attach(profiled_process.pid) catch |err| switch (err) {
-        KernelControlDevice.ControlError.SessionAlreadyRunning => std.process.fatal("Another recording is already using {s}.", .{communications.control_device_path}),
-        KernelControlDevice.ControlError.CouldNotAttachToProcess => std.process.fatal("The kernel could not attach to process {d}; check that perf events are available.", .{profiled_process.pid}),
-        KernelControlDevice.ControlError.NoMatchingVma => std.process.fatal(
+    plan.profiler.attach(pid) catch |err| switch (err) {
+        ControlError.SessionAlreadyRunning => fatal("Another recording is already using {s}.", .{communications.control_device_path}),
+        ControlError.CouldNotAttachToProcess => fatal("The kernel could not attach to process {d}; check that perf events are available.", .{pid}),
+        ControlError.NoMatchingVma => fatal(
             "No executable mapping named '{s}' when the program reached its entry point; -l takes the mapped file's name as it appears in /proc/<pid>/maps. pside snapshots the mappings once, at the entry point, so a library the program dlopens later cannot be targeted.",
             .{plan.profiler.vmaName()},
         ),
-        KernelControlDevice.ControlError.MultiThreadedTarget => std.process.fatal(
-            "Process {d} already had multiple threads at its entry point; pside can only attach while the program is single-threaded.",
-            .{profiled_process.pid},
-        ),
-        KernelControlDevice.ControlError.TaskNotFound => std.process.fatal("Process {d} no longer exists; it exited before the kernel could attach.", .{profiled_process.pid}),
-        KernelControlDevice.ControlError.CouldNotRegisterTracepoints => std.process.fatal("The kernel could not register the scheduler tracepoints pside needs to follow process {d}.", .{profiled_process.pid}),
-        KernelControlDevice.ControlError.OutOfMemory => std.process.fatal("The kernel ran out of memory while attaching to process {d}.", .{profiled_process.pid}),
-        else => std.process.fatal("Could not attach the profiler ({s})", .{@errorName(err)}),
+        ControlError.MultiThreadedTarget => fatal("Process {d} already had multiple threads at its entry point; pside can only attach while the program is single-threaded.", .{pid}),
+        ControlError.TaskNotFound => fatal("Process {d} no longer exists; it exited before the kernel could attach.", .{pid}),
+        ControlError.CouldNotRegisterTracepoints => fatal("The kernel could not register the scheduler tracepoints pside needs to follow process {d}.", .{pid}),
+        ControlError.OutOfMemory => fatal("The kernel ran out of memory while attaching to process {d}.", .{pid}),
+        else => fatal("Could not attach the profiler ({s})", .{@errorName(err)}),
     };
 
     plan.output_file.declareVma(io, plan.vma_name) catch |err|
-        std.process.fatal("Could not declare the profiled region in the output file ({s})", .{@errorName(err)});
+        fatal("Could not declare the profiled region in the output file ({s})", .{@errorName(err)});
 
     plan.profiler.start() catch |err|
-        std.process.fatal("Could not start the profiler ({s})", .{@errorName(err)});
+        fatal("Could not start the profiler ({s})", .{@errorName(err)});
 
     for (plan.patch_addresses) |address| profiled_process.patchProgressPoint(address, plan.profiler.controlFd()) catch |err|
-        std.process.fatal("Could not patch the program's progress points ({s})", .{@errorName(err)});
+        fatal("Could not patch the program's progress points ({s})", .{@errorName(err)});
 
     profiled_process.start() catch |err|
-        std.process.fatal("Could not resume the program ({s})", .{@errorName(err)});
+        fatal("Could not resume the program ({s})", .{@errorName(err)});
 
     profiled_process.wait() catch |err|
-        std.process.fatal("Could not wait on profiled process (pid: {}, err: {s})", .{ profiled_process.pid, @errorName(err) });
+        fatal("Could not wait on profiled process (pid: {}, err: {s})", .{ pid, @errorName(err) });
 
     plan.profiler.stop() catch |err| switch (err) {
-        KernelControlDevice.ControlError.OutputWriteFailed => std.process.fatal("The kernel could not write this run's records to the output file; the run stopped measuring early and its samples are incomplete.", .{}),
-        KernelControlDevice.ControlError.ThreadTableFull => std.process.fatal("The kernel ran out of room to track the program's threads; the run stopped measuring early and its samples are incomplete.", .{}),
-        KernelControlDevice.ControlError.CouldNotInjectDelay => std.process.fatal("The kernel could not inject a delay into one of the program's threads; the run stopped measuring early and its samples are incomplete.", .{}),
-        KernelControlDevice.ControlError.OutOfMemory => std.process.fatal("The kernel ran out of memory while profiling; the run stopped measuring early and its samples are incomplete.", .{}),
-        else => std.process.fatal("Could not stop the profiler ({s})", .{@errorName(err)}),
+        ControlError.OutputWriteFailed => fatal("The kernel could not write this run's records to the output file; " ++ incomplete_run ++ ".", .{}),
+        ControlError.ThreadTableFull => fatal("The kernel ran out of room to track the program's threads; " ++ incomplete_run ++ ".", .{}),
+        ControlError.CouldNotInjectDelay => fatal("The kernel could not inject a delay into one of the program's threads; " ++ incomplete_run ++ ".", .{}),
+        ControlError.OutOfMemory => fatal("The kernel ran out of memory while profiling; " ++ incomplete_run ++ ".", .{}),
+        else => fatal("Could not stop the profiler ({s})", .{@errorName(err)}),
     };
 }
 

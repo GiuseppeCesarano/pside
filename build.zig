@@ -38,6 +38,10 @@ pub fn build(b: *std.Build) !void {
         .root_source_file = b.path("src/common/safety.zig"),
     });
 
+    const line_map_mod = b.addModule("LineMap", .{
+        .root_source_file = b.path("src/common/LineMap.zig"),
+    });
+
     const bindings_mod = b.addModule("kernel_bindings", .{
         .root_source_file = b.path("src/platform/kernel/kernel.zig"),
         .imports = &.{.{ .name = "safety", .module = safety_mod }},
@@ -69,6 +73,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "BitSearch", .module = bit_search_mod },
             .{ .name = "safety", .module = safety_mod },
             .{ .name = "serialization", .module = serialization_mod },
+            .{ .name = "LineMap", .module = line_map_mod },
         },
     });
 
@@ -95,6 +100,7 @@ pub fn build(b: *std.Build) !void {
                 .{ .name = "communications", .module = communications_mod },
                 .{ .name = "kernel", .module = bindings_mod },
                 .{ .name = "Engine", .module = engine_mod },
+                .{ .name = "LineMap", .module = line_map_mod },
             },
         }),
     };
@@ -141,6 +147,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "safety", .module = safety_mod },
             .{ .name = "serialization", .module = serialization_mod },
             .{ .name = "UserIds", .module = user_ids_mod },
+            .{ .name = "LineMap", .module = line_map_mod },
         },
     });
 

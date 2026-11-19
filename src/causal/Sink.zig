@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const LineMap = @import("LineMap");
 const safety = @import("safety");
 const serialization = @import("serialization");
 const payload = serialization.payload;
@@ -69,7 +70,7 @@ pub fn start(this: *Sink, io: std.Io, file: std.Io.File) StartError!void {
 pub fn recordThroughput(
     this: *Sink,
     io: std.Io,
-    relative_ip: usize,
+    site: LineMap.Site,
     progress_delta: u64,
     time_delta: std.Io.Duration,
     injected_us: u32,
@@ -78,7 +79,8 @@ pub fn recordThroughput(
     this.address.assertUnchanged();
 
     try this.queue.putOne(io, .{
-        .relative_ip = relative_ip,
+        .file = @backingInt(site.file),
+        .line = site.line,
         .progress_delta = progress_delta,
         .time_delta_us = @intCast(time_delta.toMicroseconds()),
         .injected_us = injected_us,

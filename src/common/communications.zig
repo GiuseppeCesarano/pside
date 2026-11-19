@@ -7,12 +7,19 @@ pub const Commands = enum(c_uint) {
     attach_profiler = iow('k', 0, Data),
     start_profiler = iow('k', 1, Data),
     stop_profiler = iow('k', 2, Data),
+    load_line_map = iow('k', 3, Data),
     _,
 
     pub const Tag = @typeInfo(Commands).@"enum".tag_type;
 };
 
 pub const vma_name_max_len = std.math.maxInt(u8) + 1;
+
+pub const LineMapSource = extern struct {
+    starts: usize,
+    sites: usize,
+    len: usize,
+};
 
 pub const AttachOptions = extern struct {
     pid: std.os.linux.pid_t,
@@ -50,5 +57,6 @@ pub const StartOptions = extern struct {
 pub const Data = extern union {
     attach: AttachOptions,
     start: StartOptions,
+    line_map: LineMapSource,
     empty: void,
 };

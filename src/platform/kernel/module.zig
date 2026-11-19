@@ -3,10 +3,12 @@ const std = @import("std");
 const communications = @import("communications");
 const kernel = @import("kernel");
 const Engine = @import("Engine");
+const LineMap = @import("LineMap");
 
 const name = communications.name;
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
+const large_allocator = kernel.heap.large_allocator;
 
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL v2".*;
@@ -51,6 +53,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
     switch (@as(communications.Commands, @fromBackingInt(@intCast(command)))) {
         .attach_profiler => {
             if (sessionEngine(filp) != null) return code(.BUSY);
+            const line_map = sessionLineMap(filp) orelse return code(.NODATA);
 
             const engine = allocator.create(Engine) catch return code(.NOMEM);
             engine.* = Engine.init(allocator, atomic_allocator, filp.sessionProgressPage()) catch {
@@ -62,7 +65,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
             data.attach.vma_name[len] = 0;
             const raw = data.attach.vma_name[0..len :0];
 
-            engine.attach(kernel_io.io(), data.attach.pid, raw, data.attach.attribute_kernel_samples) catch |err| {
+            engine.attach(kernel_io.io(), data.attach.pid, raw, data.attach.attribute_kernel_samples, line_map) catch |err| {
                 destroyEngine(engine);
 
                 return switch (err) {
@@ -82,6 +85,23 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
                 };
             };
             filp.sessionSetEngine(engine);
+        },
+
+        .load_line_map => {
+            if (sessionEngine(filp) != null) return code(.BUSY);
+
+            const line_map = allocator.create(LineMap) catch return code(.NOMEM);
+            line_map.* = copyLineMap(data.line_map) catch |err| {
+                allocator.destroy(line_map);
+                return switch (err) {
+                    CopyLineMapError.OutOfMemory => code(.NOMEM),
+                    CopyLineMapError.Unreadable => code(.FAULT),
+                    CopyLineMapError.Malformed => code(.BADMSG),
+                };
+            };
+
+            if (takeLineMap(filp)) |old| destroyLineMap(old);
+            filp.sessionSetLineMap(line_map);
         },
 
         .start_profiler => {
@@ -123,7 +143,10 @@ export fn cleanup_module() linksection(".exit.text") void {
 }
 
 fn releaseHandler(filp_ptr: *anyopaque) callconv(.c) void {
-    const engine = takeEngine(@ptrCast(filp_ptr)) orelse return;
+    const filp: *kernel.File = @ptrCast(filp_ptr);
+    defer if (takeLineMap(filp)) |line_map| destroyLineMap(line_map);
+
+    const engine = takeEngine(filp) orelse return;
     defer destroyEngine(engine);
 
     engine.stop(kernel_io.io()) catch |err|
@@ -143,6 +166,43 @@ fn takeEngine(filp: *kernel.File) ?*Engine {
 fn destroyEngine(engine: *Engine) void {
     engine.deinit();
     allocator.destroy(engine);
+}
+
+fn sessionLineMap(filp: *kernel.File) ?*LineMap {
+    return @ptrCast(@alignCast(filp.sessionGetLineMap()));
+}
+
+fn takeLineMap(filp: *kernel.File) ?*LineMap {
+    const line_map = sessionLineMap(filp);
+    filp.sessionSetLineMap(null);
+    return line_map;
+}
+
+fn destroyLineMap(line_map: *LineMap) void {
+    line_map.deinit(large_allocator);
+    allocator.destroy(line_map);
+}
+
+const CopyLineMapError = error{ OutOfMemory, Unreadable, Malformed };
+
+fn copyLineMap(source: communications.LineMapSource) CopyLineMapError!LineMap {
+    const bytes = std.math.mul(usize, source.len, @sizeOf(usize) + @sizeOf(LineMap.Site)) catch return CopyLineMapError.Malformed;
+    if (source.len == 0 or bytes > std.math.maxInt(c_int)) return CopyLineMapError.Malformed;
+
+    var line_map: LineMap = .empty;
+    errdefer line_map.deinit(large_allocator);
+    try line_map.data.setCapacity(large_allocator, source.len);
+    line_map.data.len = source.len;
+
+    const slices = line_map.data.slice();
+    const starts = std.mem.sliceAsBytes(slices.items(.start));
+    const sites = std.mem.sliceAsBytes(slices.items(.site));
+
+    if (kernel.copyFromUser(starts, source.starts).len != starts.len) return CopyLineMapError.Unreadable;
+    if (kernel.copyFromUser(sites, source.sites).len != sites.len) return CopyLineMapError.Unreadable;
+
+    if (!line_map.isWellFormed()) return CopyLineMapError.Malformed;
+    return line_map;
 }
 
 fn code(return_code: std.os.linux.E) c_int {
