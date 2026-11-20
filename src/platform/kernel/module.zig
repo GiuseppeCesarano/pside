@@ -65,7 +65,7 @@ fn ioctlHandler(filp_ptr: *anyopaque, command: c_uint, arg: c_ulong) callconv(.c
             data.attach.vma_name[len] = 0;
             const raw = data.attach.vma_name[0..len :0];
 
-            engine.attach(kernel_io.io(), data.attach.pid, raw, data.attach.attribute_kernel_samples, line_map) catch |err| {
+            engine.attach(kernel_io.io(), data.attach.pid, raw, line_map) catch |err| {
                 destroyEngine(engine);
 
                 return switch (err) {

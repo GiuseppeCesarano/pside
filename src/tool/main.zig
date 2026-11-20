@@ -55,18 +55,11 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\  -p <name>          Progress point to maximise, as passed to
         \\                     PSIDE_THROUGHPUT_POINT() in the source. Defaults
         \\                     to whichever progress point is found first.
-        \\  -l <name>          VMA name to restrict profiling to: the mapped
-        \\                     file's name, matched exactly. Defaults to the
-        \\                     program's file name.
         \\  -prepare <cmd>     Command run through `sh -c` before every run, e.g.
         \\                     -prepare "make clean". Recording aborts if it fails.
         \\  -n <count>         Number of runs to execute (default: 1). More runs
         \\                     give a cleaner, higher-confidence profile; further
         \\                     runs against the same .pside file are aggregated.
-        \\  -k                 Also sample while the profiled thread is in kernel
-        \\                     mode, charging the tick to the userspace call site
-        \\                     that entered the kernel. Off by default, so time
-        \\                     spent in syscalls is attributed to no site.
         \\
         \\REPORT
         \\  <file.pside>       A profile produced by `pside record`.
@@ -80,9 +73,6 @@ fn printHelp(_: cli.Options, _: std.process.Init) void {
         \\
         \\  # Pass arguments (including flags) to the profiled program with -c
         \\  sudo pside record -c "./my_app --threads 8" -n 20
-        \\
-        \\  # Restrict profiling to a specific shared-library section
-        \\  sudo pside record ./my_app -l libfoo -n 10
         \\
         \\  # Reset state before each of the 20 runs
         \\  sudo pside record ./my_app -prepare "rm -rf ./scratch" -n 20

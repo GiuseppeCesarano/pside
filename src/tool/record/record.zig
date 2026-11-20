@@ -25,10 +25,8 @@ const SpawnError = TracedProcess.SpawnError;
 const Flags = struct {
     c: []const u8 = "",
     p: []const u8 = "",
-    l: []const u8 = "",
     prepare: []const u8 = "",
     n: u32 = 1,
-    k: bool = false,
 };
 
 var interrupted: std.atomic.Value(bool) = .init(false);
@@ -76,7 +74,10 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
     const program_hash = future_program_hash.await(io) catch |err|
         fatal("Could not read '{s}' to hash it ({s})", .{ program_path, @errorName(err) });
 
-    const vma_name = resolveVmaName(flags.l, profiled_program.path);
+    const real_path = std.Io.Dir.cwd().realPathFileAlloc(io, program_path, allocator) catch |err|
+        fatal("Could not resolve the real path of '{s}' ({s})", .{ program_path, @errorName(err) });
+    defer allocator.free(real_path);
+    const vma_name = std.fs.path.basename(real_path);
     if (!communications.AttachOptions.vmaNameFits(vma_name)) fatal("VMA name '{s}' is longer than {d} bytes.", .{ vma_name, std.math.maxInt(u8) });
 
     var output_file = OutputFile.open(allocator, io, program_path, program_hash, user_ids, sites.file_names) catch |err| switch (err) {
@@ -102,7 +103,7 @@ pub fn record(options: cli.Options, init: std.process.Init) !void {
         return err;
     };
 
-    var profiler = Profiler.init(control_device, output_file.file.handle, vma_name, flags.k) catch |err| {
+    var profiler = Profiler.init(control_device, output_file.file.handle, vma_name) catch |err| {
         std.log.err("Could not use VMA name '{s}' ({s})", .{ vma_name, @errorName(err) });
         return err;
     };
@@ -214,12 +215,6 @@ const Sites = struct {
     }
 };
 
-fn resolveVmaName(flag: []const u8, program_path: [*:0]const u8) []const u8 {
-    if (flag.len != 0) return flag;
-
-    return std.fs.path.basename(std.mem.span(program_path));
-}
-
 const Profiler = struct {
     device: KernelControlDevice,
     output_fd: linux.fd_t,
@@ -233,12 +228,11 @@ const Profiler = struct {
         device: KernelControlDevice,
         output_fd: linux.fd_t,
         vma_name: []const u8,
-        attribute_kernel_samples: bool,
     ) InitError!Profiler {
         return .{
             .device = device,
             .output_fd = output_fd,
-            .attach_options = try .init(undefined, vma_name, attribute_kernel_samples),
+            .attach_options = try .init(undefined, vma_name),
             .state = .init(.idle),
         };
     }
@@ -338,7 +332,7 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
         ControlError.SessionAlreadyRunning => fatal("Another recording is already using {s}.", .{communications.control_device_path}),
         ControlError.CouldNotAttachToProcess => fatal("The kernel could not attach to process {d}; check that perf events are available.", .{pid}),
         ControlError.NoMatchingVma => fatal(
-            "No executable mapping named '{s}' when the program reached its entry point; -l takes the mapped file's name as it appears in /proc/<pid>/maps. pside snapshots the mappings once, at the entry point, so a library the program dlopens later cannot be targeted.",
+            "No executable mapping of '{s}' when the program reached its entry point; pside matches the program's real file name as it appears in /proc/<pid>/maps.",
             .{plan.profiler.vmaName()},
         ),
         ControlError.MultiThreadedTarget => fatal("Process {d} already had multiple threads at its entry point; pside can only attach while the program is single-threaded.", .{pid}),
@@ -374,20 +368,4 @@ fn executeRun(io: std.Io, plan: RunPlan) void {
 
 test {
     _ = OutputFile;
-}
-
-test "the default vma name is the basename, extension and all" {
-    const cases = [_]struct { path: [*:0]const u8, expected: []const u8 }{
-        .{ .path = "a.out", .expected = "a.out" },
-        .{ .path = "./a.out", .expected = "a.out" },
-        .{ .path = "/usr/bin/toy", .expected = "toy" },
-        .{ .path = "/usr/lib/libfoo.so.1", .expected = "libfoo.so.1" },
-    };
-
-    for (cases) |check|
-        try std.testing.expectEqualStrings(check.expected, resolveVmaName("", check.path));
-}
-
-test "an explicit -l wins over the program path" {
-    try std.testing.expectEqualStrings("libfoo.so.1", resolveVmaName("libfoo.so.1", "/usr/bin/toy"));
 }

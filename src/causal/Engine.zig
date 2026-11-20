@@ -79,13 +79,12 @@ pub fn attach(
     io: std.Io,
     pid: linux.pid_t,
     vma_name: [:0]const u8,
-    attribute_kernel_samples: bool,
     line_map: *const LineMap,
 ) AttachError!void {
     this.state.assertEql(.idle);
 
     this.planner = .init(@intCast(pid));
-    try this.speedup.profilePid(io, pid, vma_name, attribute_kernel_samples, line_map);
+    try this.speedup.profilePid(io, pid, vma_name, line_map);
 
     this.state.transition(.attached);
 }

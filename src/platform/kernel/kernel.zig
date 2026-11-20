@@ -669,8 +669,13 @@ pub fn userMode(regs: *PtRegs) bool {
 }
 
 extern fn copy_from_user_nofault(*anyopaque, usize, usize) c_long;
-fn copyFromUserNofault(dst: []u8, src: usize) c_long {
+pub fn copyFromUserNofault(dst: []u8, src: usize) c_long {
     return copy_from_user_nofault(dst.ptr, src, dst.len);
+}
+
+extern fn c_current_user_regs() *PtRegs;
+pub fn userRegs(sample_regs: *PtRegs) *const PtRegs {
+    return if (userMode(sample_regs)) sample_regs else c_current_user_regs();
 }
 
 extern fn c_current_user_ip() usize;
@@ -691,6 +696,32 @@ pub fn currentUserSpaceIp(sample_regs: *PtRegs) usize {
         ip
     else
         call_site;
+}
+
+pub fn followsCall(return_address: usize) bool {
+    const call = switch (arch) {
+        .x86_64 => struct {
+            const direct_opcode = 0xe8;
+            const direct_len = 5;
+            const indirect_opcode = 0xff;
+            const modrm_reg_mask = 0x38;
+            const modrm_reg_call = 2 << 3;
+            const indirect_lens = [_]usize{ 2, 3, 6 };
+            const max_len = 6;
+        },
+        else => @compileError("TODO: support other archs"),
+    };
+
+    var code: [call.max_len]u8 = undefined;
+    if (copyFromUserNofault(&code, return_address - code.len) != 0) return false;
+
+    if (code[code.len - call.direct_len] == call.direct_opcode) return true;
+    inline for (call.indirect_lens) |len| {
+        const start = code.len - len;
+        if (code[start] == call.indirect_opcode and
+            code[start + 1] & call.modrm_reg_mask == call.modrm_reg_call) return true;
+    }
+    return false;
 }
 
 pub const preempt = struct {

@@ -55,6 +55,7 @@ pub const AttachError = error{ TaskNotFound, MultiThreadedTarget } ||
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
 const clocks_reserve = 1024;
+const call_site_scan_words = 64;
 const co_runner_window = 8;
 const co_runner_max_lag = 8;
 fn currentTask(_: *const anyopaque) *kernel.Task {
@@ -139,7 +140,6 @@ pub fn profilePid(
     io: std.Io,
     pid: std.os.linux.pid_t,
     vma_name: [:0]const u8,
-    attribute_kernel_samples: bool,
     line_map: *const LineMap,
 ) AttachError!void {
     this.state.assertEql(.idle);
@@ -193,7 +193,6 @@ pub fn profilePid(
             .exclude_guest = true,
             .exclude_hv = true,
             .exclude_idle = true,
-            .exclude_kernel = !attribute_kernel_samples,
         },
     };
     this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
@@ -298,7 +297,7 @@ fn settleDelay(this: *Speedup, key: Key, lag: Ticks) void {
 fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
     const this: *Speedup = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
 
-    const is_target = this.isTarget(kernel.currentUserSpaceIp(regs));
+    const is_target = if (this.attributedIp(regs)) |ip| this.isTarget(ip) else false;
 
     if (this.delay_per_tick.load(.monotonic) == 0) return;
 
@@ -310,6 +309,23 @@ fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) 
 
     if (kernel.userMode(regs))
         this.applyDelay(key, this.clocks.settleSample(key, is_target, co_runner_window, co_runner_max_lag) orelse return);
+}
+
+fn attributedIp(this: *Speedup, regs: *kernel.PtRegs) ?usize {
+    const ip = kernel.currentUserSpaceIp(regs);
+    if (this.vma_ranges.findBase(ip) != null) return ip;
+
+    return this.callSiteOnStack(kernel.userRegs(regs).sp);
+}
+
+fn callSiteOnStack(this: *Speedup, sp: usize) ?usize {
+    var words: [call_site_scan_words]usize = undefined;
+    if (kernel.copyFromUserNofault(std.mem.asBytes(&words), sp) != 0) return null;
+
+    return for (words) |word| {
+        if (this.vma_ranges.findBase(word) != null and kernel.followsCall(word))
+            break word - 1;
+    } else null;
 }
 
 fn isTarget(this: *Speedup, ip: usize) bool {

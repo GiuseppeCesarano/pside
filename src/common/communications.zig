@@ -25,7 +25,6 @@ pub const AttachOptions = extern struct {
     pid: std.os.linux.pid_t,
     vma_name: [vma_name_max_len]u8,
     vma_name_len: u8,
-    attribute_kernel_samples: bool,
 
     pub const InitError = error{
         VmaNameTooLong,
@@ -35,14 +34,13 @@ pub const AttachOptions = extern struct {
         return vma_name.len <= std.math.maxInt(u8);
     }
 
-    pub fn init(pid: std.os.linux.pid_t, vma_name: []const u8, attribute_kernel_samples: bool) InitError!AttachOptions {
+    pub fn init(pid: std.os.linux.pid_t, vma_name: []const u8) InitError!AttachOptions {
         if (!vmaNameFits(vma_name)) return InitError.VmaNameTooLong;
 
         var attach_options: AttachOptions = .{
             .pid = pid,
             .vma_name = undefined,
             .vma_name_len = @intCast(vma_name.len),
-            .attribute_kernel_samples = attribute_kernel_samples,
         };
         @memcpy(attach_options.vma_name[0..vma_name.len], vma_name);
 

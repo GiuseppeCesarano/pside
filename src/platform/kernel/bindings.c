@@ -111,6 +111,7 @@ int c_task_work_add(struct task_struct *, struct callback_head *, int);
 void c_get_task_struct(struct task_struct *);
 void c_put_task_struct(struct task_struct *);
 unsigned long c_current_user_ip(void);
+struct pt_regs *c_current_user_regs(void);
 int c_user_mode(struct pt_regs *);
 
 /* VMA */
@@ -228,6 +229,8 @@ int c_task_is_running(struct task_struct *task) {
 int c_task_is_dead(struct task_struct *task) {
   return (task->flags & PF_EXITING) || (task->exit_state != 0);
 }
+
+struct pt_regs *c_current_user_regs(void) { return task_pt_regs(current); }
 
 unsigned long c_current_user_ip(void) {
   return instruction_pointer(task_pt_regs(current));
