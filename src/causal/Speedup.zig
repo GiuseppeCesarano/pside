@@ -1,43 +1,46 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const DelayPool = @import("DelayPool");
-const kernel = @import("kernel");
 const LineMap = @import("LineMap");
+const platform = @import("platform");
+const Delays = platform.Delays;
+const Task = platform.Task;
+const Clocks = platform.Clocks;
+const Ticks = Clocks.Ticks;
 const safety = @import("safety");
 
-const ThreadClocks = @import("ThreadClocks.zig");
-const Key = ThreadClocks.Key;
-const Ticks = ThreadClocks.Ticks;
 const VmaRanges = @import("VmaRanges.zig");
 
 const Speedup = @This();
 
-profiled_pid: std.atomic.Value(std.os.linux.pid_t) align(std.atomic.cache_line),
-sampler: ?*kernel.PerfEvent,
-clocks: ThreadClocks,
-delay_pool: DelayPool,
+probes: Probes,
+clocks: Clocks,
+delays: Delays,
 vma_ranges: VmaRanges,
 line_map: *const LineMap,
-io: std.Io,
 allocator: std.mem.Allocator,
 atomic_allocator: std.mem.Allocator,
-vma_base: std.atomic.Value(usize),
 failure: std.atomic.Value(ErrorInt),
 
 // Current experiment state, armed/disarmed by begin/endExperiment.
+experiment_running: std.atomic.Value(bool),
 target_site: std.atomic.Value(LineMap.Site),
+vma_base: std.atomic.Value(usize),
 delay_per_tick: std.atomic.Value(u16),
-experiment_start: Ticks,
 
-task_references: TaskReferences,
 state: safety.State(Lifecycle),
 loop_task: BoundToTask,
 address: safety.Pinned,
 
 const Lifecycle = enum { idle, attached, running };
+const Probes = platform.Probes(Speedup, .{
+    .sleep = onSleep,
+    .wake = onWake,
+    .fork = onFork,
+    .exit = onExit,
+    .sample = onSample,
+});
 const BoundToTask = safety.BoundTo(currentTask);
-const TaskReferences = safety.ConfigurableObligations(.{ .thread_safe = true }, .{});
 const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
 
 pub const Outcome = struct {
@@ -45,92 +48,52 @@ pub const Outcome = struct {
     injected_us: u32,
 };
 
-pub const Error = DelayPool.Error || error{NoSpace};
+pub const Error = Delays.Error || Clocks.Error;
 pub const AttachError = error{ TaskNotFound, MultiThreadedTarget } ||
     std.mem.Allocator.Error ||
     VmaRanges.SnapshotError ||
-    kernel.RegisterTraceError ||
-    kernel.PerfEvent.CreateKernelCounterError;
+    platform.AttachError;
 
 pub const sampler_frequency = 997; // Hz, ~1ms; not round to avoid harmonics with the scheduler
 
-const clocks_reserve = 1024;
 const call_site_scan_words = 64;
 const co_runner_window = 8;
 const co_runner_max_lag = 8;
-fn currentTask(_: *const anyopaque) *kernel.Task {
-    return kernel.Task.current();
+
+fn currentTask(_: *const anyopaque) *Task {
+    return Task.current();
 }
 
-pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) !Speedup {
+pub fn init(allocator: std.mem.Allocator, atomic_allocator: std.mem.Allocator) std.mem.Allocator.Error!Speedup {
     return .{
-        .profiled_pid = .init(0),
-        .sampler = null,
-        .clocks = try .init(allocator, clocks_reserve),
-        .delay_pool = .empty,
+        .probes = .detached,
+        .clocks = try .init(allocator, atomic_allocator),
+        .delays = .empty,
         .vma_ranges = .empty,
         .line_map = undefined,
-        .io = undefined,
         .allocator = allocator,
         .atomic_allocator = atomic_allocator,
-        .vma_base = .init(0),
         .failure = .init(0),
+        .experiment_running = .init(false),
         .target_site = .init(.none),
+        .vma_base = .init(0),
         .delay_per_tick = .init(0),
-        .experiment_start = 0,
 
-        .task_references = .none,
         .state = .init(.idle),
         .loop_task = .unbound,
         .address = .unbound,
     };
-}
-fn retainTask(this: *Speedup, task: *kernel.Task) void {
-    task.get();
-    this.task_references.incur();
-}
-
-fn releaseTask(this: *Speedup, task: *kernel.Task) void {
-    task.put();
-    this.task_references.discharge();
-}
-
-fn keyFromTask(task: *const kernel.Task) Key {
-    // task pointers are always aligned, so bit 0 is free for the map's collision flag.
-    assert(@intFromPtr(task) % 2 == 0);
-    return .{ .data = @intFromPtr(task) };
-}
-
-fn taskFromKey(key: Key) *kernel.Task {
-    return @ptrFromInt(key.withoutCollisionBit().data);
 }
 
 pub fn deinit(this: *Speedup) void {
     this.state.assertOneOf(&.{ .idle, .attached });
     this.address.assertUnchangedOrUnbound();
 
-    if (this.sampler) |s| {
-        kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
-        kernel.unregisterTraceSchedWaking(onSchedWaking, this);
-        kernel.unregisterTraceSchedProcessExit(onSchedProcessExit, this);
-        kernel.unregisterTraceTaskNewtask(onNewTask, this);
-        kernel.tracepoint.synchronizeUnregister();
+    this.probes.detach();
 
-        _ = s.releaseKernel();
-    }
-
-    this.delay_pool.deinit(this.allocator, this.atomic_allocator);
+    this.delays.deinit();
     this.vma_ranges.deinit(this.allocator);
-
-    var it = this.clocks.iterate();
-    defer it.finish();
-
-    while (it.next()) |pair|
-        this.releaseTask(taskFromKey(pair.key.raw));
-
-    this.task_references.assert(.eq, 0);
-
-    this.clocks.deinit(this.allocator, this.atomic_allocator);
+    this.clocks.deinit();
 
     this.* = undefined;
 }
@@ -143,187 +106,127 @@ pub fn profilePid(
     line_map: *const LineMap,
 ) AttachError!void {
     this.state.assertEql(.idle);
+    this.state.transition(.attached);
+    errdefer this.state.transition(.idle);
 
-    this.io = io;
     this.line_map = line_map;
-    try this.delay_pool.init(io, this.allocator);
+    try this.delays.init(io, this.allocator, this.atomic_allocator);
 
-    this.profiled_pid.store(pid, .monotonic);
-    const task: *kernel.Task = kernel.Task.fromTid(pid) orelse return AttachError.TaskNotFound;
-    this.task_references.incur();
+    const task = Task.fromTid(pid) orelse return AttachError.TaskNotFound;
 
-    // Only this task is seeded; the rest join via onNewTask, so tracking can
+    // Only this task is seeded; the rest join via onFork, so tracking can
     // be correct only if the target starts single-threaded.
     if (task.nrThreads() != 1) {
-        this.releaseTask(task);
+        task.put();
         return AttachError.MultiThreadedTarget;
     }
 
-    // Only the first key, the reserve always has room for it.
-    this.clocks.put(keyFromTask(task), 0) catch unreachable;
+    this.clocks.track(task);
 
     this.vma_ranges = try .snapshot(this.allocator, task, vma_name);
 
     this.address.bind();
     errdefer this.address.unbind();
 
-    errdefer kernel.tracepoint.synchronizeUnregister();
-
-    try kernel.registerTraceSchedSwitch(onSchedSwitch, this);
-    errdefer kernel.unregisterTraceSchedSwitch(onSchedSwitch, this);
-
-    try kernel.registerTraceSchedWaking(onSchedWaking, this);
-    errdefer kernel.unregisterTraceSchedWaking(onSchedWaking, this);
-
-    try kernel.registerTraceTaskNewtask(onNewTask, this);
-    errdefer kernel.unregisterTraceTaskNewtask(onNewTask, this);
-
-    try kernel.registerTraceSchedProcessExit(onSchedProcessExit, this);
-    errdefer kernel.unregisterTraceSchedProcessExit(onSchedProcessExit, this);
-
-    var sampler_attr = std.os.linux.perf_event_attr{
-        .type = .SOFTWARE,
-        .config = @backingInt(std.os.linux.PERF.COUNT.SW.TASK_CLOCK),
-        .sample_period_or_freq = sampler_frequency,
-        .flags = .{
-            .freq = true,
-            .disabled = true,
-            .inherit = true,
-            .inherit_thread = true,
-            .exclude_guest = true,
-            .exclude_hv = true,
-            .exclude_idle = true,
-        },
-    };
-    this.sampler = try kernel.PerfEvent.createKernelCounter(&sampler_attr, -1, task, onSamplerTick, this);
-
-    this.state.transition(.attached);
+    try this.probes.attach(this, task, sampler_frequency);
 }
 
 pub fn beginExperiment(this: *Speedup, speedup_percent: u8) void {
     this.state.assertEql(.attached);
     this.loop_task.bindOrAssertUnchanged();
+    this.state.transition(.running);
 
     // The speedup is delivered as a delay charged to everyone else.
     const sampler_period = std.time.us_per_s / sampler_frequency;
     const delay_per_tick: u16 = @intCast((@as(u32, speedup_percent) * sampler_period) / 100);
 
-    this.experiment_start = this.clocks.master.load(.monotonic);
+    this.clocks.beginEpoch();
     this.delay_per_tick.store(delay_per_tick, .monotonic);
-    this.target_site.store(.none, .seq_cst);
-    this.vma_base.store(0, .seq_cst);
-    this.sampler.?.enable();
-
-    this.state.transition(.running);
+    this.target_site.store(.none, .monotonic);
+    this.vma_base.store(0, .monotonic);
+    this.experiment_running.store(true, .release);
 }
 
 pub fn endExperiment(this: *Speedup) Error!?Outcome {
     this.state.assertEql(.running);
     this.loop_task.assertUnchanged();
-
-    const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    this.sampler.?.disable();
-    this.delayEveryoneLagging();
-    this.delay_per_tick.store(0, .monotonic);
-
     this.state.transition(.attached);
+
+    this.experiment_running.store(false, .monotonic);
 
     const failure = this.failure.load(.monotonic);
     if (failure != 0) return @errorCast(@errorFromInt(failure));
 
-    const target = this.target_site.load(.acquire);
+    const target = this.target_site.load(.monotonic);
     if (target == LineMap.Site.none) return null;
 
-    const ticks = this.clocks.master.load(.monotonic) - this.experiment_start;
+    const settled_at = try this.settleAll();
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+
     return .{
         .site = target,
-        .injected_us = ticks * delay_per_tick,
+        .injected_us = @as(u32, settled_at.ticks) * delay_per_tick,
     };
 }
 
-fn delayEveryoneLagging(this: *Speedup) void {
-    {
-        // The map walk and per-thread delay application must not be preempted,
-        // since we hold the gate closed, if a tracepoint callback gets scheduled
-        // will try an increment and spinwait until we don't open the gate, but
-        // if we get preempted and every core starts spinwaiting we will never get
-        // the cpu and open the gate resulting in a deadlock
-        kernel.preempt.disable();
-        defer kernel.preempt.enable();
-
-        var it = this.clocks.iterate();
-        defer it.finish();
-
-        // Read after the gate closed, a tick still in flight would push a clock
-        // past it and underflow the lag
-        const master = this.clocks.master.load(.monotonic);
-
-        while (it.next()) |pair| {
-            const lag = master - pair.value.raw.ticks;
-            pair.value.raw = .atValue(master);
-
-            this.settleDelay(pair.key.raw, lag);
-        }
-    }
-
-    // Signalling from inside the gate deadlocks against a spinwaiting tracepoint
-    this.delay_pool.flushPending() catch |err| this.fail(err);
+fn isExperimentRunning(this: *const Speedup) bool {
+    return this.experiment_running.load(.acquire) and !this.hasFailed();
 }
 
-fn applyDelay(this: *Speedup, key: Key, lag: Ticks) void {
-    const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    if (delay_per_tick == 0 or lag == 0) return;
-
-    const task = taskFromKey(key);
-    if (task.isDead()) return;
-
-    this.delay_pool.delay(this.allocator, this.atomic_allocator, task, @as(usize, lag) * delay_per_tick) catch |err| switch (err) {
-        // Past exit_task_work the work can never run; the task is off any critical path.
-        error.TooLateShuttingDown => {},
-        else => |e| this.fail(e),
-    };
+fn hasFailed(this: *const Speedup) bool {
+    return this.failure.load(.monotonic) != 0;
 }
 
-fn settleDelay(this: *Speedup, key: Key, lag: Ticks) void {
-    const task = taskFromKey(key);
-    if (task.isRunning()) return this.applyDelay(key, lag);
+fn applyDelay(this: *Speedup, task: *Task, lag: Ticks) void {
+    if (!this.isExperimentRunning()) return;
 
     const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    if (delay_per_tick == 0 or lag == 0 or task.isDead()) return;
-
-    this.delay_pool.pendDelay(this.allocator, this.atomic_allocator, task, @as(usize, lag) * delay_per_tick) catch |err| this.fail(err);
+    const time_out: usize = lag * delay_per_tick;
+    this.delays.delay(task, time_out) catch |err| this.fail(err);
 }
 
-fn onSamplerTick(event: *kernel.PerfEvent, _: *anyopaque, regs: *kernel.PtRegs) callconv(.c) void {
-    const this: *Speedup = @ptrCast(@alignCast(event.overflowHandlerContext() orelse return));
+fn onSample(this: *Speedup, sample: platform.Sample) void {
+    if (!this.isExperimentRunning()) return;
 
-    const is_target = if (this.attributedIp(regs)) |ip| this.isTarget(ip) else false;
+    const hit = if (this.attributedIp(sample)) |ip| this.isTarget(ip) else false;
 
     if (this.delay_per_tick.load(.monotonic) == 0) return;
 
-    const key = keyFromTask(kernel.Task.current());
+    const task = Task.current();
 
-    // .tick() errors on a locked map; we discard the error (and the tick itself)
-    // since the causal attribution algorithm is robust against missed samples.
-    if (is_target) this.clocks.tick(key) catch {};
+    const lag = lag: {
+        // A locked map drops the sample, since the causal attribution
+        // algorithm is robust against missed samples.
+        const guard = this.clocks.tryTakeGuard() orelse return;
+        defer guard.release();
 
-    if (kernel.userMode(regs))
-        this.applyDelay(key, this.clocks.settleSample(key, is_target, co_runner_window, co_runner_max_lag) orelse return);
+        const slot = guard.slot(task) orelse return;
+
+        if (hit) {
+            const epoch = guard.master().epoch;
+            if (slot.tick(epoch)) |ticks| guard.advanceMaster(epoch, ticks);
+        }
+
+        const tolerance: Ticks = if (slot.countSinceHit(hit) <= co_runner_window) co_runner_max_lag else 0;
+        break :lag slot.catchUp(guard.master(), tolerance) orelse return;
+    };
+
+    this.applyDelay(task, lag);
 }
 
-fn attributedIp(this: *Speedup, regs: *kernel.PtRegs) ?usize {
-    const ip = kernel.currentUserSpaceIp(regs);
+fn attributedIp(this: *Speedup, sample: platform.Sample) ?usize {
+    const ip = sample.userIp();
     if (this.vma_ranges.findBase(ip) != null) return ip;
 
-    return this.callSiteOnStack(kernel.userRegs(regs).sp);
+    return this.callSiteOnStack(sample);
 }
 
-fn callSiteOnStack(this: *Speedup, sp: usize) ?usize {
+fn callSiteOnStack(this: *Speedup, sample: platform.Sample) ?usize {
     var words: [call_site_scan_words]usize = undefined;
-    if (kernel.copyFromUserNofault(std.mem.asBytes(&words), sp) != 0) return null;
+    sample.readUserStack(&words) catch return null;
 
     return for (words) |word| {
-        if (this.vma_ranges.findBase(word) != null and kernel.followsCall(word))
+        if (this.vma_ranges.findBase(word) != null and platform.followsCall(word))
             break word - 1;
     } else null;
 }
@@ -344,113 +247,92 @@ fn captureProfilingTarget(this: *Speedup, ip: usize) bool {
     if (site == LineMap.Site.none) return false;
 
     const we_claimed_first = this.vma_base.cmpxchgStrong(0, vma_base, .monotonic, .monotonic) == null;
-
     if (we_claimed_first) {
         @branchHint(.likely);
         this.target_site.store(site, .release);
     }
-
     return we_claimed_first;
 }
 
-fn onNewTask(data: ?*anyopaque, child: *kernel.Task, clone_flags: c_ulong) callconv(.c) void {
-    const this: *Speedup = @ptrCast(@alignCast(data.?));
-    const parent = kernel.Task.current();
+fn onFork(this: *Speedup, parent: *Task, child: *Task) void {
+    if (this.hasFailed()) return;
 
-    const profiled_pid = this.profiled_pid.load(.monotonic);
-    if (parent.tgidNr() != profiled_pid) return;
-    if (clone_flags & std.os.linux.CLONE.THREAD == 0) return;
-
-    assert(child.tgidNr() == profiled_pid);
-
-    const parent_key = keyFromTask(parent);
-    const child_key = keyFromTask(child);
-
-    this.retainTask(child);
-    const lag = this.fork(parent_key, child_key) catch |err| {
-        this.releaseTask(child);
-        return this.fail(err);
-    };
-
-    this.applyDelay(parent_key, lag);
-    this.applyDelay(child_key, lag);
-}
-
-fn fork(this: *Speedup, parent: Key, child: Key) !Ticks {
-    kernel.preempt.disable();
-    defer kernel.preempt.enable();
-
-    return this.clocks.fork(parent, child) catch blk: {
-        try this.clocks.grow(this.allocator, this.atomic_allocator);
-        break :blk try this.clocks.fork(parent, child);
-    };
-}
-
-fn onSchedSwitch(data: ?*anyopaque, _: bool, prev: *kernel.Task, _: *kernel.Task) callconv(.c) void {
-    const this: *Speedup = @ptrCast(@alignCast(data.?));
-    const profiled_pid = this.profiled_pid.load(.monotonic);
-
-    if (prev.tgidNr() == profiled_pid and !prev.isRunning() and !prev.isDead())
-        this.clocks.prepareForSleep(keyFromTask(prev));
-}
-
-fn onSchedWaking(data: ?*anyopaque, wakee: *kernel.Task) callconv(.c) void {
-    const this: *Speedup = @ptrCast(@alignCast(data.?));
-    const profiled_pid = this.profiled_pid.load(.monotonic);
-
-    if (wakee.tgidNr() != profiled_pid or wakee.isRunning() or wakee.isDead()) return;
-
-    const wakee_key = keyFromTask(wakee);
-
-    if (kernel.inTask()) {
-        const waker = kernel.Task.current();
-        if (waker.tgidNr() == profiled_pid) {
-            const waker_key = keyFromTask(waker);
-            const waker_lag, const wakee_lag = this.clocks.wake(waker_key, wakee_key) orelse return;
-
-            this.applyDelay(waker_key, waker_lag);
-            return this.applyDelay(wakee_key, wakee_lag);
-        }
-    }
-
-    this.applyDelay(wakee_key, this.clocks.catchUp(wakee_key) orelse return);
-}
-
-fn onSchedProcessExit(data: ?*anyopaque, task: *kernel.Task, _: bool) callconv(.c) void {
-    const this: *Speedup = @ptrCast(@alignCast(data.?));
-
-    if (task.tgidNr() != this.profiled_pid.load(.monotonic)) return;
-
-    assert(task.isDead());
-
-    const key = keyFromTask(task);
-    const payment = this.exitPayment(key);
-
-    {
-        kernel.preempt.disable();
-        defer kernel.preempt.enable();
-
-        const removed = this.clocks.remove(key);
-        assert(removed);
-    }
-
-    this.releaseTask(task);
-
-    if (payment != 0) this.io.sleep(.fromMicroseconds(@intCast(payment)), .awake) catch unreachable;
-}
-
-fn exitPayment(this: *Speedup, key: Key) usize {
-    const delay_per_tick = this.delay_per_tick.load(.monotonic);
-    if (delay_per_tick == 0 or !kernel.preemptible()) return 0;
+    this.clocks.insert(child) catch |err| return this.fail(err);
 
     const lag = lag: {
-        kernel.preempt.disable();
-        defer kernel.preempt.enable();
+        const guard = this.clocks.takeGuard();
+        defer guard.release();
 
-        break :lag this.clocks.catchUp(key) orelse return 0;
+        break :lag guard.slot(parent).?.catchUp(guard.master(), 0) orelse 0;
     };
 
-    return @as(usize, lag) * delay_per_tick;
+    this.applyDelay(parent, lag);
+    this.applyDelay(child, lag);
+}
+
+fn onSleep(this: *Speedup, task: *Task) void {
+    if (!this.isExperimentRunning()) return;
+
+    const guard = this.clocks.takeGuard();
+    defer guard.release();
+
+    guard.slot(task).?.sleep(guard.master());
+}
+
+fn onWake(this: *Speedup, wakee: *Task, waker: ?*Task) void {
+    if (!this.isExperimentRunning()) return;
+
+    const known_waker = waker orelse return this.applyDelay(wakee, this.catchUp(wakee) orelse return);
+
+    const waker_lag, const wakee_lag = lags: {
+        const guard = this.clocks.tryTakeGuard() orelse return;
+        defer guard.release();
+
+        const master = guard.master();
+        const waker_slot = guard.slot(known_waker);
+        const waker_lag = if (waker_slot) |slot| slot.lag(master) orelse return else 0;
+        const wakee_lag = guard.slot(wakee).?.wake(master, waker_lag) orelse return;
+
+        if (waker_slot) |slot| _ = slot.catchUp(master, 0);
+
+        break :lags .{ waker_lag, wakee_lag };
+    };
+
+    this.applyDelay(known_waker, waker_lag);
+    this.applyDelay(wakee, wakee_lag);
+}
+
+fn onExit(this: *Speedup, task: *Task) void {
+    assert(task.isDead());
+    if (this.hasFailed()) return;
+
+    const lag = this.catchUp(task);
+    this.clocks.remove(task);
+    if (!this.isExperimentRunning()) return;
+
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+    this.delays.delayExiting(task, @as(usize, lag orelse 0) * delay_per_tick);
+}
+
+fn catchUp(this: *Speedup, task: *Task) ?Ticks {
+    const guard = this.clocks.tryTakeGuard() orelse return null;
+    defer guard.release();
+
+    const slot = guard.slot(task) orelse return null;
+    return slot.catchUp(guard.master(), 0);
+}
+
+fn settleAll(this: *Speedup) Delays.Error!Clocks.Master {
+    const settled_at = try this.clocks.forEachExclusive(this, Delays.Error, settle);
+    try this.delays.flush();
+    return settled_at;
+}
+
+fn settle(this: *Speedup, task: *Task, slot: *Clocks.Slot, master: Clocks.Master) Delays.Error!void {
+    const lag = if (Clocks.iteration_freezes) slot.settle(master) else slot.catchUp(master, 0) orelse return;
+
+    const delay_per_tick = this.delay_per_tick.load(.monotonic);
+    try this.delays.pend(task, @as(usize, lag) * delay_per_tick);
 }
 
 fn fail(this: *Speedup, err: Error) void {

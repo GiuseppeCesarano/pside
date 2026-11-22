@@ -48,7 +48,7 @@ pub inline fn decrement(this: *RefGate) void {
 
 pub inline fn close(this: *RefGate) void {
     while (this.references.load(.monotonic) & closed_bit != 0 or
-        this.references.fetchOr(closed_bit, .acquire) & closed_bit != 0)
+        this.references.fetchOr(closed_bit, .monotonic) & closed_bit != 0)
     {
         @branchHint(.cold);
         std.atomic.spinLoopHint();
@@ -85,7 +85,7 @@ test "RefGate: cold path (waiting on closed gate)" {
         entered: std.atomic.Value(bool) = .init(false),
         fn worker(ctx: *@This()) void {
             ctx.gate.increment();
-            ctx.entered.store(true, .release);
+            ctx.entered.store(true, .monotonic);
             ctx.gate.decrement();
         }
     };
@@ -94,10 +94,10 @@ test "RefGate: cold path (waiting on closed gate)" {
     const thread: std.Thread = try .spawn(.{}, Context.worker, .{&ctx});
 
     try testing.io.sleep(.fromMilliseconds(10), .real);
-    try testing.expectEqual(false, ctx.entered.load(.acquire));
+    try testing.expectEqual(false, ctx.entered.load(.monotonic));
 
     gate.open();
     thread.join();
 
-    try testing.expectEqual(true, ctx.entered.load(.acquire));
+    try testing.expectEqual(true, ctx.entered.load(.monotonic));
 }

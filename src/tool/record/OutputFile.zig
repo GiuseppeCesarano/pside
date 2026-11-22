@@ -1,7 +1,9 @@
 const std = @import("std");
+
 const serialization = @import("serialization");
 const payload = serialization.payload;
 const UserIds = @import("UserIds");
+
 const OutputFile = @This();
 
 file: std.Io.File,

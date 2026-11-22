@@ -1,5 +1,7 @@
 const std = @import("std");
 const linux = std.os.linux;
+const fatal = std.process.fatal;
+const Dwarf = std.debug.Dwarf;
 
 const cli = @import("cli");
 const communications = @import("communications");
@@ -8,18 +10,15 @@ const safety = @import("safety");
 const UserIds = @import("UserIds");
 
 const elf_section_parser = @import("elf_section_parser.zig");
+const ParseError = elf_section_parser.ParseError;
 const KernelControlDevice = @import("KernelControlDevice.zig");
+const ControlError = KernelControlDevice.ControlError;
+const OpenControlError = KernelControlDevice.OpenControlError;
 const OutputFile = @import("OutputFile.zig");
+const OpenError = OutputFile.OpenError;
 const Program = @import("Program.zig");
 const Symbolizer = @import("Symbolizer.zig");
 const TracedProcess = @import("TracedProcess.zig");
-
-const fatal = std.process.fatal;
-const Dwarf = std.debug.Dwarf;
-const ControlError = KernelControlDevice.ControlError;
-const OpenControlError = KernelControlDevice.OpenControlError;
-const OpenError = OutputFile.OpenError;
-const ParseError = elf_section_parser.ParseError;
 const SpawnError = TracedProcess.SpawnError;
 
 const Flags = struct {

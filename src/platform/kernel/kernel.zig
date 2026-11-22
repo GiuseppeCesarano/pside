@@ -65,6 +65,14 @@ pub const PtRegs = switch (arch) {
                 insnlen: u4,
             },
         },
+
+        pub fn instructionPointer(this: *const @This()) usize {
+            return this.ip;
+        }
+
+        pub fn userStackPointer(this: *const @This()) usize {
+            return this.sp;
+        }
     },
 
     else => @compileError("Unsupported arch"),
@@ -674,54 +682,13 @@ pub fn copyFromUserNofault(dst: []u8, src: usize) c_long {
 }
 
 extern fn c_current_user_regs() *PtRegs;
-pub fn userRegs(sample_regs: *PtRegs) *const PtRegs {
-    return if (userMode(sample_regs)) sample_regs else c_current_user_regs();
+pub fn currentUserRegs() *PtRegs {
+    return c_current_user_regs();
 }
 
 extern fn c_current_user_ip() usize;
-pub fn currentUserSpaceIp(sample_regs: *PtRegs) usize {
-    const syscall_instruction = switch (@import("builtin").cpu.arch) {
-        .x86_64 => [_]u8{ 0x0f, 0x05 },
-        else => @compileError("TODO: support other archs"),
-    };
-
-    if (userMode(sample_regs)) return sample_regs.ip;
-
-    const ip = c_current_user_ip();
-    const call_site = ip -% syscall_instruction.len;
-    var opcode: [syscall_instruction.len]u8 = undefined;
-
-    return if (copyFromUserNofault(&opcode, call_site) != 0 or
-        !std.mem.eql(u8, &opcode, &syscall_instruction))
-        ip
-    else
-        call_site;
-}
-
-pub fn followsCall(return_address: usize) bool {
-    const call = switch (arch) {
-        .x86_64 => struct {
-            const direct_opcode = 0xe8;
-            const direct_len = 5;
-            const indirect_opcode = 0xff;
-            const modrm_reg_mask = 0x38;
-            const modrm_reg_call = 2 << 3;
-            const indirect_lens = [_]usize{ 2, 3, 6 };
-            const max_len = 6;
-        },
-        else => @compileError("TODO: support other archs"),
-    };
-
-    var code: [call.max_len]u8 = undefined;
-    if (copyFromUserNofault(&code, return_address - code.len) != 0) return false;
-
-    if (code[code.len - call.direct_len] == call.direct_opcode) return true;
-    inline for (call.indirect_lens) |len| {
-        const start = code.len - len;
-        if (code[start] == call.indirect_opcode and
-            code[start + 1] & call.modrm_reg_mask == call.modrm_reg_call) return true;
-    }
-    return false;
+pub fn currentUserIp() usize {
+    return c_current_user_ip();
 }
 
 pub const preempt = struct {

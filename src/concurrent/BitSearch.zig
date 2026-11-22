@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+
 const BitSearch = @This();
 
 words: []AtomicWord,
@@ -207,8 +208,8 @@ test "BitSearch: concurrent takeFirstFree never hands out an index twice" {
         taken: [takes_per_thread]usize = undefined,
 
         fn run(ctx: *@This()) void {
-            _ = ctx.ready.fetchAdd(1, .release);
-            while (ctx.ready.load(.acquire) < thread_count) std.atomic.spinLoopHint();
+            _ = ctx.ready.fetchAdd(1, .monotonic);
+            while (ctx.ready.load(.monotonic) < thread_count) std.atomic.spinLoopHint();
 
             // Never null: only half the capacity is ever claimed.
             for (&ctx.taken) |*index| index.* = ctx.search.takeFirstFree().?;

@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const WriteError = std.Io.Writer.Error;
 
 const LineMap = @import("LineMap");
 const safety = @import("safety");
@@ -17,7 +18,6 @@ address: safety.Pinned,
 
 pub const StartError = std.Io.File.LengthError || std.Io.File.SeekError || std.Io.ConcurrentError;
 pub const Error = std.Io.QueueClosedError || std.Io.Cancelable;
-pub const WriteError = std.Io.Writer.Error;
 
 const records_per_frame = 64;
 const records_header: payload.records.Header = .{

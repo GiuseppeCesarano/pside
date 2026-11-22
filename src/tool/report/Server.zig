@@ -2,8 +2,11 @@ const std = @import("std");
 const http = std.http;
 const net = std.Io.net;
 const Io = std.Io;
+
 const safety = @import("safety");
+
 const Profile = @import("Profile.zig");
+
 const Server = @This();
 
 server: net.Server,
@@ -76,7 +79,7 @@ pub fn run(this: *Server, allocator: std.mem.Allocator, io: Io) !void {
     while (!this.should_shut_down.load(.monotonic)) {
         var stream = try this.server.accept(io);
 
-        if (this.should_shut_down.load(.acquire)) {
+        if (this.should_shut_down.load(.monotonic)) {
             stream.close(io);
             break;
         }

@@ -1,14 +1,13 @@
 const std = @import("std");
 
 const communications = @import("communications");
-const kernel = @import("kernel");
-const Engine = @import("Engine");
-const LineMap = @import("LineMap");
-
 const name = communications.name;
+const Engine = @import("Engine");
+const kernel = @import("kernel");
 const allocator = kernel.heap.allocator;
 const atomic_allocator = kernel.heap.atomic_allocator;
 const large_allocator = kernel.heap.large_allocator;
+const LineMap = @import("LineMap");
 
 export const description linksection(".modinfo") = "description=Pside causal profiler's kernel module".*;
 export const license linksection(".modinfo") = "license=GPL v2".*;

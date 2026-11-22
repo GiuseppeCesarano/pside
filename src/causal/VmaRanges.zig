@@ -1,34 +1,16 @@
 const std = @import("std");
 
-const kernel = @import("kernel");
-pub const Range = kernel.VmaRange;
+const platform = @import("platform");
+pub const Range = platform.VmaRange;
+pub const SnapshotError = platform.VmaSnapshotError;
 
 const VmaRanges = @This();
 entries: []Range,
 
 pub const empty: VmaRanges = .{ .entries = &.{} };
-pub const SnapshotError = error{NoMatchingVma} || std.mem.Allocator.Error;
 
-pub fn snapshot(allocator: std.mem.Allocator, task: *kernel.Task, filter: [:0]const u8) SnapshotError!VmaRanges {
-    const filter_z: ?[*:0]const u8 = if (filter.len > 0) filter.ptr else null;
-
-    var capacity: usize = 32;
-    while (true) {
-        const vma_ranges = try allocator.alloc(Range, capacity);
-        errdefer allocator.free(vma_ranges);
-
-        const count = task.snapshotExecutableVmas(filter_z, vma_ranges);
-
-        if (count == 0) return SnapshotError.NoMatchingVma;
-
-        if (count <= capacity) {
-            std.debug.assert(allocator.resize(vma_ranges, count));
-            return .{ .entries = vma_ranges[0..count] };
-        }
-
-        allocator.free(vma_ranges);
-        capacity = count;
-    }
+pub fn snapshot(allocator: std.mem.Allocator, task: *platform.Task, filter: [:0]const u8) SnapshotError!VmaRanges {
+    return .{ .entries = try platform.executableVmas(allocator, task, filter) };
 }
 
 pub fn deinit(this: VmaRanges, allocator: std.mem.Allocator) void {

@@ -1,8 +1,11 @@
 const std = @import("std");
 const linux = std.os.linux;
+
 const safety = @import("safety");
 const UserIds = @import("UserIds");
+
 const Program = @import("Program.zig");
+
 const TracedProcess = @This();
 const arch_specific = switch (@import("builtin").cpu.arch) {
     .x86_64 => @import("traced/x86_64.zig"),
@@ -51,7 +54,7 @@ pub const PatchError = error{ ChildDied, ChildNotTraceable, CouldNotMapInChild, 
 var global_traced_pid: std.atomic.Value(linux.pid_t) = .init(0);
 
 pub fn killTraced() void {
-    const pid = global_traced_pid.swap(0, .acq_rel);
+    const pid = global_traced_pid.swap(0, .monotonic);
     if (pid != 0) _ = linux.kill(pid, .KILL);
 }
 
@@ -86,7 +89,7 @@ fn spawnTraced(tracee_exe: Program, io: std.Io) !TracedProcess {
 
     if (child_pid == 0) childStart(tracee_exe) catch std.process.exit(1);
 
-    global_traced_pid.store(child_pid, .release);
+    global_traced_pid.store(child_pid, .monotonic);
 
     try ptrace.waitFor(child_pid, .stop);
 
@@ -185,7 +188,7 @@ pub fn wait(this: *TracedProcess) WaitError!void {
     var status: i32 = undefined;
     const wait_rc = linux.waitpid(this.pid, &status, 0);
 
-    global_traced_pid.store(0, .release);
+    global_traced_pid.store(0, .monotonic);
 
     if (linux.errno(wait_rc) != .SUCCESS) return WaitError.WaitFailed;
 

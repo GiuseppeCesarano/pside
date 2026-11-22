@@ -80,7 +80,7 @@ pub fn deinit(this: *DelayPool, allocator: Allocator, atomic_allocator: Allocato
     var chunk: ?*Chunk = this.chunks;
 
     while (chunk) |c| {
-        chunk = c.next.load(.acquire);
+        chunk = c.next.load(.monotonic);
         (if (c.atomically_allocated) atomic_allocator else allocator).destroy(c);
     }
 
@@ -149,7 +149,7 @@ fn reserve(this: *DelayPool, allocator: Allocator, atomic_allocator: Allocator, 
 
     task.get();
     slot.task = task;
-    slot.time.store(delay_time, .release);
+    slot.time.store(delay_time, .monotonic);
 
     return slot;
 }
@@ -247,7 +247,7 @@ fn releaseUser(this: *DelayPool) void {
 
 fn executeDelay(work: *kernel.CallbackHead) callconv(.c) void {
     const slot: *DelayWork = @fieldParentPtr("work", work);
-    const delay_time = slot.time.load(.acquire);
+    const delay_time = slot.time.load(.monotonic);
     const this: *DelayPool = slot.pool;
     const task = slot.task;
 

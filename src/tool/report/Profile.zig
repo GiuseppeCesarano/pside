@@ -1,9 +1,12 @@
 const std = @import("std");
+
 const serialization = @import("serialization");
 const payload = serialization.payload;
 const speedup_levels_len = serialization.speedup_levels_len;
 const speedup_step_per_level = serialization.speedup_step_per_level;
+
 const Graph = @import("Graph.zig");
+
 const Profile = @This();
 
 vmas: []Vma,

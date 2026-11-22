@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const KernelHeaders = @import("build/KernelHeaders.zig");
 
 pub fn build(b: *std.Build) !void {
@@ -55,11 +56,22 @@ pub fn build(b: *std.Build) !void {
         .imports = &.{.{ .name = "safety", .module = safety_mod }},
     });
 
-    const delay_pool_mod = b.addModule("DelayPool", .{
-        .root_source_file = b.path("src/platform/kernel/DelayPool.zig"),
+    const clock_types_mod = b.addModule("clock_types", .{
+        .root_source_file = b.path("src/platform/clock_types.zig"),
+    });
+
+    const arch_mod = b.addModule("arch", .{
+        .root_source_file = b.path("src/platform/arch.zig"),
+    });
+
+    const platform_mod = b.addModule("platform", .{
+        .root_source_file = b.path("src/platform/kernel/platform.zig"),
         .imports = &.{
+            .{ .name = "arch", .module = arch_mod },
+            .{ .name = "clock_types", .module = clock_types_mod },
             .{ .name = "kernel", .module = bindings_mod },
             .{ .name = "BitSearch", .module = bit_search_mod },
+            .{ .name = "RefGate", .module = ref_gate_mod },
             .{ .name = "safety", .module = safety_mod },
         },
     });
@@ -67,10 +79,7 @@ pub fn build(b: *std.Build) !void {
     const engine_mod = b.addModule("Engine", .{
         .root_source_file = b.path("src/causal/Engine.zig"),
         .imports = &.{
-            .{ .name = "kernel", .module = bindings_mod },
-            .{ .name = "DelayPool", .module = delay_pool_mod },
-            .{ .name = "RefGate", .module = ref_gate_mod },
-            .{ .name = "BitSearch", .module = bit_search_mod },
+            .{ .name = "platform", .module = platform_mod },
             .{ .name = "safety", .module = safety_mod },
             .{ .name = "serialization", .module = serialization_mod },
             .{ .name = "LineMap", .module = line_map_mod },
@@ -199,7 +208,9 @@ pub fn build(b: *std.Build) !void {
     }{
         .{ .name = "concurrent_refgate", .path = "src/concurrent/RefGate.zig", .sanitize_thread = true },
         .{ .name = "concurrent_bitsearch", .path = "src/concurrent/BitSearch.zig", .sanitize_thread = true },
-        .{ .name = "causal_threadclocks", .path = "src/causal/ThreadClocks.zig", .sanitize_thread = true, .imports = &.{
+        .{ .name = "platform_kernel_clocks", .path = "src/platform/kernel/Clocks.zig", .sanitize_thread = true, .imports = &.{
+            .{ .name = "clock_types", .module = clock_types_mod },
+            .{ .name = "kernel", .module = b.createModule(.{ .root_source_file = b.path("src/platform/kernel/kernel_stub.zig") }) },
             .{ .name = "RefGate", .module = ref_gate_mod },
             .{ .name = "BitSearch", .module = bit_search_mod },
             .{ .name = "safety", .module = safety_mod },
@@ -207,6 +218,8 @@ pub fn build(b: *std.Build) !void {
         .{ .name = "common_safety", .path = "src/common/safety.zig", .sanitize_thread = true },
         .{ .name = "common_serialization", .path = "src/common/serialization.zig" },
         .{ .name = "traced_x86_64", .path = "src/tool/record/traced/x86_64.zig" },
+        .{ .name = "platform_clock_types", .path = "src/platform/clock_types.zig" },
+        .{ .name = "platform_arch_x86_64", .path = "src/platform/arch/x86_64.zig" },
         .{ .name = "pside_include", .path = "include/pside.zig", .use_llvm = true },
     };
     for (standalone_tests) |spec| {
@@ -234,7 +247,7 @@ fn kernelTarget(b: *std.Build, target: std.Build.ResolvedTarget, kernel_headers:
                 .usable => |headers| headers.zigFeatures(),
                 .unusable => KernelHeaders.base_features,
             },
-            .cpu_features_sub = std.Target.x86.featureSet(&.{ .x87, .mmx, .sse, .sse2, .avx, .avx2 }),
+            .cpu_features_sub = std.Target.x86.featureSet(&.{ .@"387", .mmx, .sse, .sse2, .avx, .avx2 }),
         },
         else => @panic("Correct feature flags unimplemented for target arch..."),
     });
